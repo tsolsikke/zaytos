@@ -696,7 +696,7 @@ pub unsafe fn run_timer_loop(
 
     // **PIT が 1 本も刻まなかったか**（HW-c。`ADR-0068`）。**較正の基準で決まる。**
     // **ICW2 の事後証明が取れるかが、これで変わる。**
-    let mut pit_never_ticked = false;
+    let mut boot_timer_never_ticked = false;
 
     // === S2-c: Local APIC タイマの較正 ===
     //
@@ -758,7 +758,7 @@ pub unsafe fn run_timer_loop(
         // **PIT が刻まなかった回は、ICW2 の事後証明が取れない**（HW-c。`ADR-0068`）——
         // **PIC の割り込みが 1 本も届かないので、`first_pic_vector` は `None` のままである。**
         // **較正の基準を見て決める**（`None` を一色に扱うと、ICW2 の誤りと PIT の不在が混ざる）。
-        pit_never_ticked = matches!(
+        boot_timer_never_ticked = matches!(
             calibration.as_ref().map(|value| value.reference()),
             Some(crate::machine::pc::apic::CalibrationReference::PmTimer)
         );
@@ -1118,7 +1118,7 @@ pub unsafe fn run_timer_loop(
     // **1 本目は `0` が出る。** ループへ入る時点で既に閾値を越えているので、
     // 最初のハートビートは基準と同じティックで出る（差が 0 なので
     // `checked_div` が `None` を返す）。**値が乗るのは 2 本目からである。**
-    let mut last_heartbeat_tsc = cpu::read_timestamp_counter();
+    let mut last_heartbeat_cycles = cpu::read_timestamp_counter();
     let mut last_heartbeat_ticks = idt::timer_ticks();
     // 出したハートビートの本数（S11-11）。**シェルへ渡すタイミングを決める。**
     let mut heartbeats = 0u64;
@@ -1166,7 +1166,7 @@ pub unsafe fn run_timer_loop(
                          proof that ICW2 was written correctly (it cannot be read back)"
                     ),
                 );
-            } else if first.none_arrived() && pit_never_ticked {
+            } else if first.none_arrived() && boot_timer_never_ticked {
                 // **PIT が刻まない機械では、PIC の割り込みが 1 本も届かない**（HW-c）。
                 // **ICW2 の事後証明は取れない。** **止めない**——**言えないことを言えないと
                 // 書く**（`sti` 前の項目 4 と同じ立ち位置）。
@@ -1226,13 +1226,13 @@ pub unsafe fn run_timer_loop(
             if ticks >= next_heartbeat {
                 next_heartbeat = ticks + HEARTBEAT_TICKS;
                 heartbeats += 1;
-                let now_tsc = cpu::read_timestamp_counter();
+                let now_cycles = cpu::read_timestamp_counter();
                 let elapsed_ticks = ticks.wrapping_sub(last_heartbeat_ticks);
-                let tsc_per_tick = now_tsc
-                    .wrapping_sub(last_heartbeat_tsc)
+                let cycles_per_tick = now_cycles
+                    .wrapping_sub(last_heartbeat_cycles)
                     .checked_div(elapsed_ticks)
                     .unwrap_or(0);
-                last_heartbeat_tsc = now_tsc;
+                last_heartbeat_cycles = now_cycles;
                 last_heartbeat_ticks = ticks;
                 // **画面へは出さない。シリアルへだけ出す。**
                 //
@@ -1258,7 +1258,7 @@ pub unsafe fn run_timer_loop(
                     // S4-a で足す `cpu=` は、その後ろに置く。
                     // AP 側は別の行（`smp: ap heartbeat: cpu=`）なので、この数え上げに混ざらない。
                     format_args!(
-                        "heartbeat: ticks={ticks} ({} s), tsc_per_tick={tsc_per_tick}, cpu={}, ap_ticks={}, ticks_total={}, \
+                        "heartbeat: ticks={ticks} ({} s), tsc_per_tick={cycles_per_tick}, cpu={}, ap_ticks={}, ticks_total={}, \
                      lapic_timer_deliveries={}, timer_accounting_balanced={}, \
                      max kernel entry depth={}, ap_current={} ap_sched_passes={}, \
                      ipi_sent={} ipi_recv_cpu1={}, tlb_gen={} flush_cpu1={}, \
@@ -1404,7 +1404,7 @@ pub unsafe fn run_timer_loop(
         // もう一方のコアが IF=0 で待ち続け、タイムアウトして原因を出す。
         // 「静かに止まる」を「うるさく止まる」へ変えた形の実証である。
         #[cfg(feature = "bkl-hold-across-hlt-test")]
-        let _bkl_held_across_hlt = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
+        let _bkl_held_across_halt = crate::bkl::acquire(crate::bkl::KernelEntry::SteadyLoop);
 
         // 次のティックまで眠る。`sti` は既に効いているが、
         // `enable_interrupts_and_wait` を使うことで `sti; hlt` の隣接が

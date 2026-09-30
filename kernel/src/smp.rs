@@ -322,14 +322,14 @@ pub unsafe fn wake_application_processors(
 
     // bootstrap processor を除いた AP を、MADT の並び順で起動する。
     let mut slot = 1usize;
-    for apic_id in mmio.local_apic_ids() {
-        if Some(apic_id) == bsp {
+    for hardware_id in mmio.local_apic_ids() {
+        if Some(hardware_id) == bsp {
             continue;
         }
         if slot >= common::percpu::MAX_CPUS {
             report.skipped_no_slot += 1;
             logger.warn(format_args!(
-                "smp: not starting the application processor with apic id {apic_id}: there are \
+                "smp: not starting the application processor with apic id {hardware_id}: there are \
                  only {} per-CPU slot(s) and slot {slot} would be out of range. This is the \
                  documented policy (do not start more CPUs than MAX_CPUS)",
                 common::percpu::MAX_CPUS
@@ -352,11 +352,11 @@ pub unsafe fn wake_application_processors(
         unsafe { installed.set_ap_parameters(stack_top_identity, slot as u64) };
 
         report.attempted += 1;
-        STARTED_PROCESSOR_ID[slot - 1].store(u16::from(apic_id), Ordering::SeqCst);
+        STARTED_PROCESSOR_ID[slot - 1].store(u16::from(hardware_id), Ordering::SeqCst);
         let before = started_ap_count();
         // 開始の場所の表示（SIPI のベクタ）は `machine` が持つ（9f。ベクタを共通の側に出さない）。
         logger.info(format_args!(
-            "smp: starting application processor apic id {apic_id} as slot {slot} \
+            "smp: starting application processor apic id {hardware_id} as slot {slot} \
              (trampoline at {:#x}, {}, stack top {:#x} identity-mapped, \
              cr3 {:#x} = the static boot page table)",
             frame.as_u64(),
@@ -371,7 +371,7 @@ pub unsafe fn wake_application_processors(
         let ok = unsafe {
             crate::machine::pc::start_processor(
                 mapped,
-                crate::machine::pc::ProcessorId::from_hardware_id(apic_id),
+                crate::machine::pc::ProcessorId::from_hardware_id(hardware_id),
                 installed.start,
                 wait_ticks,
                 || started_ap_count() > before,
@@ -379,7 +379,7 @@ pub unsafe fn wake_application_processors(
         };
         if !ok {
             logger.error(format_args!(
-                "smp: an IPI to apic id {apic_id} never left the local APIC (delivery status \
+                "smp: an IPI to apic id {hardware_id} never left the local APIC (delivery status \
                  stayed set); halting"
             ));
             cpu::halt_forever();
@@ -398,7 +398,7 @@ pub unsafe fn wake_application_processors(
             report.started += 1;
         } else {
             logger.error(format_args!(
-                "smp: application processor apic id {apic_id} did not report its start signature \
+                "smp: application processor apic id {hardware_id} did not report its start signature \
                  within {AP_START_WAIT_TICKS} tick(s)"
             ));
         }
@@ -522,12 +522,12 @@ pub fn ap_kernel_stack_range(slot: usize) -> Option<(u64, u64)> {
 /// 引き継ぎ表から読む（AP 側）。
 fn load_bringup(slot: usize) -> Option<ApBringUp> {
     let base = (slot - 1) * 4;
-    let cr3 = AP_BRINGUP.get(base)?.load(Ordering::SeqCst);
-    if cr3 == 0 {
+    let root = AP_BRINGUP.get(base)?.load(Ordering::SeqCst);
+    if root == 0 {
         return None;
     }
     Some(ApBringUp {
-        production_cr3: cr3,
+        production_cr3: root,
         stacks: ApStacks {
             kernel_top: AP_BRINGUP[base + 1].load(Ordering::SeqCst),
             double_fault_top: AP_BRINGUP[base + 2].load(Ordering::SeqCst),
@@ -546,22 +546,22 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
 
     // 恒等が無いことを AP 側で読み戻す（b-2b-1 から移した到達条件）。
     // SAFETY: 稼働中のテーブルを読むだけ。
-    let cr3_phys = crate::arch::x86_64::paging::switch::active_page_table_root();
-    let cr3 = cr3_phys.as_u64();
+    let root_phys = crate::arch::x86_64::paging::switch::active_page_table_root();
+    let root = root_phys.as_u64();
     // SAFETY: 稼働中のテーブルを direct map 越しに読むだけ（本番テーブルには
     // direct map がある）。読み取りのみ。
-    let pml4_0 = unsafe {
+    let first_top_entry = unsafe {
         crate::arch::x86_64::paging::verify::read_pml4_entry(
-            cr3_phys,
+            root_phys,
             common::addr::direct_map(),
             0,
         )
     };
-    let identity_gone = pml4_0 & 1 == 0;
+    let identity_gone = first_top_entry & 1 == 0;
 
     let _ = writeln!(
         serial,
-        "[INFO] smp: ap {slot} switched to the production page table (cr3={cr3:#x}) and its own \
+        "[INFO] smp: ap {slot} switched to the production page table (cr3={root:#x}) and its own \
          per-CPU stack; PML4[0] read back from this core = empty:{identity_gone} (the identity \
          mapping is gone here too, so the trampoline's identity VA stack is no longer usable)"
     );

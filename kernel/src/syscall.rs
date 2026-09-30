@@ -171,7 +171,7 @@ pub const PATH_MAX: usize = 256;
 pub fn spawn_status(outcome: &crate::userland::SpawnOutcome) -> u64 {
     match outcome {
         crate::userland::SpawnOutcome::Exited(status) => status & 0xFF,
-        crate::userland::SpawnOutcome::Folded(vector) => SPAWN_FOLDED_FLAG | (vector & 0xFF),
+        crate::userland::SpawnOutcome::Folded(exception) => SPAWN_FOLDED_FLAG | (exception & 0xFF),
         crate::userland::SpawnOutcome::Interrupted => SPAWN_INTERRUPTED_FLAG,
     }
 }
@@ -493,9 +493,9 @@ impl UserSlice {
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が walk_user_accessible の契約を満たすこと。
+/// `page_table_root` / `direct_map` が walk_user_accessible の契約を満たすこと。
 pub unsafe fn validate_user_range(
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     buf: u64,
     len: u64,
@@ -504,7 +504,7 @@ pub unsafe fn validate_user_range(
     // battery が検出して halt する（多層防御の最後の砦の確認）。
     #[cfg(feature = "syscall-test-validate-skip-all")]
     {
-        let _ = (pml4_phys, direct_map);
+        let _ = (page_table_root, direct_map);
         return Some(UserSlice { buf, len });
     }
     #[cfg(not(feature = "syscall-test-validate-skip-all"))]
@@ -536,10 +536,12 @@ pub unsafe fn validate_user_range(
         let mut page = first_page;
         while page <= last_page {
             let virt = common::addr::VirtAddr::new(page)?;
-            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。読み取りのみ。
+            // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。読み取りのみ。
             if unsafe {
                 crate::arch::x86_64::paging::verify::walk_user_accessible(
-                    pml4_phys, direct_map, virt,
+                    page_table_root,
+                    direct_map,
+                    virt,
                 )
             }
             .is_err()
@@ -558,13 +560,13 @@ pub unsafe fn validate_user_range(
 ///
 /// [`validate_user_range`] と同じ契約。
 pub unsafe fn user_range_accessible(
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     buf: u64,
     len: u64,
 ) -> bool {
     // SAFETY: 呼び出し元契約による。
-    unsafe { validate_user_range(pml4_phys, direct_map, buf, len) }.is_some()
+    unsafe { validate_user_range(page_table_root, direct_map, buf, len) }.is_some()
 }
 
 /// 検証済みの [`UserSlice`] から `dst` へ、範囲内バイトだけを読む bounded read
@@ -649,7 +651,7 @@ pub unsafe fn copy_to_user(slice: &UserSlice, at: u64, src: &[u8]) -> usize {
 /// **[`SYS_EXIT`] だけは記録して終わる**（S9-b-3-1）。**戻り値では「戻らない」を
 /// 表せない**ので、Ring 3 へ返さない分岐は [`syscall_entry`] が持つ（あちらの
 /// 「exit は出口を通らない」の節）。
-///`pml4_phys` / `direct_map` は稼働中テーブルのもの（syscall_entry
+///`page_table_root` / `direct_map` は稼働中テーブルのもの（syscall_entry
 /// が用意する）で、ポインタ検証にのみ使う。
 ///
 /// # `exit_group`（231）は採らない
@@ -661,11 +663,11 @@ pub unsafe fn copy_to_user(slice: &UserSlice, at: u64, src: &[u8]) -> usize {
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`user_range_accessible`] の契約を満たすこと。
+/// `page_table_root` / `direct_map` が [`user_range_accessible`] の契約を満たすこと。
 unsafe fn dispatch(
     number: u64,
     args: &[u64; 6],
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
@@ -684,16 +686,16 @@ unsafe fn dispatch(
             let len = args[1];
             // **踏み込む前に**範囲を検証する。可なら 0、不可なら -EFAULT。この段階は
             // バイトを読まない（copy は M5-f-2-2）。
-            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            if unsafe { user_range_accessible(pml4_phys, direct_map, buf, len) } {
+            // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+            if unsafe { user_range_accessible(page_table_root, direct_map, buf, len) } {
                 0
             } else {
                 (-EFAULT) as u64
             }
         }
         SYS_WRITE => {
-            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            unsafe { sys_write(args[0], args[1], args[2], pml4_phys, direct_map, bkl) }
+            // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+            unsafe { sys_write(args[0], args[1], args[2], page_table_root, direct_map, bkl) }
         }
         SYS_CHECKSUM => {
             let buf = args[0];
@@ -711,9 +713,9 @@ unsafe fn dispatch(
                 return (-errno) as u64;
             }
             // **踏み込む前に検証する。** 検証済みトークン UserSlice を得てから読む。
-            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
             #[cfg(not(feature = "syscall-test-copy-skip-validate"))]
-            let slice = unsafe { validate_user_range(pml4_phys, direct_map, buf, len) };
+            let slice = unsafe { validate_user_range(page_table_root, direct_map, buf, len) };
             // 破壊テスト (M5-f-2-2, copy-skip-validate): 検証を経ずに UserSlice をモジュール内で
             // 直接構築する（型保証の境界を突く。モジュール内なので private フィールドに触れる）。
             // カーネルポインタを渡すと、-EFAULT のはずが総和が返り verify が検出して halt する。
@@ -737,31 +739,33 @@ unsafe fn dispatch(
             (-EAGAIN) as u64
         }
         SYS_READ => {
-            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            unsafe { sys_read(args[0], args[1], args[2], pml4_phys, direct_map, bkl) }
+            // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+            unsafe { sys_read(args[0], args[1], args[2], page_table_root, direct_map, bkl) }
         }
         SYS_GETDENTS64 => {
-            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            unsafe { sys_getdents64(args[0], args[1], args[2], pml4_phys, direct_map) }
+            // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+            unsafe { sys_getdents64(args[0], args[1], args[2], page_table_root, direct_map) }
         }
         SYS_STAT => {
-            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            unsafe { sys_stat(args[0], args[1], pml4_phys, direct_map) }
+            // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+            unsafe { sys_stat(args[0], args[1], page_table_root, direct_map) }
         }
         SYS_OPEN => {
-            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            unsafe { sys_open(args[0], args[1], pml4_phys, direct_map) }
+            // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+            unsafe { sys_open(args[0], args[1], page_table_root, direct_map) }
         }
         SYS_IOCTL => {
             // **画面の fd は別の関数（`ADR-0066` の Y-c）。** **`present` は BKL を解いてコピーする**ので、
             // ガードを渡せる関数へ分ける。**`#[inline(never)]` で、コピーは `dispatch` の枠に乗らない。**
-            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+            // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
             match unsafe {
-                screen_ioctl_from_ring3(args[0], args[1], args[2], pml4_phys, direct_map, bkl)
+                screen_ioctl_from_ring3(args[0], args[1], args[2], page_table_root, direct_map, bkl)
             } {
                 Some(result) => result,
                 // SAFETY: 同上。
-                None => unsafe { sys_ioctl(args[0], args[1], args[2], pml4_phys, direct_map) },
+                None => unsafe {
+                    sys_ioctl(args[0], args[1], args[2], page_table_root, direct_map)
+                },
             }
         }
         SYS_BRK => {
@@ -771,24 +775,24 @@ unsafe fn dispatch(
         }
         SYS_LSEEK => sys_lseek(args[0], args[1], args[2]),
         SYS_CLOCK_GETTIME => {
-            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            unsafe { sys_clock_gettime(args[0], args[1], pml4_phys, direct_map) }
+            // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+            unsafe { sys_clock_gettime(args[0], args[1], page_table_root, direct_map) }
         }
         SYS_NANOSLEEP => {
-            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            unsafe { sys_nanosleep(args[0], pml4_phys, direct_map, bkl) }
+            // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+            unsafe { sys_nanosleep(args[0], page_table_root, direct_map, bkl) }
         }
         SYS_MKDIR => {
-            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            unsafe { sys_directory(args[0], DirectoryOp::Create, pml4_phys, direct_map) }
+            // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+            unsafe { sys_directory(args[0], DirectoryOp::Create, page_table_root, direct_map) }
         }
         SYS_RMDIR => {
-            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            unsafe { sys_directory(args[0], DirectoryOp::Remove, pml4_phys, direct_map) }
+            // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+            unsafe { sys_directory(args[0], DirectoryOp::Remove, page_table_root, direct_map) }
         }
         SYS_UNLINK => {
-            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            unsafe { sys_unlink(args[0], pml4_phys, direct_map) }
+            // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+            unsafe { sys_unlink(args[0], page_table_root, direct_map) }
         }
         // **unix ドメインのストリームソケット（`ADR-0064`）。** **5 つとも本体は
         // `#[inline(never)]` の関数である**——**この `match` の枠に局所を乗せない。**
@@ -797,18 +801,20 @@ unsafe fn dispatch(
         SYS_OPEN_SCREEN => open_screen_from_ring3(),
         // **多重待ち（`ADR-0066` の Y-b）。** **`#[inline(never)]` で、コピーは `dispatch` の
         // 枠に乗らない。**
-        // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+        // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
         SYS_POLL => unsafe {
-            poll_from_ring3(args[0], args[1], args[2], pml4_phys, direct_map, bkl)
+            poll_from_ring3(args[0], args[1], args[2], page_table_root, direct_map, bkl)
         },
         SYS_SOCKET => socket_from_ring3(args[0], args[1], args[2]),
-        // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-        SYS_BIND => unsafe { bind_from_ring3(args[0], args[1], args[2], pml4_phys, direct_map) },
+        // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+        SYS_BIND => unsafe {
+            bind_from_ring3(args[0], args[1], args[2], page_table_root, direct_map)
+        },
         SYS_LISTEN => listen_from_ring3(args[0], args[1]),
         SYS_ACCEPT => accept_from_ring3(args[0], args[1], bkl),
         // SAFETY: 同上。
         SYS_CONNECT => unsafe {
-            connect_from_ring3(args[0], args[1], args[2], pml4_phys, direct_map)
+            connect_from_ring3(args[0], args[1], args[2], page_table_root, direct_map)
         },
         // **共有メモリと fd の受け渡し（`ADR-0065`）。** **5 つとも `#[inline(never)]` で、
         // `spawn` の経路には載っていない**——**`mmap` は `brk` と同じ `map_4kib` を使う。**
@@ -816,10 +822,14 @@ unsafe fn dispatch(
         SYS_FTRUNCATE => ftruncate_from_ring3(args[0], args[1]),
         // SAFETY: 呼び出し元契約により direct_map は有効で、遠征の中なので CR3 はこのプロセスのもの。
         SYS_MMAP => unsafe { mmap_from_ring3(args[1], args[2], args[4], args[5], direct_map) },
-        // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-        SYS_SENDMSG => unsafe { sendmsg_from_ring3(args[0], args[1], pml4_phys, direct_map, bkl) },
+        // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+        SYS_SENDMSG => unsafe {
+            sendmsg_from_ring3(args[0], args[1], page_table_root, direct_map, bkl)
+        },
         // SAFETY: 同上。
-        SYS_RECVMSG => unsafe { recvmsg_from_ring3(args[0], args[1], pml4_phys, direct_map, bkl) },
+        SYS_RECVMSG => unsafe {
+            recvmsg_from_ring3(args[0], args[1], page_table_root, direct_map, bkl)
+        },
         SYS_CLOSE => {
             // **書きで開いたファイルを閉じたら、イメージを装置へ書き戻す（P-c-1）。**
             //
@@ -998,12 +1008,12 @@ pub fn detached_starts() -> u64 {
 ///
 /// # 安全性
 ///
-/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+/// 呼び出し元契約により `page_table_root` / `direct_map` は有効。
 unsafe fn read_from_pipe(
     pipe: u8,
     buf: u64,
     count: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
@@ -1011,8 +1021,9 @@ unsafe fn read_from_pipe(
         return 0;
     }
     let want = count.min(crate::pipe::PIPE_RING as u64);
-    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, buf, want) }) else {
+    // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+    let Some(slice) = (unsafe { validate_user_range(page_table_root, direct_map, buf, want) })
+    else {
         return (-EFAULT) as u64;
     };
     let mut kbuf = [0u8; crate::pipe::PIPE_RING];
@@ -1041,12 +1052,12 @@ unsafe fn read_from_pipe(
 ///
 /// # 安全性
 ///
-/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+/// 呼び出し元契約により `page_table_root` / `direct_map` は有効。
 unsafe fn write_to_pipe(
     pipe: u8,
     buf: u64,
     count: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
@@ -1054,8 +1065,9 @@ unsafe fn write_to_pipe(
         return 0;
     }
     let want = count.min(crate::pipe::PIPE_RING as u64);
-    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, buf, want) }) else {
+    // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+    let Some(slice) = (unsafe { validate_user_range(page_table_root, direct_map, buf, want) })
+    else {
         return (-EFAULT) as u64;
     };
     let mut kbuf = [0u8; crate::pipe::PIPE_RING];
@@ -1098,19 +1110,20 @@ fn socket_state_of(fd: u64) -> Result<crate::vfs::SocketState, u64> {
 ///
 /// # 安全性
 ///
-/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+/// 呼び出し元契約により `page_table_root` / `direct_map` は有効。
 unsafe fn read_socket_name(
     addr: u64,
     addrlen: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     name: &mut [u8; crate::socket::NAME_MAX],
 ) -> Result<usize, i64> {
     if !(2..=SOCKADDR_UN_LEN).contains(&addrlen) {
         return Err(EINVAL);
     }
-    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, addr, addrlen) }) else {
+    // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+    let Some(slice) = (unsafe { validate_user_range(page_table_root, direct_map, addr, addrlen) })
+    else {
         return Err(EFAULT);
     };
     let mut raw = [0u8; SOCKADDR_UN_LEN as usize];
@@ -1207,12 +1220,12 @@ fn open_input_from_ring3() -> u64 {
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 #[inline(never)]
 unsafe fn read_input_events(
     buf: u64,
     count: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
@@ -1227,8 +1240,9 @@ unsafe fn read_input_events(
     // **イベントの整数倍に切り下げる。**
     let cap = (want as usize / INPUT_EVENT_LEN) * INPUT_EVENT_LEN;
     // **踏み込む前に検証する。**
-    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, buf, cap as u64) })
+    // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+    let Some(slice) =
+        (unsafe { validate_user_range(page_table_root, direct_map, buf, cap as u64) })
     else {
         return (-EFAULT) as u64;
     };
@@ -1328,13 +1342,13 @@ fn is_screen_fd(fd: u64) -> bool {
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 #[inline(never)]
 unsafe fn screen_ioctl_from_ring3(
     fd: u64,
     request: u64,
     arg: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> Option<u64> {
@@ -1348,10 +1362,10 @@ unsafe fn screen_ioctl_from_ring3(
     match request {
         FBIOGET_VSCREENINFO => {
             let out = fb_var_screeninfo_bytes(&screen_var_info(surface.width, surface.height, bgr));
-            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            let Some(slice) =
-                (unsafe { validate_user_range(pml4_phys, direct_map, arg, out.len() as u64) })
-            else {
+            // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+            let Some(slice) = (unsafe {
+                validate_user_range(page_table_root, direct_map, arg, out.len() as u64)
+            }) else {
                 return Some((-EFAULT) as u64);
             };
             // SAFETY: `slice` は検証済みで、長さはちょうど `out.len()` である。
@@ -1364,9 +1378,9 @@ unsafe fn screen_ioctl_from_ring3(
                 surface.stride * 4,
             ));
             // SAFETY: 同上。
-            let Some(slice) =
-                (unsafe { validate_user_range(pml4_phys, direct_map, arg, out.len() as u64) })
-            else {
+            let Some(slice) = (unsafe {
+                validate_user_range(page_table_root, direct_map, arg, out.len() as u64)
+            }) else {
                 return Some((-EFAULT) as u64);
             };
             // SAFETY: 同上。
@@ -1376,7 +1390,7 @@ unsafe fn screen_ioctl_from_ring3(
         FBIOZPRESENT => {
             // SAFETY: 同上。
             let Some(slice) = (unsafe {
-                validate_user_range(pml4_phys, direct_map, arg, DRM_CLIP_RECT_LEN as u64)
+                validate_user_range(page_table_root, direct_map, arg, DRM_CLIP_RECT_LEN as u64)
             }) else {
                 return Some((-EFAULT) as u64);
             };
@@ -1567,13 +1581,13 @@ fn poll_is_ready(reason: crate::task::Wait) -> bool {
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 #[inline(never)]
 unsafe fn poll_from_ring3(
     fds: u64,
     nfds: u64,
     timeout: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
@@ -1588,8 +1602,9 @@ unsafe fn poll_from_ring3(
     let count = nfds as usize;
     let bytes = (count * POLLFD_LEN) as u64;
     // **踏み込む前に検証する。**
-    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, fds, bytes) }) else {
+    // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+    let Some(slice) = (unsafe { validate_user_range(page_table_root, direct_map, fds, bytes) })
+    else {
         return (-EFAULT) as u64;
     };
     let mut raw = [0u8; MAX_POLL_FDS * POLLFD_LEN];
@@ -1692,13 +1707,13 @@ unsafe fn poll_from_ring3(
 ///
 /// # 安全性
 ///
-/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+/// 呼び出し元契約により `page_table_root` / `direct_map` は有効。
 #[inline(never)]
 unsafe fn bind_from_ring3(
     fd: u64,
     addr: u64,
     addrlen: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
 ) -> u64 {
     match socket_state_of(fd) {
@@ -1708,10 +1723,11 @@ unsafe fn bind_from_ring3(
     }
     let mut name = [0u8; crate::socket::NAME_MAX];
     // SAFETY: 呼び出し元契約による。
-    let len = match unsafe { read_socket_name(addr, addrlen, pml4_phys, direct_map, &mut name) } {
-        Ok(len) => len,
-        Err(errno) => return (-errno) as u64,
-    };
+    let len =
+        match unsafe { read_socket_name(addr, addrlen, page_table_root, direct_map, &mut name) } {
+            Ok(len) => len,
+            Err(errno) => return (-errno) as u64,
+        };
     match crate::socket::bind(&name[..len]) {
         Ok(listener) => {
             crate::vfs::with_current_files(|files| {
@@ -1809,13 +1825,13 @@ fn accept_from_ring3(fd: u64, addr: u64, bkl: &mut Option<crate::bkl::BklGuard>)
 ///
 /// # 安全性
 ///
-/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+/// 呼び出し元契約により `page_table_root` / `direct_map` は有効。
 #[inline(never)]
 unsafe fn connect_from_ring3(
     fd: u64,
     addr: u64,
     addrlen: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
 ) -> u64 {
     match socket_state_of(fd) {
@@ -1826,10 +1842,11 @@ unsafe fn connect_from_ring3(
     }
     let mut name = [0u8; crate::socket::NAME_MAX];
     // SAFETY: 呼び出し元契約による。
-    let len = match unsafe { read_socket_name(addr, addrlen, pml4_phys, direct_map, &mut name) } {
-        Ok(len) => len,
-        Err(errno) => return (-errno) as u64,
-    };
+    let len =
+        match unsafe { read_socket_name(addr, addrlen, page_table_root, direct_map, &mut name) } {
+            Ok(len) => len,
+            Err(errno) => return (-errno) as u64,
+        };
     match crate::socket::connect(&name[..len]) {
         Ok(conn) => {
             crate::vfs::with_current_files(|files| {
@@ -1854,14 +1871,14 @@ unsafe fn connect_from_ring3(
 ///
 /// # 安全性
 ///
-/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+/// 呼び出し元契約により `page_table_root` / `direct_map` は有効。
 #[inline(never)]
 unsafe fn read_from_socket(
     conn: u8,
     side: crate::socket::Side,
     buf: u64,
     count: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
@@ -1869,8 +1886,9 @@ unsafe fn read_from_socket(
         return 0;
     }
     let want = count.min(crate::socket::SOCKET_RING as u64);
-    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, buf, want) }) else {
+    // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+    let Some(slice) = (unsafe { validate_user_range(page_table_root, direct_map, buf, want) })
+    else {
         return (-EFAULT) as u64;
     };
     let mut kbuf = [0u8; crate::socket::SOCKET_RING];
@@ -1919,14 +1937,14 @@ fn wait_until_readable(
 ///
 /// # 安全性
 ///
-/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+/// 呼び出し元契約により `page_table_root` / `direct_map` は有効。
 #[inline(never)]
 unsafe fn write_to_socket(
     conn: u8,
     side: crate::socket::Side,
     buf: u64,
     count: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
@@ -1934,8 +1952,9 @@ unsafe fn write_to_socket(
         return 0;
     }
     let want = count.min(crate::socket::SOCKET_RING as u64);
-    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, buf, want) }) else {
+    // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+    let Some(slice) = (unsafe { validate_user_range(page_table_root, direct_map, buf, want) })
+    else {
         return (-EFAULT) as u64;
     };
     let mut kbuf = [0u8; crate::socket::SOCKET_RING];
@@ -2123,16 +2142,16 @@ struct ParsedMsg {
 ///
 /// # 安全性
 ///
-/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+/// 呼び出し元契約により `page_table_root` / `direct_map` は有効。
 unsafe fn read_msghdr(
     msg: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     want_fd: bool,
 ) -> Result<ParsedMsg, i64> {
     // SAFETY: 呼び出し元契約による。
     let Some(slice) =
-        (unsafe { validate_user_range(pml4_phys, direct_map, msg, MSGHDR_LEN as u64) })
+        (unsafe { validate_user_range(page_table_root, direct_map, msg, MSGHDR_LEN as u64) })
     else {
         return Err(EFAULT);
     };
@@ -2164,7 +2183,7 @@ unsafe fn read_msghdr(
     // **iovec を読む（16 バイト）。**
     // SAFETY: 呼び出し元契約による。
     let Some(iov_slice) =
-        (unsafe { validate_user_range(pml4_phys, direct_map, iov, IOVEC_LEN as u64) })
+        (unsafe { validate_user_range(page_table_root, direct_map, iov, IOVEC_LEN as u64) })
     else {
         return Err(EFAULT);
     };
@@ -2183,7 +2202,7 @@ unsafe fn read_msghdr(
         // **cmsghdr を読む（16 バイト）＋ fd（4 バイト）。**
         // SAFETY: 呼び出し元契約による。
         let Some(cmsg_slice) = (unsafe {
-            validate_user_range(pml4_phys, direct_map, control, CMSG_ONE_FD_LEN as u64)
+            validate_user_range(page_table_root, direct_map, control, CMSG_ONE_FD_LEN as u64)
         }) else {
             return Err(EFAULT);
         };
@@ -2211,12 +2230,12 @@ unsafe fn read_msghdr(
 ///
 /// # 安全性
 ///
-/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+/// 呼び出し元契約により `page_table_root` / `direct_map` は有効。
 #[inline(never)]
 unsafe fn sendmsg_from_ring3(
     fd: u64,
     msg: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
@@ -2226,7 +2245,7 @@ unsafe fn sendmsg_from_ring3(
         Err(errno) => return errno,
     };
     // SAFETY: 呼び出し元契約による。
-    let parsed = match unsafe { read_msghdr(msg, pml4_phys, direct_map, true) } {
+    let parsed = match unsafe { read_msghdr(msg, page_table_root, direct_map, true) } {
         Ok(parsed) => parsed,
         Err(errno) => return (-errno) as u64,
     };
@@ -2250,7 +2269,7 @@ unsafe fn sendmsg_from_ring3(
             side,
             parsed.iov_base,
             parsed.iov_len,
-            pml4_phys,
+            page_table_root,
             direct_map,
             bkl,
         )
@@ -2261,12 +2280,12 @@ unsafe fn sendmsg_from_ring3(
 ///
 /// # 安全性
 ///
-/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+/// 呼び出し元契約により `page_table_root` / `direct_map` は有効。
 #[inline(never)]
 unsafe fn recvmsg_from_ring3(
     fd: u64,
     msg: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
@@ -2276,7 +2295,7 @@ unsafe fn recvmsg_from_ring3(
         Err(errno) => return errno,
     };
     // SAFETY: 呼び出し元契約による。
-    let parsed = match unsafe { read_msghdr(msg, pml4_phys, direct_map, false) } {
+    let parsed = match unsafe { read_msghdr(msg, page_table_root, direct_map, false) } {
         Ok(parsed) => parsed,
         Err(errno) => return (-errno) as u64,
     };
@@ -2314,7 +2333,7 @@ unsafe fn recvmsg_from_ring3(
         // SAFETY: 呼び出し元契約による。
         let Some(cslice) = (unsafe {
             validate_user_range(
-                pml4_phys,
+                page_table_root,
                 direct_map,
                 parsed.control,
                 CMSG_ONE_FD_LEN as u64,
@@ -2326,9 +2345,14 @@ unsafe fn recvmsg_from_ring3(
         unsafe { copy_to_user(&cslice, 0, &cbuf) };
         // **msg_controllen を 20 に書き戻す。**
         // SAFETY: 呼び出し元契約による。
-        if let Some(mslice) =
-            unsafe { validate_user_range(pml4_phys, direct_map, msg + MSGHDR_CONTROLLEN as u64, 8) }
-        {
+        if let Some(mslice) = unsafe {
+            validate_user_range(
+                page_table_root,
+                direct_map,
+                msg + MSGHDR_CONTROLLEN as u64,
+                8,
+            )
+        } {
             // SAFETY: 検証済み 8 バイト。
             unsafe { copy_to_user(&mslice, 0, &(CMSG_ONE_FD_LEN as u64).to_le_bytes()) };
         }
@@ -2342,7 +2366,7 @@ unsafe fn recvmsg_from_ring3(
             side,
             parsed.iov_base,
             parsed.iov_len,
-            pml4_phys,
+            page_table_root,
             direct_map,
             bkl,
         )
@@ -2366,13 +2390,13 @@ unsafe fn recvmsg_from_ring3(
 ///
 /// # 安全性
 ///
-/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+/// 呼び出し元契約により `page_table_root` / `direct_map` は有効。
 unsafe fn spawn_detached_from_ring3(
     path: u64,
     argv: u64,
     envp: u64,
     flags: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
@@ -2380,8 +2404,8 @@ unsafe fn spawn_detached_from_ring3(
         return (-EINVAL) as u64;
     }
     let mut buf = [0u8; PATH_MAX];
-    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-    let len = match unsafe { copy_user_path(&mut buf, path, pml4_phys, direct_map) } {
+    // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+    let len = match unsafe { copy_user_path(&mut buf, path, page_table_root, direct_map) } {
         Ok(len) => len,
         Err(errno) => return (-errno) as u64,
     };
@@ -2392,7 +2416,7 @@ unsafe fn spawn_detached_from_ring3(
             &mut argv_bytes,
             argv,
             crate::userland::MAX_ARGV,
-            pml4_phys,
+            page_table_root,
             direct_map,
         )
     } {
@@ -2406,7 +2430,7 @@ unsafe fn spawn_detached_from_ring3(
             &mut envp_bytes,
             envp,
             crate::userland::MAX_ENVP,
-            pml4_phys,
+            page_table_root,
             direct_map,
         )
     } {
@@ -2483,12 +2507,12 @@ unsafe fn spawn_detached_from_ring3(
 ///
 /// # 安全性
 ///
-/// 呼び出し元契約により `pml4_phys` / `direct_map` は有効。
+/// 呼び出し元契約により `page_table_root` / `direct_map` は有効。
 unsafe fn spawn_with_piped_stdin_from_ring3(
     path: u64,
     argv: u64,
     envp: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
@@ -2497,8 +2521,8 @@ unsafe fn spawn_with_piped_stdin_from_ring3(
         return (-EINVAL) as u64;
     };
     let mut buf = [0u8; PATH_MAX];
-    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-    let len = match unsafe { copy_user_path(&mut buf, path, pml4_phys, direct_map) } {
+    // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+    let len = match unsafe { copy_user_path(&mut buf, path, page_table_root, direct_map) } {
         Ok(len) => len,
         Err(errno) => return (-errno) as u64,
     };
@@ -2512,7 +2536,7 @@ unsafe fn spawn_with_piped_stdin_from_ring3(
             &mut argv_bytes,
             argv,
             crate::userland::MAX_ARGV,
-            pml4_phys,
+            page_table_root,
             direct_map,
         )
     } {
@@ -2526,7 +2550,7 @@ unsafe fn spawn_with_piped_stdin_from_ring3(
             &mut envp_bytes,
             envp,
             crate::userland::MAX_ENVP,
-            pml4_phys,
+            page_table_root,
             direct_map,
         )
     } {
@@ -2629,13 +2653,13 @@ fn wait_child_from_ring3(handle: u64, bkl: &mut Option<crate::bkl::BklGuard>) ->
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 /// `bkl` が、いま保持している BKL のガードであること。
 unsafe fn spawn_from_ring3(
     path: u64,
     argv: u64,
     envp: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
@@ -2644,7 +2668,7 @@ unsafe fn spawn_from_ring3(
     // （`copy_from_user` の TOCTOU の注記）。
     let mut buf = [0u8; PATH_MAX];
     // SAFETY: 呼び出し元契約をそのまま渡す。
-    let len = match unsafe { copy_user_path(&mut buf, path, pml4_phys, direct_map) } {
+    let len = match unsafe { copy_user_path(&mut buf, path, page_table_root, direct_map) } {
         Ok(len) => len,
         Err(errno) => return (-errno) as u64,
     };
@@ -2655,7 +2679,7 @@ unsafe fn spawn_from_ring3(
             &mut argv_bytes,
             argv,
             crate::userland::MAX_ARGV,
-            pml4_phys,
+            page_table_root,
             direct_map,
         )
     } {
@@ -2674,7 +2698,7 @@ unsafe fn spawn_from_ring3(
             &mut envp_bytes,
             envp,
             crate::userland::MAX_ENVP,
-            pml4_phys,
+            page_table_root,
             direct_map,
         )
     } {
@@ -2732,8 +2756,8 @@ unsafe fn spawn_from_ring3(
 /// # Safety
 ///
 /// `context` はスタブが積んだ有効な [`IrqContext`] を指していること。
-/// `rsp_at_call` はスタブが `call` 直前に読んだ RSP であること。
-pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
+/// `sp_at_call` はスタブが `call` 直前に読んだ RSP であること。
+pub(crate) fn syscall_entry(context: *mut IrqContext, sp_at_call: u64) -> u64 {
     // **方向フラグを何より先に見る（2026-09-24）。** `crate::arch::x86_64::idt::check_direction_flag` の doc。
     // **何を読むかは `arch` が決める**（`IrqContext` のメソッドが読む。ベクタを共通の側に出さない。`ADR-0072` の 3。
     // 9e-2）。
@@ -2778,7 +2802,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     let ctx = unsafe { &mut *context };
 
     // 既存の境界計算が syscall 経路でも正しいことの裏取り（IRQ と同じ検査。ベクタは `arch` が文脈から読む。9e-2）。
-    ctx.check_stack_alignment(rsp_at_call, "syscall");
+    ctx.check_stack_alignment(sp_at_call, "syscall");
 
     // 番号と 6 つの引数を、Linux のレジスタの形で読む（`abi`）。**書き戻しの前に読む。** **読んだ結果は写し直さずに
     // 使う**——最適化しないビルドでは、写し直した分だけこの関数のスタックが増える（`hello` の遠征のスタックで見た）。
@@ -2789,19 +2813,19 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     for (slot, value) in state.last_args.iter().zip(request.args.iter()) {
         slot.store(*value, Ordering::SeqCst);
     }
-    state.handler_rsp.store(rsp_at_call, Ordering::SeqCst);
+    state.handler_rsp.store(sp_at_call, Ordering::SeqCst);
 
     // ポインタ検証のため、稼働中テーブルの PML4 物理と登録 direct map を用意する。
     let direct_map = common::addr::direct_map();
     // SAFETY: CR3 を読んで現在のテーブルを構築するだけ（読み取り）。IF=0 の単一文脈。
-    let pml4_phys =
+    let page_table_root =
         unsafe { crate::arch::x86_64::paging::active::ActivePageTable::current(direct_map) }
             .pml4_phys();
 
     // **[`SYS_SPAWN`] だけは、この関数が持つ。** BKL を解いてから入る必要があり、
     // ガードはここのローカルである（[`spawn_from_ring3`]）。
     //
-    // SAFETY: pml4_phys / direct_map は稼働中テーブルのもので、walk の契約を満たす。
+    // SAFETY: page_table_root / direct_map は稼働中テーブルのもので、walk の契約を満たす。
     let ret = if request.number == SYS_SPAWN {
         // SAFETY: 同上。`bkl` はいま保持しているガードである。
         unsafe {
@@ -2809,7 +2833,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
                 request.args[0],
                 request.args[1],
                 request.args[2],
-                pml4_phys,
+                page_table_root,
                 direct_map,
                 &mut bkl,
             )
@@ -2824,7 +2848,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
                 request.args[1],
                 request.args[2],
                 request.args[3],
-                pml4_phys,
+                page_table_root,
                 direct_map,
                 &mut bkl,
             )
@@ -2836,7 +2860,7 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
                 request.args[0],
                 request.args[1],
                 request.args[2],
-                pml4_phys,
+                page_table_root,
                 direct_map,
                 &mut bkl,
             )
@@ -2844,12 +2868,12 @@ pub(crate) fn syscall_entry(context: *mut IrqContext, rsp_at_call: u64) -> u64 {
     } else if request.number == SYS_WAIT_CHILD {
         wait_child_from_ring3(request.args[0], &mut bkl)
     } else {
-        // SAFETY: pml4_phys / direct_map は稼働中テーブルのもので、walk の契約を満たす。
+        // SAFETY: page_table_root / direct_map は稼働中テーブルのもので、walk の契約を満たす。
         unsafe {
             dispatch(
                 request.number,
                 &request.args,
-                pml4_phys,
+                page_table_root,
                 direct_map,
                 &mut bkl,
             )
@@ -3010,12 +3034,12 @@ fn wait_for_keyboard(bkl: &mut Option<crate::bkl::BklGuard>) -> bool {
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 unsafe fn sys_read(
     fd: u64,
     buf: u64,
     count: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
@@ -3050,8 +3074,8 @@ unsafe fn sys_read(
             .and_then(|file| file.pipe_read_end())
     });
     if let Some(pipe) = pipe_read {
-        // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-        return unsafe { read_from_pipe(pipe, buf, count, pml4_phys, direct_map, bkl) };
+        // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+        return unsafe { read_from_pipe(pipe, buf, count, page_table_root, direct_map, bkl) };
     }
 
     // **ソケット（`ADR-0064`）。** **繋がっていなければ `-ENOTCONN`。**
@@ -3063,8 +3087,10 @@ unsafe fn sys_read(
     });
     match socket {
         Some(crate::vfs::SocketState::Stream { conn, side }) => {
-            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            return unsafe { read_from_socket(conn, side, buf, count, pml4_phys, direct_map, bkl) };
+            // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+            return unsafe {
+                read_from_socket(conn, side, buf, count, page_table_root, direct_map, bkl)
+            };
         }
         Some(_) => return (-ENOTCONN) as u64,
         None => {}
@@ -3080,8 +3106,8 @@ unsafe fn sys_read(
             .unwrap_or(false)
     });
     if is_input {
-        // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-        return unsafe { read_input_events(buf, count, pml4_phys, direct_map, bkl) };
+        // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+        return unsafe { read_input_events(buf, count, page_table_root, direct_map, bkl) };
     }
     // **画面の fd は読めない（`ADR-0066` の Y-c）。** **入力 fd と同じで inode が None なので、
     // 分けないと端末の枝へ落ちて打鍵を読んでしまう。** **Linux の fbdev は `read` で画素を返すが、
@@ -3119,8 +3145,9 @@ unsafe fn sys_read(
             }
             // **踏み込む前に検証する。**
             let want = count.min(TERMINAL_READ_MAX as u64);
-            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, buf, want) })
+            // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+            let Some(slice) =
+                (unsafe { validate_user_range(page_table_root, direct_map, buf, want) })
             else {
                 return (-EFAULT) as u64;
             };
@@ -3242,8 +3269,9 @@ unsafe fn sys_read(
         return 0;
     }
     // **踏み込む前に検証する。** コピーする長さは `want` で確定している。
-    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, buf, want) }) else {
+    // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+    let Some(slice) = (unsafe { validate_user_range(page_table_root, direct_map, buf, want) })
+    else {
         return (-EFAULT) as u64;
     };
 
@@ -3604,11 +3632,11 @@ fn sys_lseek(fd: u64, offset: u64, whence: u64) -> u64 {
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
-unsafe fn sys_unlink(path: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -> u64 {
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn sys_unlink(path: u64, page_table_root: PhysAddr, direct_map: DirectMap) -> u64 {
     let mut buf = [0u8; PATH_MAX];
     // SAFETY: 呼び出し元契約をそのまま渡す。
-    let len = match unsafe { copy_user_path(&mut buf, path, pml4_phys, direct_map) } {
+    let len = match unsafe { copy_user_path(&mut buf, path, page_table_root, direct_map) } {
         Ok(len) => len,
         Err(errno) => return (-errno) as u64,
     };
@@ -3676,16 +3704,16 @@ enum DirectoryOp {
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 unsafe fn sys_directory(
     path: u64,
     op: DirectoryOp,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
 ) -> u64 {
     let mut buf = [0u8; PATH_MAX];
     // SAFETY: 呼び出し元契約をそのまま渡す。
-    let len = match unsafe { copy_user_path(&mut buf, path, pml4_phys, direct_map) } {
+    let len = match unsafe { copy_user_path(&mut buf, path, page_table_root, direct_map) } {
         Ok(len) => len,
         Err(errno) => return (-errno) as u64,
     };
@@ -3744,8 +3772,8 @@ unsafe fn sys_directory(
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
-unsafe fn sys_open(path: u64, flags: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -> u64 {
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn sys_open(path: u64, flags: u64, page_table_root: PhysAddr, direct_map: DirectMap) -> u64 {
     // **受理は 2 つの形だけである（zi-c。ADR-0037）**——O_RDONLY と
     // O_WRONLY|O_TRUNC。**それ以外は従来どおり -EROFS**（bare O_WRONLY も
     // 拒む——位置書きの部品が無く、:w の全置換には O_TRUNC の形が対応する。
@@ -3763,7 +3791,7 @@ unsafe fn sys_open(path: u64, flags: u64, pml4_phys: PhysAddr, direct_map: Direc
 
     let mut buf = [0u8; PATH_MAX];
     // SAFETY: 呼び出し元契約をそのまま渡す。
-    let len = match unsafe { copy_user_path(&mut buf, path, pml4_phys, direct_map) } {
+    let len = match unsafe { copy_user_path(&mut buf, path, page_table_root, direct_map) } {
         Ok(len) => len,
         Err(errno) => return (-errno) as u64,
     };
@@ -3870,12 +3898,12 @@ fn dirent_type_for(file_type: u8) -> u8 {
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 unsafe fn sys_getdents64(
     fd: u64,
     dirp: u64,
     count: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
 ) -> u64 {
     let opened = crate::vfs::with_current_files(|files| {
@@ -3894,8 +3922,9 @@ unsafe fn sys_getdents64(
     }
 
     // **踏み込む前に検証する。** 書く量は `count` を越えない。
-    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, dirp, count) }) else {
+    // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+    let Some(slice) = (unsafe { validate_user_range(page_table_root, direct_map, dirp, count) })
+    else {
         return (-EFAULT) as u64;
     };
 
@@ -3992,11 +4021,11 @@ const DIRENT64_MAX_RECORD: usize = (DIRENT64_HEADER_LEN + 255 + 1).next_multiple
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 unsafe fn sys_clock_gettime(
     clockid: u64,
     out: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
 ) -> u64 {
     if clockid != CLOCK_MONOTONIC {
@@ -4020,9 +4049,9 @@ unsafe fn sys_clock_gettime(
     });
 
     // **踏み込む前に検証する。**
-    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
     let Some(slice) =
-        (unsafe { validate_user_range(pml4_phys, direct_map, out, TIMESPEC_LEN as u64) })
+        (unsafe { validate_user_range(page_table_root, direct_map, out, TIMESPEC_LEN as u64) })
     else {
         return (-EFAULT) as u64;
     };
@@ -4075,16 +4104,16 @@ pub fn early_timer_wakes() -> u64 {
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 unsafe fn sys_nanosleep(
     req: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
-    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
     let Some(slice) =
-        (unsafe { validate_user_range(pml4_phys, direct_map, req, TIMESPEC_LEN as u64) })
+        (unsafe { validate_user_range(page_table_root, direct_map, req, TIMESPEC_LEN as u64) })
     else {
         return (-EFAULT) as u64;
     };
@@ -4148,11 +4177,16 @@ unsafe fn sys_nanosleep(
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
-unsafe fn sys_stat(path: u64, statbuf: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -> u64 {
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn sys_stat(
+    path: u64,
+    statbuf: u64,
+    page_table_root: PhysAddr,
+    direct_map: DirectMap,
+) -> u64 {
     let mut name = [0u8; PATH_MAX];
     // SAFETY: 呼び出し元契約をそのまま渡す。
-    let len = match unsafe { copy_user_path(&mut name, path, pml4_phys, direct_map) } {
+    let len = match unsafe { copy_user_path(&mut name, path, page_table_root, direct_map) } {
         Ok(len) => len,
         Err(errno) => return (-errno) as u64,
     };
@@ -4184,9 +4218,9 @@ unsafe fn sys_stat(path: u64, statbuf: u64, pml4_phys: PhysAddr, direct_map: Dir
     });
 
     // **踏み込む前に検証する。**
-    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
     let Some(slice) =
-        (unsafe { validate_user_range(pml4_phys, direct_map, statbuf, STAT_LEN as u64) })
+        (unsafe { validate_user_range(page_table_root, direct_map, statbuf, STAT_LEN as u64) })
     else {
         return (-EFAULT) as u64;
     };
@@ -4232,12 +4266,12 @@ unsafe fn sys_stat(path: u64, statbuf: u64, pml4_phys: PhysAddr, direct_map: Dir
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 unsafe fn sys_ioctl(
     fd: u64,
     request: u64,
     arg: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
 ) -> u64 {
     // **表を引いて端末かどうかを見る**（`sys_write` と同じ形。番号では分けない）。
@@ -4254,10 +4288,10 @@ unsafe fn sys_ioctl(
         TIOCGWINSZ => {}
         // **溜まっているエラーを取り出す（ADR-0046）。**
         // SAFETY: 呼び出し元契約をそのまま渡す。
-        TIOCZTAKE => return unsafe { ioctl_take_pending(arg, pml4_phys, direct_map) },
+        TIOCZTAKE => return unsafe { ioctl_take_pending(arg, page_table_root, direct_map) },
         // **1 行をログへ出す（ADR-0046）。**
         // SAFETY: 同上。
-        TIOCZLOG => return unsafe { ioctl_log_line(arg, pml4_phys, direct_map) },
+        TIOCZLOG => return unsafe { ioctl_log_line(arg, page_table_root, direct_map) },
         _ => return (-ENOTTY) as u64,
     }
 
@@ -4291,9 +4325,9 @@ unsafe fn sys_ioctl(
     let out = winsize_bytes(&winsize);
 
     // **踏み込む前に検証する。**
-    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
     let Some(slice) =
-        (unsafe { validate_user_range(pml4_phys, direct_map, arg, WINSIZE_LEN as u64) })
+        (unsafe { validate_user_range(page_table_root, direct_map, arg, WINSIZE_LEN as u64) })
     else {
         return (-EFAULT) as u64;
     };
@@ -4323,15 +4357,15 @@ unsafe fn sys_ioctl(
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
-unsafe fn ioctl_take_pending(arg: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -> u64 {
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn ioctl_take_pending(arg: u64, page_table_root: PhysAddr, direct_map: DirectMap) -> u64 {
     let mut out = [0u8; ZDIAG_LEN];
     crate::console::take_pending(&mut out);
 
     // **踏み込む前に検証する。**
-    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
     let Some(slice) =
-        (unsafe { validate_user_range(pml4_phys, direct_map, arg, ZDIAG_LEN as u64) })
+        (unsafe { validate_user_range(page_table_root, direct_map, arg, ZDIAG_LEN as u64) })
     else {
         return (-EFAULT) as u64;
     };
@@ -4358,12 +4392,12 @@ unsafe fn ioctl_take_pending(arg: u64, pml4_phys: PhysAddr, direct_map: DirectMa
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
-unsafe fn ioctl_log_line(arg: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -> u64 {
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+unsafe fn ioctl_log_line(arg: u64, page_table_root: PhysAddr, direct_map: DirectMap) -> u64 {
     // **踏み込む前に検証する。**
-    // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
+    // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
     let Some(slice) =
-        (unsafe { validate_user_range(pml4_phys, direct_map, arg, ZDIAG_LEN as u64) })
+        (unsafe { validate_user_range(page_table_root, direct_map, arg, ZDIAG_LEN as u64) })
     else {
         return (-EFAULT) as u64;
     };
@@ -4378,12 +4412,12 @@ unsafe fn ioctl_log_line(arg: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -
         return (-EINVAL) as u64;
     }
 
-    let mut port = common::machine::pc::serial::SerialPort::new(
+    let mut serial = common::machine::pc::serial::SerialPort::new(
         common::machine::pc::serial::SerialPort::COM1_BASE,
     );
-    port.init();
+    serial.init();
     for byte in &buf[ZDIAG_TEXT_OFFSET..ZDIAG_TEXT_OFFSET + length] {
-        port.write_byte(*byte);
+        serial.write_byte(*byte);
     }
 
     // 破壊テスト (ADR-0046, stderr-on-screen-test): 診断を画面へも書く。
@@ -4413,11 +4447,11 @@ unsafe fn ioctl_log_line(arg: u64, pml4_phys: PhysAddr, direct_map: DirectMap) -
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 unsafe fn copy_user_path(
     dst: &mut [u8; PATH_MAX],
     path: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
 ) -> Result<usize, i64> {
     /// ページの大きさ。**検証の単位である。**
@@ -4430,8 +4464,8 @@ unsafe fn copy_user_path(
         let to_page_end = PAGE - (addr & (PAGE - 1));
         let chunk = to_page_end.min((PATH_MAX - copied) as u64);
         // SAFETY: 呼び出し元契約をそのまま渡す。
-        let slice =
-            unsafe { validate_user_range(pml4_phys, direct_map, addr, chunk) }.ok_or(EFAULT)?;
+        let slice = unsafe { validate_user_range(page_table_root, direct_map, addr, chunk) }
+            .ok_or(EFAULT)?;
         // SAFETY: slice は検証済み。dst の残りは chunk を収める。
         let read = unsafe { copy_from_user(&mut dst[copied..copied + chunk as usize], &slice) };
         if read == 0 {
@@ -4501,12 +4535,12 @@ pub const STDERR_FD: u64 = 2;
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 unsafe fn sys_write(
     fd: u64,
     buf: u64,
     count: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
     bkl: &mut Option<crate::bkl::BklGuard>,
 ) -> u64 {
@@ -4537,8 +4571,8 @@ unsafe fn sys_write(
             .and_then(|file| file.pipe_write_end())
     });
     if let Some(pipe) = pipe_write {
-        // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-        return unsafe { write_to_pipe(pipe, buf, count, pml4_phys, direct_map, bkl) };
+        // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+        return unsafe { write_to_pipe(pipe, buf, count, page_table_root, direct_map, bkl) };
     }
 
     // **ソケット（`ADR-0064`）。** **繋がっていなければ `-ENOTCONN`。**
@@ -4550,8 +4584,10 @@ unsafe fn sys_write(
     });
     match socket {
         Some(crate::vfs::SocketState::Stream { conn, side }) => {
-            // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-            return unsafe { write_to_socket(conn, side, buf, count, pml4_phys, direct_map, bkl) };
+            // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+            return unsafe {
+                write_to_socket(conn, side, buf, count, page_table_root, direct_map, bkl)
+            };
         }
         Some(_) => return (-ENOTCONN) as u64,
         None => {}
@@ -4575,7 +4611,9 @@ unsafe fn sys_write(
             // **書きで開いたファイル（zi-c。ADR-0037）。** 複製へ足して返る。
             Ok((false, true, Some(ino), _)) => {
                 // SAFETY: 呼び出し元契約をそのまま渡す。
-                return unsafe { sys_write_to_file(fd, buf, count, ino, pml4_phys, direct_map) };
+                return unsafe {
+                    sys_write_to_file(fd, buf, count, ino, page_table_root, direct_map)
+                };
             }
             // **読みで開いた fd への write は -EBADF である**（Linux の形。
             // ADR-0037。以前の -EROFS はファイルへ書く道が無い時代の値だった）。
@@ -4614,10 +4652,10 @@ unsafe fn sys_write(
         TERMINAL_WRITES_FROM_DETACHED.fetch_add(1, Ordering::Relaxed);
     }
 
-    let mut port = common::machine::pc::serial::SerialPort::new(
+    let mut serial = common::machine::pc::serial::SerialPort::new(
         common::machine::pc::serial::SerialPort::COM1_BASE,
     );
-    port.init();
+    serial.init();
 
     let mut recorded = [0u8; WRITE_BUF_LEN];
     let mut done = 0u64;
@@ -4631,8 +4669,9 @@ unsafe fn sys_write(
         let to_page_end = PAGE - (addr & (PAGE - 1));
         let chunk = to_page_end.min(count - done).min(WRITE_BUF_LEN as u64);
         // **踏み込む前に検証する。** 検証済みトークンを得てから読む。
-        // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-        let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, addr, chunk) })
+        // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+        let Some(slice) =
+            (unsafe { validate_user_range(page_table_root, direct_map, addr, chunk) })
         else {
             // **届いた分だけを返す。** 届いていないものを届いたことにしない。
             return if done == 0 { (-EFAULT) as u64 } else { done };
@@ -4644,7 +4683,7 @@ unsafe fn sys_write(
             return if done == 0 { (-EFAULT) as u64 } else { done };
         }
         for byte in &kbuf[..read] {
-            port.write_byte(*byte);
+            serial.write_byte(*byte);
         }
 
         // **画面へは BKL を解いてから書く（S12 前の手当て）。**
@@ -4727,13 +4766,13 @@ unsafe fn sys_write(
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 unsafe fn sys_write_to_file(
     _fd: u64,
     buf: u64,
     count: u64,
     ino: u32,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
 ) -> u64 {
     /// ページの大きさ。**検証の単位である。**
@@ -4763,8 +4802,9 @@ unsafe fn sys_write_to_file(
         let to_page_end = PAGE - (addr & (PAGE - 1));
         let chunk = to_page_end.min(count - done).min(WRITE_BUF_LEN as u64);
         // **踏み込む前に検証する。**
-        // SAFETY: 呼び出し元契約により pml4_phys / direct_map は有効。
-        let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, addr, chunk) })
+        // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
+        let Some(slice) =
+            (unsafe { validate_user_range(page_table_root, direct_map, addr, chunk) })
         else {
             // **届いた分だけを返す。** 届いていないものを届いたことにしない。
             return if done == 0 { (-EFAULT) as u64 } else { done };
@@ -4813,11 +4853,11 @@ unsafe fn sys_write_to_file(
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 unsafe fn copy_user_string(
     dst: &mut [u8],
     ptr: u64,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
 ) -> Result<usize, i64> {
     /// ページの大きさ。**検証の単位である。**
@@ -4829,8 +4869,8 @@ unsafe fn copy_user_string(
         let to_page_end = PAGE - (addr & (PAGE - 1));
         let chunk = to_page_end.min((dst.len() - copied) as u64);
         // SAFETY: 呼び出し元契約をそのまま渡す。
-        let slice =
-            unsafe { validate_user_range(pml4_phys, direct_map, addr, chunk) }.ok_or(EFAULT)?;
+        let slice = unsafe { validate_user_range(page_table_root, direct_map, addr, chunk) }
+            .ok_or(EFAULT)?;
         // SAFETY: slice は検証済み。dst の残りは chunk を収める。
         let read = unsafe { copy_from_user(&mut dst[copied..copied + chunk as usize], &slice) };
         if read == 0 {
@@ -4873,12 +4913,12 @@ unsafe fn copy_user_string(
 ///
 /// # Safety
 ///
-/// `pml4_phys` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
+/// `page_table_root` / `direct_map` が [`validate_user_range`] の契約を満たすこと。
 unsafe fn copy_user_string_array(
     dst: &mut [u8],
     base: u64,
     max_count: usize,
-    pml4_phys: PhysAddr,
+    page_table_root: PhysAddr,
     direct_map: DirectMap,
 ) -> Result<(usize, usize), i64> {
     /// 1 要素の大きさ（ポインタ）。
@@ -4893,8 +4933,8 @@ unsafe fn copy_user_string_array(
     loop {
         let slot = base.checked_add(count as u64 * WORD).ok_or(EFAULT)?;
         // SAFETY: 呼び出し元契約をそのまま渡す。
-        let slice =
-            unsafe { validate_user_range(pml4_phys, direct_map, slot, WORD) }.ok_or(EFAULT)?;
+        let slice = unsafe { validate_user_range(page_table_root, direct_map, slot, WORD) }
+            .ok_or(EFAULT)?;
         let mut word = [0u8; WORD as usize];
         // SAFETY: slice は検証済みで、word は 8 バイトを収める。
         let read = unsafe { copy_from_user(&mut word, &slice) };
@@ -4917,15 +4957,16 @@ unsafe fn copy_user_string_array(
             return Err(errno);
         }
         // SAFETY: 呼び出し元契約をそのまま渡す。
-        let written =
-            match unsafe { copy_user_string(&mut dst[used..], pointer, pml4_phys, direct_map) } {
-                Ok(written) => written,
-                // 破壊テスト (S11-7, spawn-e2big-as-einval): こちらの経路も同じく潰す。
-                // **要素数と長さは別の場所で落ちるので、両方を同じ形にする。**
-                #[cfg(feature = "spawn-e2big-as-einval")]
-                Err(E2BIG) => return Err(EINVAL),
-                Err(errno) => return Err(errno),
-            };
+        let written = match unsafe {
+            copy_user_string(&mut dst[used..], pointer, page_table_root, direct_map)
+        } {
+            Ok(written) => written,
+            // 破壊テスト (S11-7, spawn-e2big-as-einval): こちらの経路も同じく潰す。
+            // **要素数と長さは別の場所で落ちるので、両方を同じ形にする。**
+            #[cfg(feature = "spawn-e2big-as-einval")]
+            Err(E2BIG) => return Err(EINVAL),
+            Err(errno) => return Err(errno),
+        };
         used += written;
         count += 1;
     }
@@ -5271,23 +5312,23 @@ mod tests {
     #[test]
     fn a_spawn_status_never_meets_the_interrupted_mark_nor_passes_the_limit() {
         use crate::userland::SpawnOutcome;
-        for vector in (0..32u64).chain([1, 3, 13, 16, 19]) {
-            let status = spawn_status(&SpawnOutcome::Folded(vector));
+        for exception in (0..32u64).chain([1, 3, 13, 16, 19]) {
+            let status = spawn_status(&SpawnOutcome::Folded(exception));
             assert_eq!(
                 status & SPAWN_INTERRUPTED_FLAG,
                 0,
-                "vector {vector}: {status:#x}"
+                "exception {exception}: {status:#x}"
             );
-            assert!(status <= 0x1FFF, "vector {vector}: {status:#x}");
+            assert!(status <= 0x1FFF, "exception {exception}: {status:#x}");
             assert_eq!(
                 status & SPAWN_FOLDED_FLAG,
                 SPAWN_FOLDED_FLAG,
-                "vector {vector}"
+                "exception {exception}"
             );
             assert_eq!(
                 status & !SPAWN_FOLDED_FLAG,
-                vector,
-                "vector {vector}: {status:#x}"
+                exception,
+                "exception {exception}: {status:#x}"
             );
         }
         for exited in [0u64, 1, 0xFF, 0x100, 0x1FF, 0x2FF, u64::MAX] {

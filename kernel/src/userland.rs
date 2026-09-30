@@ -1247,10 +1247,10 @@ pub fn global_difference_checks() -> u64 {
 #[inline(never)]
 fn forget_task_cr3_before_destroy(logger: &mut Logger<SerialPort>, process: &UserProcess) {
     let name = process.name;
-    let pml4 = process.space.pml4().as_u64();
-    if crate::task::forget_page_table_root_if(pml4) {
+    let root = process.space.pml4().as_u64();
+    if crate::task::forget_page_table_root_if(root) {
         logger.error(format_args!(
-            "task: a task still pointed its cr3 at {name}'s address space {pml4:#x} when the \
+            "task: a task still pointed its cr3 at {name}'s address space {root:#x} when the \
              space was about to be destroyed; the field was cleared (the excursion return should \
              have restored it)"
         ));
@@ -1557,10 +1557,10 @@ fn load_user_program_into(
     // 1 ページぶん書ける。単一実行文脈である。フレームは上で確保したばかりで、ほかに指しているのは
     // まだ稼働していない空間のマップだけである。`argv` と `envp` は、このフレームを確保する前に作った
     // カーネルの側の控えで、このページを指さない。
-    let Some(initial_rsp) = (unsafe { build_initial_stack(dst, stack_page, argv, envp) }) else {
+    let Some(initial_sp) = (unsafe { build_initial_stack(dst, stack_page, argv, envp) }) else {
         return Err(UserLoadError::ArgumentsTooLong);
     };
-    process.stack_top = initial_rsp;
+    process.stack_top = initial_sp;
 
     // **未使用部分を既知のバイトで埋める（EV）。** **初期データの下は、
     // これからプログラムが使う領域である。** 遠征スタックと同じ形で、
@@ -1568,18 +1568,18 @@ fn load_user_program_into(
     //
     // **順序に理由がある。** **積んだ後に埋める**——先に埋めると、
     // 積んだ文字列と表を毒値が上書きする。
-    let initial_bytes = (USER_PROGRAM_STACK_TOP - initial_rsp) as usize;
+    let initial_bytes = (USER_PROGRAM_STACK_TOP - initial_sp) as usize;
     // SAFETY: `dst` はスタックページの先頭で、`PAGE_SIZE` バイト書ける。
     // 埋めるのは初期データより下だけである。
     unsafe { core::ptr::write_bytes(dst, USER_STACK_FILL, PAGE_SIZE as usize - initial_bytes) };
     process.stack_scratch = dst as u64;
 
     logger.info(format_args!(
-        "user-load: {} initial stack at {initial_rsp:#x} (argc={}, envc={}, 16-byte aligned={},          initial data {initial_bytes} of {PAGE_SIZE} byte(s))",
+        "user-load: {} initial stack at {initial_sp:#x} (argc={}, envc={}, 16-byte aligned={},          initial data {initial_bytes} of {PAGE_SIZE} byte(s))",
         process.name,
         argv.len(),
         envp.len(),
-        initial_rsp % 16 == 0
+        initial_sp % 16 == 0
     ));
 
     // **マップした側とは独立に降りて、葉のフラグを読み戻す。**
@@ -1734,7 +1734,7 @@ unsafe fn run_loaded_program(
     // 入れ子になった瞬間だけ壊れる。** 親が次にカーネルへ入るときの RSP0 が
     // 子のスタックを指し、**次に子を起動したときに親のフレームを踏む。**
     // **`spawn` が戻り先の RSP0 を突き合わせて検出する。**
-    let main_rsp0_top = if crate::arch::x86_64::ring3::depth() == 0 {
+    let main_entry_stack_top = if crate::arch::x86_64::ring3::depth() == 0 {
         crate::arch::x86_64::gdt::active_kernel_entry_stack_top()
     } else if cfg!(feature = "spawn-child-rsp0") {
         crate::arch::x86_64::ring3::excursion_stack_range_at(crate::arch::x86_64::ring3::depth()).1
@@ -1812,10 +1812,10 @@ unsafe fn run_loaded_program(
         crate::arch::x86_64::idt::EntryPath::Irq,
     );
     // SAFETY: entry と stack は今マップしたユーザーページで、`ud2` が必ずフォルト
-    // する。main_rsp0_top はメインのカーネルスタック上端。単一実行文脈である。
+    // する。main_entry_stack_top はメインのカーネルスタック上端。単一実行文脈である。
     unsafe {
         crate::arch::x86_64::ring3::enter(
-            main_rsp0_top,
+            main_entry_stack_top,
             process.entry,
             process.stack_top,
             crate::syscall::window_for_subtree(USER_PROGRAM_PML4_INDEX),
@@ -1937,7 +1937,7 @@ unsafe fn run_loaded_program(
     //
     // **戻す値は深さから引く**——**深さ 0 なら 0（ユーザー空間を載せていない）、
     // 入れ子なら入口で読んだ `production`（親の空間）である。** **上の
-    // `main_rsp0_top` と同じ読み方で、控えの局所変数を持たない。**
+    // `main_entry_stack_top` と同じ読み方で、控えの局所変数を持たない。**
     // **控えを持つ形にしたら、遠征スタックの高水位が 96 バイト増えた**（実測。
     // `tools/boot-log-compare.py` が検出した。**`dev` では局所変数がそのまま
     // フレームを広げ、このフレームは子が走っている間ずっと深さ 0 のスタックに載る**）。
@@ -2091,9 +2091,9 @@ pub fn spawn(
     // `crate::arch::x86_64::ring3::current_slot` で引く。
     let slot = depth;
 
-    let mut port = SerialPort::new(SerialPort::COM1_BASE);
-    port.init();
-    let mut logger = Logger::new(port, LogLevel::Trace);
+    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    serial.init();
+    let mut logger = Logger::new(serial, LogLevel::Trace);
     // **シェルの後の最初の打鍵の配送を、ここで 1 度だけ報せる**（HW-e-2。`ADR-0068`）——**シェルが Enter の
     // エコーを終えた後なので、行の途中に入らない。** **パスを引く前なので、無い名前を打った回でも出る。**
     crate::keyboard::report_first_delivery_once(&mut logger);
@@ -2177,7 +2177,7 @@ pub fn spawn(
     // **行の文言は W1-c-4 の後に直した。** **以前は「the main kernel stack」と書いており、
     // 切り離して起動した 1 本から呼んだときに嘘になった**（運用者の指摘。2026-09-16）。
     let stack_probe = 0u8;
-    let rsp_now = &stack_probe as *const u8 as u64;
+    let sp_now = &stack_probe as *const u8 as u64;
     if depth == 0 {
         logger.info(format_args!(
             "spawn: {name} is {size} byte(s) at inode {}; entering at depth {} (the parent \
@@ -2187,8 +2187,8 @@ pub fn spawn(
         ));
     } else {
         let (excursion_bottom, excursion_top) = crate::arch::x86_64::ring3::excursion_stack_range();
-        let stack_used = excursion_top.saturating_sub(rsp_now);
-        let stack_left = rsp_now.saturating_sub(excursion_bottom);
+        let stack_used = excursion_top.saturating_sub(sp_now);
+        let stack_left = sp_now.saturating_sub(excursion_bottom);
         logger.info(format_args!(
             "spawn: {name} is {size} byte(s) at inode {}; entering at depth {} (the parent's \
              excursion stack {excursion_bottom:#x}..{excursion_top:#x} has {stack_used} byte(s) \
@@ -2218,7 +2218,7 @@ pub fn spawn(
     //
     // **控えて突き合わせる形なら、どちらの深さでも同じ 1 行で言える**
     // ——**「子が走る前と後で RSP0 が変わっていない」。**
-    let rsp0_before = crate::arch::x86_64::gdt::active_kernel_entry_stack_top();
+    let entry_stack_before = crate::arch::x86_64::gdt::active_kernel_entry_stack_top();
 
     // **親の記録を控える。** 子は `reset_counters` を通る。
     let saved_records = crate::syscall::save_records();
@@ -2375,18 +2375,18 @@ pub fn spawn(
     // **すぐには壊れない**——親はそのまま Ring 3 へ返り、次のシステムコールで
     // 別のスタックに乗る。**壊れるのは、次に子を起動して親のフレームを踏んだ
     // ときである。** 原因から遠いので、ここで突き合わせる。
-    let rsp0_after = crate::arch::x86_64::gdt::active_kernel_entry_stack_top();
-    if rsp0_after != rsp0_before {
+    let entry_stack_after = crate::arch::x86_64::gdt::active_kernel_entry_stack_top();
+    if entry_stack_after != entry_stack_before {
         logger.error(format_args!(
-            "spawn: RSP0 came back as {rsp0_after:#x} but it was {rsp0_before:#x} before the \
+            "spawn: RSP0 came back as {entry_stack_after:#x} but it was {entry_stack_before:#x} before the \
              child ran; the parent's next kernel entry would land on the wrong stack. halting"
         ));
         common::arch::x86_64::cpu::halt_forever();
     }
 
-    let child_handler_rsp = crate::syscall::handler_rsp();
+    let child_handler_sp = crate::syscall::handler_rsp();
     let (child_bottom, child_top) = crate::arch::x86_64::ring3::excursion_stack_range_at(depth);
-    let handler_on_child_stack = child_handler_rsp >= child_bottom && child_handler_rsp < child_top;
+    let handler_on_child_stack = child_handler_sp >= child_bottom && child_handler_sp < child_top;
 
     let free_after = match crate::frame_allocator::take() {
         Some(allocator) => {
@@ -2428,7 +2428,7 @@ pub fn spawn(
     SPAWN_LEAKED.fetch_add(leaked, core::sync::atomic::Ordering::SeqCst);
     logger.info(format_args!(
         "spawn: {name} ended ({child:?}) after {syscalls} syscall(s); its kernel entries ran on \
-         RSP {child_handler_rsp:#x} (inside its own excursion stack \
+         RSP {child_handler_sp:#x} (inside its own excursion stack \
          {child_bottom:#x}..{child_top:#x} = {handler_on_child_stack}); the space was destroyed \
          ({consumed} frame(s) left the allocator and {quarantined} reached quarantine \
          ({held} its own + {} from what it spawned), match={} leaked={all_leaked}); the space \
@@ -2668,9 +2668,9 @@ pub fn run_detached_request() {
         Some(request) => request as *const DetachedRequest,
         None => core::ptr::null(),
     };
-    let mut port = SerialPort::new(SerialPort::COM1_BASE);
-    port.init();
-    let mut logger = Logger::new(port, LogLevel::Trace);
+    let mut serial = SerialPort::new(SerialPort::COM1_BASE);
+    serial.init();
+    let mut logger = Logger::new(serial, LogLevel::Trace);
     if request.is_null() {
         logger.error(format_args!(
             "detached: the ring3 task started without a request; halting"

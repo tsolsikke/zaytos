@@ -24,10 +24,10 @@ fn panic(info: &PanicInfo) -> ! {
     let mut serial = SerialPort::new(SerialPort::COM1_BASE);
     serial.init();
 
-    let rsp = cpu::read_rsp();
+    let sp = cpu::read_rsp();
 
     let _ = writeln!(serial, "[ERROR] panic: {info}");
-    let _ = writeln!(serial, "[ERROR]   rsp = {rsp:#018x}");
+    let _ = writeln!(serial, "[ERROR]   rsp = {sp:#018x}");
     let _ = writeln!(serial, "[ERROR] halting (cli + hlt loop)");
 
     cpu::halt_forever();
