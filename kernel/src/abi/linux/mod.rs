@@ -19,12 +19,13 @@ pub use initial_stack::build_initial_stack;
 mod layout;
 
 pub use layout::{
-    dirent64_record, dirent64_record_len, fb_fix_screeninfo_bytes, fb_var_screeninfo_bytes,
-    parse_drm_clip_rect, parse_pollfd, parse_sockaddr_un, parse_timespec, set_pollfd_revents,
-    timespec_bytes, winsize_bytes, Dirent64, DrmClipRect, FbBitfield, FbFixScreeninfo,
-    FbVarScreeninfo, Pollfd, SockaddrUn, Stat, Timespec, Winsize, DIRENT64_ALIGN,
+    cmsg_one_fd_bytes, dirent64_record, dirent64_record_len, fb_fix_screeninfo_bytes,
+    fb_var_screeninfo_bytes, parse_cmsg_one_fd, parse_drm_clip_rect, parse_iovec, parse_msghdr,
+    parse_pollfd, parse_sockaddr_un, parse_timespec, set_pollfd_revents, timespec_bytes,
+    winsize_bytes, CmsgOneFd, Dirent64, DrmClipRect, FbBitfield, FbFixScreeninfo, FbVarScreeninfo,
+    Iovec, Msghdr, Pollfd, SockaddrUn, Stat, Timespec, Winsize, CMSG_ONE_FD_LEN, DIRENT64_ALIGN,
     DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, FB_FIX_SCREENINFO_LEN, FB_VAR_SCREENINFO_LEN,
-    POLLFD_LEN, SOCKADDR_UN_LEN, TIMESPEC_LEN, WINSIZE_LEN,
+    IOVEC_LEN, MSGHDR_LEN, POLLFD_LEN, SOCKADDR_UN_LEN, TIMESPEC_LEN, WINSIZE_LEN,
 };
 
 mod request;

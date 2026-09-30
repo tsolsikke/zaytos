@@ -42,14 +42,16 @@ use crate::abi::linux::x86_64::{
     SYS_SENDMSG, SYS_SOCKET, SYS_STAT, SYS_UNLINK, SYS_WRITE,
 };
 use crate::abi::linux::{
-    dirent64_record, dirent64_record_len, fb_fix_screeninfo_bytes, fb_var_screeninfo_bytes,
-    parse_drm_clip_rect, parse_pollfd, parse_sockaddr_un, parse_timespec, set_pollfd_revents,
-    timespec_bytes, winsize_bytes, Dirent64, DrmClipRect, FbBitfield, FbFixScreeninfo,
-    FbVarScreeninfo, Stat, Timespec, Winsize, AF_UNIX, CLOCK_MONOTONIC, DIRENT64_ALIGN,
-    DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, DT_DIR, DT_REG, DT_UNKNOWN, FBIOGET_FSCREENINFO,
-    FBIOGET_VSCREENINFO, FB_TYPE_PACKED_PIXELS, FB_VISUAL_TRUECOLOR, O_ACCMODE, O_APPEND, O_CREAT,
-    O_RDONLY, O_TRUNC, O_WRONLY, POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET,
-    SOCKADDR_UN_LEN, SOCK_STREAM, SOL_SOCKET, TIMESPEC_LEN, TIOCGWINSZ, WINSIZE_LEN,
+    cmsg_one_fd_bytes, dirent64_record, dirent64_record_len, fb_fix_screeninfo_bytes,
+    fb_var_screeninfo_bytes, parse_cmsg_one_fd, parse_drm_clip_rect, parse_iovec, parse_msghdr,
+    parse_pollfd, parse_sockaddr_un, parse_timespec, set_pollfd_revents, timespec_bytes,
+    winsize_bytes, CmsgOneFd, Dirent64, DrmClipRect, FbBitfield, FbFixScreeninfo, FbVarScreeninfo,
+    Iovec, Msghdr, Stat, Timespec, Winsize, AF_UNIX, CLOCK_MONOTONIC, CMSG_ONE_FD_LEN,
+    DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, DT_DIR, DT_REG, DT_UNKNOWN,
+    FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, FB_TYPE_PACKED_PIXELS, FB_VISUAL_TRUECOLOR,
+    IOVEC_LEN, MSGHDR_LEN, O_ACCMODE, O_APPEND, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY, POLLFD_LEN,
+    POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET, SOCKADDR_UN_LEN, SOCK_STREAM, SOL_SOCKET,
+    TIMESPEC_LEN, TIOCGWINSZ, WINSIZE_LEN,
 };
 use crate::abi::linux::{
     E2BIG, EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, EBUSY, ECHILD, ECONNREFUSED, EEXIST,
@@ -2137,17 +2139,18 @@ unsafe fn read_msghdr(
     let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, msg, 56) }) else {
         return Err(EFAULT);
     };
-    let mut hdr = [0u8; 56];
+    let mut hdr = [0u8; MSGHDR_LEN];
     // SAFETY: `slice` は検証済みで 56 バイト。
-    if unsafe { copy_from_user(&mut hdr, &slice) } != 56 {
+    if unsafe { copy_from_user(&mut hdr, &slice) } != MSGHDR_LEN {
         return Err(EFAULT);
     }
-    let u64_at = |off: usize| u64::from_le_bytes(hdr[off..off + 8].try_into().unwrap());
-    let name = u64_at(0);
-    let iov = u64_at(16);
-    let iovlen = u64_at(24);
-    let control = u64_at(32);
-    let controllen = u64_at(40);
+    let Msghdr {
+        name,
+        iov,
+        iovlen,
+        control,
+        controllen,
+    } = parse_msghdr(&hdr);
     // **受け付ける形を絞る（`ADR-0065`）。** **一覧は `ADR-0065` の「`msghdr` の絞った範囲」に
     // 在る。** **`msg_name` は NULL だけ**（繋がったストリームは宛先を持たない）。
     if name != 0 {
@@ -2166,33 +2169,34 @@ unsafe fn read_msghdr(
     let Some(iov_slice) = (unsafe { validate_user_range(pml4_phys, direct_map, iov, 16) }) else {
         return Err(EFAULT);
     };
-    let mut iovbuf = [0u8; 16];
+    let mut iovbuf = [0u8; IOVEC_LEN];
     // SAFETY: 検証済み 16 バイト。
-    if unsafe { copy_from_user(&mut iovbuf, &iov_slice) } != 16 {
+    if unsafe { copy_from_user(&mut iovbuf, &iov_slice) } != IOVEC_LEN {
         return Err(EFAULT);
     }
-    let iov_base = u64::from_le_bytes(iovbuf[0..8].try_into().unwrap());
-    let iov_len = u64::from_le_bytes(iovbuf[8..16].try_into().unwrap());
+    let Iovec {
+        base: iov_base,
+        len: iov_len,
+    } = parse_iovec(&iovbuf);
 
     let mut control_fd = None;
-    if want_fd && control != 0 && controllen >= 20 {
+    if want_fd && control != 0 && controllen >= CMSG_ONE_FD_LEN as u64 {
         // **cmsghdr を読む（16 バイト）＋ fd（4 バイト）。**
         // SAFETY: 呼び出し元契約による。
         let Some(cmsg_slice) = (unsafe { validate_user_range(pml4_phys, direct_map, control, 20) })
         else {
             return Err(EFAULT);
         };
-        let mut cbuf = [0u8; 20];
+        let mut cbuf = [0u8; CMSG_ONE_FD_LEN];
         // SAFETY: 検証済み 20 バイト。
-        if unsafe { copy_from_user(&mut cbuf, &cmsg_slice) } != 20 {
+        if unsafe { copy_from_user(&mut cbuf, &cmsg_slice) } != CMSG_ONE_FD_LEN {
             return Err(EFAULT);
         }
-        let level = u32::from_le_bytes(cbuf[8..12].try_into().unwrap());
-        let ctype = u32::from_le_bytes(cbuf[12..16].try_into().unwrap());
-        if level != SOL_SOCKET || ctype != SCM_RIGHTS {
+        let cmsg = parse_cmsg_one_fd(&cbuf);
+        if cmsg.level != SOL_SOCKET || cmsg.kind != SCM_RIGHTS {
             return Err(EINVAL);
         }
-        control_fd = Some(u32::from_le_bytes(cbuf[16..20].try_into().unwrap()) as u64);
+        control_fd = Some(cmsg.fd as u64);
     }
     Ok(ParsedMsg {
         iov_base,
@@ -2298,15 +2302,15 @@ unsafe fn recvmsg_from_ring3(
                 return (-errno_for_file_table(error)) as u64;
             }
         };
-        if parsed.control == 0 || parsed.controllen < 20 {
+        if parsed.control == 0 || parsed.controllen < CMSG_ONE_FD_LEN as u64 {
             return (-EMSGSIZE) as u64;
         }
         // **cmsghdr（cmsg_len=20, level=SOL_SOCKET, type=SCM_RIGHTS）＋ fd を書く。**
-        let mut cbuf = [0u8; 20];
-        cbuf[0..8].copy_from_slice(&20u64.to_le_bytes());
-        cbuf[8..12].copy_from_slice(&SOL_SOCKET.to_le_bytes());
-        cbuf[12..16].copy_from_slice(&SCM_RIGHTS.to_le_bytes());
-        cbuf[16..20].copy_from_slice(&(new_fd as u32).to_le_bytes());
+        let cbuf = cmsg_one_fd_bytes(&CmsgOneFd {
+            level: SOL_SOCKET,
+            kind: SCM_RIGHTS,
+            fd: new_fd as u32,
+        });
         // SAFETY: 呼び出し元契約による。
         let Some(cslice) =
             (unsafe { validate_user_range(pml4_phys, direct_map, parsed.control, 20) })

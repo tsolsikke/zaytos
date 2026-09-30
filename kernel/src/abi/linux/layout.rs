@@ -61,6 +61,17 @@ pub const SOCKADDR_UN_LEN: u64 = 110;
 /// `struct pollfd` のバイト数（`fd` 4＋`events` 2＋`revents` 2。Linux の配置）。
 pub const POLLFD_LEN: usize = 8;
 
+/// `struct msghdr` のバイト数（`msg_name` 0・`msg_namelen` 8・`msg_iov` 16・`msg_iovlen` 24・`msg_control` 32・
+/// `msg_controllen` 40・`msg_flags` 48。glibc の `bits/socket.h`）。
+pub const MSGHDR_LEN: usize = 56;
+
+/// `struct iovec` のバイト数（`iov_base` 0・`iov_len` 8。glibc の `bits/types/struct_iovec.h`）。
+pub const IOVEC_LEN: usize = 16;
+
+/// fd を 1 つ運ぶ補助データのバイト数（`CMSG_LEN(sizeof(int))`）。`struct cmsghdr`（`cmsg_len` 0・`cmsg_level` 8・
+/// `cmsg_type` 12 の 16 バイト。glibc の `bits/socket.h`）と、fd の 4 バイトである。
+pub const CMSG_ONE_FD_LEN: usize = 20;
+
 /// `struct stat` に書く値。**ZaytOS が持つ欄だけである**（ほかの欄は 0 のまま返す）。
 ///
 /// **値を決めるのは共通の側で、[`stat_bytes`](super::x86_64::stat_bytes) は欄の位置へ書くだけである**（`ADR-0071` の決定 1 の 2 で、
@@ -354,6 +365,82 @@ pub fn parse_drm_clip_rect(raw: &[u8; DRM_CLIP_RECT_LEN]) -> DrmClipRect {
     }
 }
 
+/// `struct msghdr` から読んだ値（`sendmsg` と `recvmsg`。`ADR-0065`）。**`msg_namelen` と `msg_flags` は読まない。**
+///
+/// **欄から読むのはここで、受ける形を絞るのは共通の側である**（`ADR-0071` の決定 1 の 2 で、`crate::syscall` の
+/// `read_msghdr` から分けた。2026-09-30）。
+pub struct Msghdr {
+    /// `msg_name`（宛先の名前を指す）。
+    pub name: u64,
+    /// `msg_iov`（`struct iovec` の並びを指す）。
+    pub iov: u64,
+    /// `msg_iovlen`（`struct iovec` の数）。
+    pub iovlen: u64,
+    /// `msg_control`（補助データを指す）。
+    pub control: u64,
+    /// `msg_controllen`（補助データのバイト数）。
+    pub controllen: u64,
+}
+
+/// `struct msghdr` を読む（欄の並びは [`MSGHDR_LEN`] の doc）。
+pub fn parse_msghdr(raw: &[u8; MSGHDR_LEN]) -> Msghdr {
+    let u64_at = |off: usize| u64::from_le_bytes(raw[off..off + 8].try_into().unwrap());
+    Msghdr {
+        name: u64_at(0),
+        iov: u64_at(16),
+        iovlen: u64_at(24),
+        control: u64_at(32),
+        controllen: u64_at(40),
+    }
+}
+
+/// `struct iovec` から読んだ値。
+pub struct Iovec {
+    /// `iov_base`。
+    pub base: u64,
+    /// `iov_len`。
+    pub len: u64,
+}
+
+/// `struct iovec` を読む（欄の並びは [`IOVEC_LEN`] の doc）。
+pub fn parse_iovec(raw: &[u8; IOVEC_LEN]) -> Iovec {
+    Iovec {
+        base: u64::from_le_bytes(raw[0..8].try_into().unwrap()),
+        len: u64::from_le_bytes(raw[8..16].try_into().unwrap()),
+    }
+}
+
+/// fd を 1 つ運ぶ補助データの値（`struct cmsghdr` の `cmsg_level` と `cmsg_type`、運ぶ fd）。
+///
+/// **欄の位置はここで、`SOL_SOCKET` と `SCM_RIGHTS` を置くことと、それ以外を断ることは共通の側である。**
+pub struct CmsgOneFd {
+    /// `cmsg_level`。
+    pub level: u32,
+    /// `cmsg_type`。
+    pub kind: u32,
+    /// 運ぶ fd。
+    pub fd: u32,
+}
+
+/// fd を 1 つ運ぶ補助データを読む（欄の並びは [`CMSG_ONE_FD_LEN`] の doc）。**`cmsg_len` は読まない。**
+pub fn parse_cmsg_one_fd(raw: &[u8; CMSG_ONE_FD_LEN]) -> CmsgOneFd {
+    CmsgOneFd {
+        level: u32::from_le_bytes(raw[8..12].try_into().unwrap()),
+        kind: u32::from_le_bytes(raw[12..16].try_into().unwrap()),
+        fd: u32::from_le_bytes(raw[16..20].try_into().unwrap()),
+    }
+}
+
+/// fd を 1 つ運ぶ補助データを組む。**`cmsg_len` は [`CMSG_ONE_FD_LEN`] である。**
+pub fn cmsg_one_fd_bytes(cmsg: &CmsgOneFd) -> [u8; CMSG_ONE_FD_LEN] {
+    let mut out = [0u8; CMSG_ONE_FD_LEN];
+    out[0..8].copy_from_slice(&(CMSG_ONE_FD_LEN as u64).to_le_bytes());
+    out[8..12].copy_from_slice(&cmsg.level.to_le_bytes());
+    out[12..16].copy_from_slice(&cmsg.kind.to_le_bytes());
+    out[16..20].copy_from_slice(&cmsg.fd.to_le_bytes());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     //! 構造体の配置。**`cc` の `offsetof` で測った値を機械で留める**（画面の `ioctl` の構造体は `ADR-0066` の Y-c。
@@ -586,6 +673,55 @@ mod tests {
         assert_eq!(
             (read.x1, read.y1, read.x2, read.y2),
             (0x0201, 0x1211, 0x2221, 0x3231)
+        );
+    }
+
+    /// `struct msghdr` の欄の位置（glibc の `bits/socket.h` を `gcc` と `aarch64-linux-gnu-gcc` の `offsetof` で測って
+    /// 確かめた。2026-09-30。両方で同じ）。**値は、どのバイトも 0 でなく、欄ごとに違う形にする**（stat のテストと同じ理由）。
+    #[test]
+    fn a_msghdr_is_read_from_the_linux_positions() {
+        let mut raw = [0u8; MSGHDR_LEN];
+        for (i, byte) in raw.iter_mut().enumerate() {
+            *byte = 0x10 + i as u8;
+        }
+        let read = parse_msghdr(&raw);
+        assert_eq!(read.name, 0x1716_1514_1312_1110, "msg_name @0");
+        assert_eq!(read.iov, 0x2726_2524_2322_2120, "msg_iov @16");
+        assert_eq!(read.iovlen, 0x2f2e_2d2c_2b2a_2928, "msg_iovlen @24");
+        assert_eq!(read.control, 0x3736_3534_3332_3130, "msg_control @32");
+        assert_eq!(read.controllen, 0x3f3e_3d3c_3b3a_3938, "msg_controllen @40");
+    }
+
+    /// `struct iovec` の欄の位置（`sys/uio.h` を同じく測った。両方で同じ）。
+    #[test]
+    fn an_iovec_is_read_from_the_linux_positions() {
+        let mut raw = [0u8; IOVEC_LEN];
+        for (i, byte) in raw.iter_mut().enumerate() {
+            *byte = 0x40 + i as u8;
+        }
+        let read = parse_iovec(&raw);
+        assert_eq!(read.base, 0x4746_4544_4342_4140, "iov_base @0");
+        assert_eq!(read.len, 0x4f4e_4d4c_4b4a_4948, "iov_len @8");
+    }
+
+    /// fd を 1 つ運ぶ補助データ（`struct cmsghdr` と fd）の欄の位置と `cmsg_len`（`CMSG_LEN(sizeof(int))` は 20。
+    /// `sys/socket.h` を同じく測った。両方で同じ）。
+    #[test]
+    fn a_control_message_with_one_fd_follows_the_linux_layout() {
+        let cmsg = CmsgOneFd {
+            level: 0x0403_0201,
+            kind: 0x1413_1211,
+            fd: 0x2423_2221,
+        };
+        let bytes = cmsg_one_fd_bytes(&cmsg);
+        assert_eq!(u64_at(&bytes, 0), 20, "cmsg_len @0");
+        assert_eq!(u32_at(&bytes, 8), 0x0403_0201, "cmsg_level @8");
+        assert_eq!(u32_at(&bytes, 12), 0x1413_1211, "cmsg_type @12");
+        assert_eq!(u32_at(&bytes, 16), 0x2423_2221, "the fd @16");
+        let read = parse_cmsg_one_fd(&bytes);
+        assert_eq!(
+            (read.level, read.kind, read.fd),
+            (cmsg.level, cmsg.kind, cmsg.fd)
         );
     }
 }
