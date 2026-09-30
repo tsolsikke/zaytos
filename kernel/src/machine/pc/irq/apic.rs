@@ -138,7 +138,7 @@ pub(super) unsafe fn mask_routed_irq(irq: u8) {
 ///
 /// `io_apic_virt` は、[`crate::machine::pc::apic::map_and_probe`] がマッピングを確認したページの
 /// 先頭である。**この型を作れるのは [`Self::new`] だけ**で、そこが
-/// `MappedApic` を要求するので、マップされていないアドレスから作ることはできない。
+/// `MappedInterruptController` を要求するので、マップされていないアドレスから作ることはできない。
 ///
 /// # Local APIC のアドレスを持たない
 ///
@@ -153,15 +153,15 @@ pub struct Apic {
     /// redirection entry の**本数**（添字の最大値ではない）。
     entry_count: u32,
     /// IRQ から GSI への解決表（S2-d-0）。
-    mmio: crate::machine::pc::acpi::ApicMmio,
+    mmio: crate::machine::pc::acpi::MadtSurvey,
 }
 
 impl Apic {
     /// マップ済みの APIC からコントローラを作る。I/O APIC が無ければ `None`。
     ///
-    /// **`MappedApic` を要求するのが安全性の要である。** 生のアドレスを
+    /// **`MappedInterruptController` を要求するのが安全性の要である。** 生のアドレスを
     /// 受け取る形にすると、マップしていないページを渡せてしまう。
-    pub fn new(mapped: &crate::machine::pc::apic::MappedApic) -> Option<Self> {
+    pub fn new(mapped: &crate::machine::pc::apic::MappedInterruptController) -> Option<Self> {
         let direct_map = common::addr::direct_map();
         let io_apic = mapped.first_io_apic()?;
         let io_apic_virt = direct_map.phys_to_virt(io_apic.phys).as_u64();

@@ -1539,7 +1539,7 @@ extern "sysv64" fn kernel_main() -> ! {
     // 関係で、APIC のマッピングが成功したかとは別である。
     kernel::machine::pc::apic::report_per_cpu_slot_coverage(
         &mut logger,
-        apic_mmio.usable_local_apics(),
+        apic_mmio.usable_processor_count(),
     );
 
     // === higher-half B-2b-4（恒等除去） ===
@@ -4912,7 +4912,7 @@ fn start_timer(
     console: Option<&mut Console>,
     stop_after_ticks: u64,
     shell_after_heartbeats: u64,
-    apic: Option<&kernel::machine::pc::apic::MappedApic>,
+    apic: Option<&kernel::machine::pc::apic::MappedInterruptController>,
     mut virtio: Option<&mut kernel::virtio::VirtioBlk>,
     fadt: kernel::machine::pc::acpi::FadtFacts,
 ) {
@@ -5123,7 +5123,7 @@ fn setup_keyboard(
 /// 実演の数に混ざる）である。
 fn switch_virtio_to_io_apic(
     logger: &mut Logger<Serial>,
-    apic: Option<&kernel::machine::pc::apic::MappedApic>,
+    apic: Option<&kernel::machine::pc::apic::MappedInterruptController>,
     virtio: &mut kernel::virtio::VirtioBlk,
 ) {
     let Some(mapped) = apic else {
@@ -5203,7 +5203,7 @@ fn switch_virtio_to_io_apic(
 
 fn switch_keyboard_to_io_apic(
     logger: &mut Logger<Serial>,
-    mapped: Option<&kernel::machine::pc::apic::MappedApic>,
+    mapped: Option<&kernel::machine::pc::apic::MappedInterruptController>,
 ) {
     let Some(mapped) = mapped else {
         logger.warn(format_args!(
@@ -5251,7 +5251,7 @@ fn switch_keyboard_to_io_apic(
             // physical モードなら high dword の宛先は Local APIC ID そのものである。
             // BSP の APIC ID は MADT の最初の使用可能なエントリから取る（その値が
             // BSP とは限らないという制約は `smp.rs` の該当箇所）。
-            let expected_destination = mapped.mmio().bsp_candidate_apic_id().unwrap_or(0);
+            let expected_destination = mapped.mmio().boot_processor_candidate_id().unwrap_or(0);
             let destination_ok =
                 entry.physical_destination_mode() && entry.destination() == expected_destination;
             logger.info(format_args!(

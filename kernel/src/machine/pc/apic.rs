@@ -39,7 +39,7 @@ use common::machine::pc::serial::Serial;
 use crate::arch::x86_64::paging::active::{ActivePageTable, MapUpdateError, PageAttributes};
 use crate::arch::x86_64::paging::entry;
 use crate::frame_allocator::{FrameAllocator, FRAME_SIZE};
-use crate::machine::pc::acpi::{ApicMmio, IoApicLocation};
+use crate::machine::pc::acpi::{IoApicLocation, MadtSurvey};
 
 /// Local APIC の ID レジスタのオフセット。ID はビット 31:24 にある。
 const LAPIC_REGISTER_ID: u64 = 0x20;
@@ -70,10 +70,10 @@ struct MappedPage {
 
 /// マップできた APIC の MMIO。S2-a のレジスタ読みが使う。
 ///
-/// `acpi::ApicMmio` が「MADT が名乗った所在」であるのに対し、こちらは
+/// `acpi::MadtSurvey` が「MADT が名乗った所在」であるのに対し、こちらは
 /// 実際にマッピングを確認できた所在である。読む側が「MADT にあったが写像に
 /// 失敗したもの」を触らないよう、区別してある。
-pub struct MappedApic {
+pub struct MappedInterruptController {
     local_apic: PhysAddr,
     io_apics: [Option<IoApicLocation>; MAX_MAPPED_IO_APICS],
     io_apic_count: usize,
@@ -83,13 +83,13 @@ pub struct MappedApic {
     /// 割り込み層の APIC 実装は「IRQ をどの redirection entry へ向けるか」を
     /// 決めるのにこの表が要る。マッピングとセットで渡せば、呼び出し側が 2 つの値を
     /// 持ち回って取り違える形にならない。
-    mmio: ApicMmio,
+    mmio: MadtSurvey,
 }
 
 /// マッピングを記録する I/O APIC の上限。`acpi` 側の上限と同じ理由で置く。
 const MAX_MAPPED_IO_APICS: usize = 4;
 
-impl MappedApic {
+impl MappedInterruptController {
     /// Local APIC の MMIO 物理アドレス。マッピングが確認できたものである。
     pub(crate) const fn local_apic_phys(&self) -> PhysAddr {
         self.local_apic
@@ -110,7 +110,7 @@ impl MappedApic {
 
     /// このマッピングを作る元になった MADT の読み取り結果（Interrupt Source Override
     /// の解決表を含む）。
-    pub const fn mmio(&self) -> ApicMmio {
+    pub const fn mmio(&self) -> MadtSurvey {
         self.mmio
     }
 }
@@ -127,8 +127,8 @@ impl MappedApic {
 pub fn map_and_probe<const CAP: usize>(
     logger: &mut Logger<Serial>,
     allocator: &mut FrameAllocator<CAP>,
-    mmio: &ApicMmio,
-) -> Option<MappedApic> {
+    mmio: &MadtSurvey,
+) -> Option<MappedInterruptController> {
     // --- 1. IA32_APIC_BASE を読む。MMIO へ触る前に必ず通る関門である ---
     let Some(base) = cpu::apic_base() else {
         logger.error(format_args!(
@@ -192,7 +192,7 @@ pub fn map_and_probe<const CAP: usize>(
 
     let lapic_mapping = map_mmio_page(logger, allocator, "the local APIC", lapic_phys);
 
-    let mut mapped = MappedApic {
+    let mut mapped = MappedInterruptController {
         local_apic: lapic_phys,
         io_apics: [None; MAX_MAPPED_IO_APICS],
         io_apic_count: 0,
@@ -239,7 +239,7 @@ pub fn map_and_probe<const CAP: usize>(
         ));
     }
 
-    probe_local_apic(logger, lapic_phys, mmio.bsp_candidate_apic_id());
+    probe_local_apic(logger, lapic_phys, mmio.boot_processor_candidate_id());
 
     Some(mapped)
 }
@@ -762,7 +762,7 @@ const IOAPIC_MAX_REDIRECTION_SHIFT: u32 = 16;
 /// I/O APIC へは IOREGSEL（添字レジスタ）にだけ書く。これは読みたい
 /// レジスタを選ぶセレクタで、割り込みの設定ではないが、書き込みである
 /// ことは事実である。S2 で最初の書き込みがここである。
-pub fn survey_registers(logger: &mut Logger<Serial>, mapped: &MappedApic) {
+pub fn survey_registers(logger: &mut Logger<Serial>, mapped: &MappedInterruptController) {
     let direct_map = common::addr::direct_map();
     let lapic_virt = direct_map.phys_to_virt(mapped.local_apic);
 
@@ -1202,7 +1202,7 @@ pub unsafe fn send_startup_ipi(lapic_virt: u64, apic_id: u8, vector: u8) -> bool
 /// # Safety
 ///
 /// `mapped` が [`map_and_probe`] の戻り値であること。
-pub fn lapic_virt_of(mapped: &MappedApic) -> u64 {
+pub fn lapic_virt_of(mapped: &MappedInterruptController) -> u64 {
     common::addr::direct_map()
         .phys_to_virt(mapped.local_apic_phys())
         .as_u64()
@@ -1227,7 +1227,7 @@ unsafe fn read_lapic(base_virt: u64, offset: u64) -> u32 {
 /// **添字の選択と窓の読みの 2 手の間、このCPUの割り込みを止める**（2026-09-28。9d-4b）。IOREGSEL は台ごとに
 /// 1 本しかない共有の状態なので、2 手の間に割り込まれると読む対象が変わる。9d-4b から、処理の無い源を禁止する
 /// ために、割り込みの中でも I/O APIC を読み書きする。**以前は「この経路は割り込み禁止の起動シーケンス中にだけ
-/// 通る」と書いていたが、較正の中の読み（`survey_apic_masks`）は `sti` の後に通る。**
+/// 通る」と書いていたが、較正の中の読み（`survey_interrupt_masks`）は `sti` の後に通る。**
 ///
 /// # Safety
 ///
@@ -1238,7 +1238,7 @@ unsafe fn read_lapic(base_virt: u64, offset: u64) -> u32 {
 /// 書けば、同じ食い違いが起きる。今の呼ぶ側と、排他を与えているもの（2026-09-28 に経路ごとに確かめた）:
 ///
 /// - 起動の早い所の調べ（[`survey_registers`]）、経路の設定（`irq::route_to_apic`）、その読み戻し
-///   （`irq::routed_entry_readback`）、較正の中の読み（`irq::survey_apic_masks`）: AP を起こす
+///   （`irq::routed_entry_readback`）、較正の中の読み（`irq::survey_interrupt_masks`）: AP を起こす
 ///   （`smp::wake_application_processors`）より前なので、走っている CPU は 1 つである。
 /// - 処理の無い源の禁止（`irq::disable_and_complete` から）: 割り込みの中で、BKL の中から呼ぶ（外からの割り込みの
 ///   入口関数が、BKL を取ってから呼ぶ）。AP は I/O APIC を触らない。
@@ -1489,7 +1489,7 @@ pub(crate) unsafe fn write_spurious_vector(
 /// 無効になり、LINT0 経由で届いている 8259 の IRQ0 が即座に止まる
 /// （`verification-coverage.md` の「APICのレジスタの現在値（S2-a）」）。
 /// 危険なのは bit 8 であって、ベクタ欄ではない。
-pub fn set_spurious_vector(logger: &mut Logger<Serial>, mapped: &MappedApic) {
+pub fn set_spurious_vector(logger: &mut Logger<Serial>, mapped: &MappedInterruptController) {
     let direct_map = common::addr::direct_map();
     let lapic_virt = direct_map.phys_to_virt(mapped.local_apic).as_u64();
 
@@ -1753,7 +1753,7 @@ impl TimerCalibration {
 /// 無限ループになりうる（`verification-coverage.md` の「待ちループでの読み」）。
 ///
 /// 戻り値は `(進んだ後の値, 何ティック進んだか)`。進み幅を返すのは、
-/// 取りこぼしを較正自身が検出するためである（[`calibrate_timer`] を参照）。
+/// 取りこぼしを較正自身が検出するためである（[`calibrate_local_timer`] を参照）。
 ///
 /// 期限を過ぎたら `None`。
 fn wait_for_tick_edge() -> Option<(u64, u64)> {
@@ -1825,7 +1825,7 @@ fn sample_with_pit(logger: &mut Logger<Serial>, lapic: u64) -> PitSampling {
             ));
             return PitSampling::WindowIncomplete;
         };
-        // SAFETY: `calibrate_timer` がマッピングを確認したページの中を読む。読み取りのみ。
+        // SAFETY: `calibrate_local_timer` がマッピングを確認したページの中を読む。読み取りのみ。
         let count_begin = unsafe { read_lapic(lapic, LAPIC_REGISTER_TIMER_CURRENT_COUNT) };
 
         // ウィンドウの終わりも同じくエッジで揃える。
@@ -1879,7 +1879,7 @@ fn sample_with_pm_timer(
     let mut samples = [0u64; CALIBRATION_SAMPLES];
     for slot in samples.iter_mut() {
         let begin_pm = pm_timer.read();
-        // SAFETY: `calibrate_timer` がマッピングを確認したページの中を読む。読み取りのみ。
+        // SAFETY: `calibrate_local_timer` がマッピングを確認したページの中を読む。読み取りのみ。
         let count_begin = unsafe { read_lapic(lapic, LAPIC_REGISTER_TIMER_CURRENT_COUNT) };
         let deadline_base = cpu::read_timestamp_counter();
         let elapsed_pm;
@@ -1926,9 +1926,9 @@ fn sample_with_pm_timer(
 /// 増やすので、割り込みが有効でないと進まない。`run_timer_loop` が `sti` した
 /// 直後、定常ループへ入る前に呼ぶ。この位置は APIC 関連の他の処理（`kmain` の
 /// 前半）から離れている。離れている理由はこれである。
-pub fn calibrate_timer(
+pub fn calibrate_local_timer(
     logger: &mut Logger<Serial>,
-    mapped: &MappedApic,
+    mapped: &MappedInterruptController,
     pm_timer: Option<crate::machine::pc::pmtimer::PmTimer>,
 ) -> Option<TimerCalibration> {
     let direct_map = common::addr::direct_map();
@@ -2050,7 +2050,7 @@ pub fn calibrate_timer(
     let median_hz = {
         logger.warn(format_args!(
             "apic: SABOTAGE applied - the calibration result is scaled by \
-             {CALIBRATION_SABOTAGE_SCALE}x before it leaves calibrate_timer"
+             {CALIBRATION_SABOTAGE_SCALE}x before it leaves calibrate_local_timer"
         ));
         median_hz * CALIBRATION_SABOTAGE_SCALE
     };

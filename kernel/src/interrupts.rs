@@ -668,7 +668,7 @@ pub unsafe fn run_timer_loop(
     console: Option<&mut crate::console::Console>,
     stop_after_ticks: u64,
     shell_after_heartbeats: u64,
-    apic: Option<&crate::machine::pc::apic::MappedApic>,
+    controller: Option<&crate::machine::pc::MappedInterruptController>,
     virtio: Option<&mut crate::virtio::VirtioBlk>,
     pm_timer: Option<crate::machine::pc::pmtimer::PmTimer>,
 ) {
@@ -708,7 +708,7 @@ pub unsafe fn run_timer_loop(
     //
     // 較正は測るだけで、LAPIC タイマをタイマとして使わない。LVT Timer は
     // マスクされたままで、LINT0 と SVR にも触らない。
-    if let Some(apic) = apic {
+    if let Some(controller) = controller {
         // 破壊テスト (HW-c, pm-timer-treated-as-absent): PM タイマを無いものとして渡す。
         // **PIT が刻まない構成（`pit=off`）で、両方無い道を通す**——**較正の基準が 1 つも
         // 無いことを示して止まる行が出る。** **直す前は黙って止まっていた。**
@@ -717,7 +717,7 @@ pub unsafe fn run_timer_loop(
         } else {
             pm_timer
         };
-        let calibration = crate::machine::pc::apic::calibrate_timer(logger, apic, pm_timer);
+        let calibration = crate::machine::pc::calibrate_local_timer(logger, controller, pm_timer);
 
         // === S2-d-1b: 2 つ目のコントローラ実装を 1 回だけ読ませる ===
         //
@@ -737,7 +737,7 @@ pub unsafe fn run_timer_loop(
         // **9d-5 までは、期待にキーボードの IRQ1 だけを渡していた。** virtio-blk の IRQ 11 も開いているので、
         // 下の行は「only the routed IRQs are open=false」だった。
         let registered = registered_interrupt_sources();
-        match crate::machine::pc::irq::survey_apic_masks(apic, registered.as_slice()) {
+        match crate::machine::pc::survey_interrupt_masks(controller, registered.as_slice()) {
             Some(check) => logger.info(format_args!(
                 "apic: the I/O APIC controller reads its redirection entries: {check}, \
                  only the routed IRQs are open={} (the PIC still owns every other line)",
@@ -760,7 +760,7 @@ pub unsafe fn run_timer_loop(
         // **較正の基準を見て決める**（`None` を一色に扱うと、ICW2 の誤りと PIT の不在が混ざる）。
         boot_timer_never_ticked = matches!(
             calibration.as_ref().map(|value| value.reference()),
-            Some(crate::machine::pc::apic::CalibrationReference::PmTimer)
+            Some(crate::machine::pc::CalibrationReference::PmTimer)
         );
         if let Some(calibration) = calibration {
             // SAFETY: ここは起動の途中に BSP が 1 回だけ通る（`run_timer_loop` を呼ぶのは `main.rs` の `start_timer` だけで、
@@ -792,11 +792,12 @@ pub unsafe fn run_timer_loop(
         // 窓カウントの観測に混ざる）。
         //
         // ここに `cli` / `sti` は追加していない。許可リストの数は変わらない。
-        if let Some(apic) = apic {
-            let mmio = apic.mmio();
-            // SAFETY: `apic` はマップ済み、タイマは動いている（直前まで
+        if let Some(controller) = controller {
+            let mmio = controller.mmio();
+            // SAFETY: `controller` はマップ済み、タイマは動いている（直前まで
             // デモが走った）、起動時の 1 回だけである。
-            let report = unsafe { crate::smp::wake_application_processors(logger, apic, &mmio) };
+            let report =
+                unsafe { crate::smp::wake_application_processors(logger, controller, &mmio) };
             logger.info(format_args!(
                 "smp: application processors: {} usable CPU(s) reported, {} AP(s) attempted, \
                  {} started, {} skipped for lack of a per-CPU slot (MAX_CPUS={})",
@@ -1048,7 +1049,7 @@ pub unsafe fn run_timer_loop(
             // 送信完了（ICR の delivery status）と、相手が受け取ったこと（受信
             // カウンタ）は別の量である。前者は既存の AP の起動が見ているものと
             // 同じで、後者が測りたいものである。
-            if let Some(apic) = apic {
+            if let Some(controller) = controller {
                 for slot in 1..common::percpu::MAX_CPUS {
                     let Some(processor) = crate::smp::started_processor(slot) else {
                         continue;
@@ -1061,10 +1062,10 @@ pub unsafe fn run_timer_loop(
                     // まとめられない送り方にする必要がある。
                     for _ in 0..IPI_PROBE_ROUNDS {
                         let before = crate::arch::x86_64::ipi_probe_received_for(slot);
-                        // SAFETY: `apic` はマップ済みで、宛先は起動を確認した AP である。送る所とベクタは
+                        // SAFETY: `controller` はマップ済みで、宛先は起動を確認した AP である。送る所とベクタは
                         // `machine` が持つ（`ADR-0072` の 7。9e-2）。
                         let accepted =
-                            unsafe { crate::machine::pc::send_ipi_probe(apic, processor) };
+                            unsafe { crate::machine::pc::send_ipi_probe(controller, processor) };
                         if !accepted {
                             logger.error(format_args!(
                                 "smp: the ICR did not accept a probe IPI for apic id {processor}"

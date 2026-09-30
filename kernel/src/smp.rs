@@ -280,10 +280,10 @@ pub struct WakeReport {
 /// - 起動時に 1 回だけ呼ぶこと。
 pub unsafe fn wake_application_processors(
     logger: &mut Logger<Serial>,
-    mapped: &crate::machine::pc::apic::MappedApic,
-    mmio: &crate::machine::pc::acpi::ApicMmio,
+    mapped: &crate::machine::pc::MappedInterruptController,
+    mmio: &crate::machine::pc::MadtSurvey,
 ) -> WakeReport {
-    let usable = mmio.usable_local_apics();
+    let usable = mmio.usable_processor_count();
 
     let Some(frame) = crate::arch::x86_64::trampoline_frame() else {
         logger.error(format_args!(
@@ -301,7 +301,7 @@ pub unsafe fn wake_application_processors(
 
     // この値は BSP の ID とは限らない。MADT の最初の使用可能な Local APIC
     // エントリであって、エントリ順が BSP を先頭にする保証は仕様に無い
-    // （[`crate::machine::pc::acpi::ApicMmio::bsp_candidate_apic_id`] の doc）。BSP が先頭で
+    // （[`crate::machine::pc::acpi::MadtSurvey::bsp_candidate_apic_id`] の doc）。BSP が先頭で
     // ない実装では、下の `continue` が BSP を素通りさせ、BSP 自身へ INIT-SIPI を
     // 送ることになる。
     //
@@ -312,7 +312,7 @@ pub unsafe fn wake_application_processors(
     //
     // 直さない判断と解禁条件は `docs/deferred-decisions.md` にある。要点は、
     // QEMU で MADT の並びを変える手段が無く、破壊テストでの確認を構成できないことである。
-    let bsp = mmio.bsp_candidate_apic_id();
+    let bsp = mmio.boot_processor_candidate_id();
     let mut report = WakeReport {
         usable,
         attempted: 0,
@@ -322,7 +322,7 @@ pub unsafe fn wake_application_processors(
 
     // bootstrap processor を除いた AP を、MADT の並び順で起動する。
     let mut slot = 1usize;
-    for hardware_id in mmio.local_apic_ids() {
+    for hardware_id in mmio.processor_hardware_ids() {
         if Some(hardware_id) == bsp {
             continue;
         }

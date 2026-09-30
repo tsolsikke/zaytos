@@ -894,7 +894,7 @@ pub const NO_VECTOR_YET: u64 = u64::MAX;
 
 /// このコアのタイマのティック数を読む（S4-a）。
 ///
-/// 較正（`apic::calibrate_timer`）も定常ループもこれを読む。どちらも BSP で
+/// 較正（`apic::calibrate_local_timer`）も定常ループもこれを読む。どちらも BSP で
 /// 走り、そのとき数えているのも BSP のスロットなので、両辺が同じスロットで
 /// あり意味は変わらない。
 pub fn timer_ticks() -> u64 {

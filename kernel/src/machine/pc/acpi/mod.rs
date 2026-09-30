@@ -16,7 +16,7 @@
 //! S1-b の時点で外から要る問いは「ACPI に何があったか」だけで、それはログに
 //! 出ていたので、この関数は何も返していなかった。**S1-c で最初の消費者が
 //! 現れた。** APIC の MMIO をマップするには物理アドレスそのものが要るので、
-//! [`ApicMmio`] として出す。**したがって「物理アドレスは境界の中に留まる」は
+//! [`MadtSurvey`] として出す。**したがって「物理アドレスは境界の中に留まる」は
 //! もう成り立たない。** 留まるのは生バイトとパーサの型である。
 //!
 //! **HW-b で 2 つ目の消費者が現れた**（`ADR-0068`）。**`setup_keyboard` が、i8042 を
@@ -84,7 +84,7 @@ const TABLE_READ_BUFFER_LENGTH: usize = 1024;
 /// 記録する I/O APIC の上限。
 ///
 /// **超えた分は黙って捨てない。** 実測（QEMU + OVMF）では 1 個だが、実機では
-/// 複数ありうる。捨てた数を [`ApicMmio::io_apics_dropped`] で数え、呼び出し側が
+/// 複数ありうる。捨てた数を [`MadtSurvey::io_apics_dropped`] で数え、呼び出し側が
 /// 報告できるようにしてある。上限を設けること自体は避けられない（ヒープを
 /// 使わない）が、上限に当たったことを隠すのは避けられる。
 const MAX_IO_APICS: usize = 4;
@@ -118,11 +118,11 @@ pub struct IoApicLocation {
 ///
 /// **`survey` が MADT から読み取った値だけを持つ。** 既定値のハードコードは
 /// 一切含まない。MADT が読めなかった場合や壊れていた場合は、すべて空になる
-/// （[`ApicMmio::empty`]）。**「読めなかった」と「無かった」を、呼び出し側が
+/// （[`MadtSurvey::empty`]）。**「読めなかった」と「無かった」を、呼び出し側が
 /// 区別する必要はない。** どちらの場合もマップすべきものが無いという結論は同じで、
 /// 理由はすでに `survey` がログへ出している。
 #[derive(Debug, Clone, Copy)]
-pub struct ApicMmio {
+pub struct MadtSurvey {
     local_apic: Option<PhysAddr>,
     io_apics: [Option<IoApicLocation>; MAX_IO_APICS],
     io_apics_found: usize,
@@ -143,7 +143,7 @@ pub struct ApicMmio {
     usable_local_apics: usize,
 }
 
-impl ApicMmio {
+impl MadtSurvey {
     const fn empty() -> Self {
         Self {
             local_apic: None,
@@ -161,7 +161,7 @@ impl ApicMmio {
     /// 使用可能な Local APIC の ID を、MADT の並び順で返す。
     ///
     /// **先頭が bootstrap processor の候補である。** AP はそれ以降である。
-    pub fn local_apic_ids(&self) -> impl Iterator<Item = u8> + '_ {
+    pub fn processor_hardware_ids(&self) -> impl Iterator<Item = u8> + '_ {
         self.local_apic_ids.iter().flatten().copied()
     }
 
@@ -171,7 +171,7 @@ impl ApicMmio {
     }
 
     /// MADT が報告した使用可能な Local APIC の本数（= 起動しうるコア数）。
-    pub const fn usable_local_apics(&self) -> usize {
+    pub const fn usable_processor_count(&self) -> usize {
         self.usable_local_apics
     }
 
@@ -289,7 +289,7 @@ impl ApicMmio {
     /// **BSP の ID とは限らない。** MADT のエントリ順が BSP を先頭にする保証は
     /// 仕様に無い。読み取った Local APIC ID との突き合わせに使うが、
     /// **この突き合わせは弱い**（[`crate::machine::pc::apic`] の該当箇所に理由がある）。
-    pub const fn bsp_candidate_apic_id(&self) -> Option<u8> {
+    pub const fn boot_processor_candidate_id(&self) -> Option<u8> {
         self.bsp_candidate_apic_id
     }
 }
@@ -330,14 +330,14 @@ impl FadtFacts {
 /// [`survey`] が読み取ったもの。
 #[derive(Debug, Clone, Copy)]
 pub struct Survey {
-    pub apic: ApicMmio,
+    pub apic: MadtSurvey,
     pub fadt: FadtFacts,
 }
 
 impl Survey {
     const fn empty() -> Self {
         Self {
-            apic: ApicMmio::empty(),
+            apic: MadtSurvey::empty(),
             fadt: FadtFacts::unknown(),
         }
     }
@@ -671,7 +671,7 @@ pub fn survey(
             memory_map_bytes,
             descriptor_size,
         ),
-        None => ApicMmio::empty(),
+        None => MadtSurvey::empty(),
     };
     // **MADT の後に読む**（HW-b）。**起動ログの既存の行の並びを動かさないためである。**
     let fadt = match tables.fadt {
@@ -1084,8 +1084,8 @@ fn walk_madt(
     madt_phys: PhysAddr,
     memory_map_bytes: &[u8],
     descriptor_size: u64,
-) -> ApicMmio {
-    let mut mmio = ApicMmio::empty();
+) -> MadtSurvey {
+    let mut mmio = MadtSurvey::empty();
 
     report_memory_type(
         logger,
@@ -1287,7 +1287,7 @@ fn walk_madt(
         logger.error(format_args!(
             "acpi: the MADT was not fully enumerated; the APIC inventory is incomplete"
         ));
-        return ApicMmio::empty();
+        return MadtSurvey::empty();
     }
 
     mmio.io_apics_found = io_apic_count;

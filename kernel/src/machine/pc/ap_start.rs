@@ -92,7 +92,7 @@ impl fmt::Display for StartAddress {
 /// `mapped` がマップ済みの Local APIC を指し、`start` のページに実行できるトランポリンが置かれていること。
 /// 起動時に、この AP へ 1 回だけ呼ぶこと。
 pub unsafe fn start_processor(
-    mapped: &crate::machine::pc::apic::MappedApic,
+    mapped: &crate::machine::pc::apic::MappedInterruptController,
     processor: ProcessorId,
     start: StartAddress,
     wait_ticks: fn(u64),

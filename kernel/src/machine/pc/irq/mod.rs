@@ -63,7 +63,7 @@
 //! | [`irq_for`] | モジュール関数 | 同上 |
 //! | [`managed_vectors`] | モジュール関数 | 同上 |
 //! | [`timer_frequency_hz`] | モジュール関数 | 同上 |
-//! | [`survey_apic_masks`] | どちらでもない | 2 つ目の実装を 1 回読ませるための一時的な入口（S2-d-1b）。切り替えが済めば要らなくなる |
+//! | [`survey_interrupt_masks`] | どちらでもない | 2 つ目の実装を 1 回読ませるための一時的な入口（S2-d-1b）。切り替えが済めば要らなくなる |
 //! | [`claim`] | モジュール関数 | 受け取るの判定はベクタと、表と今のタイマ（どちらもアトミック）だけで決まり、実装ごとに変わらない（`ADR-0072` の 2。2026-09-28） |
 //! | [`complete`] | 委譲する関数を束ねる | 完了の中身（EOI とスプリアスの見分け）は [`end_of_interrupt`] と [`is_spurious`] が実装へ委譲する（同上） |
 //! | [`spurious_counts`] | モジュール関数 | 観測値である。数えるのは [`claim`] と [`complete`] の中である（同上） |
@@ -764,8 +764,8 @@ pub fn check_masks(unmasked: &[IsaIrq]) -> MaskCheck {
 ///
 /// I/O APIC が 1 台もマップできていなければ `None`。
 /// `sources` は、開いているはずの源である（共通の側の処理のある源。9e で源の番号の型にした）。
-pub fn survey_apic_masks(
-    mapped: &crate::machine::pc::apic::MappedApic,
+pub fn survey_interrupt_masks(
+    mapped: &crate::machine::pc::apic::MappedInterruptController,
     sources: &[InterruptSource],
 ) -> Option<MaskCheck> {
     let controller = apic::Apic::new(mapped)?;
@@ -943,7 +943,7 @@ pub fn claim(arrival: Arrival) -> Claim {
 /// `mapped` がマップ済みの Local APIC を指し、`processor` が起動を確かめた AP であること。宛先の型は 9f で
 /// [`crate::machine::pc::ProcessorId`] にした（AP を起こす関数と同じ）。
 pub unsafe fn send_ipi_probe(
-    mapped: &crate::machine::pc::apic::MappedApic,
+    mapped: &crate::machine::pc::apic::MappedInterruptController,
     processor: crate::machine::pc::ProcessorId,
 ) -> bool {
     // SAFETY: 呼び出し側の契約をそのまま引き継ぐ。探りのベクタには専用のスタブのゲートが入っている（`idt::init`）。
@@ -1183,7 +1183,7 @@ impl fmt::Display for SpuriousCounts {
 /// - 配送先のベクタに、戻れるハンドラが IDT に入っていること。
 /// - 起動時に呼ぶこと（この関数は割り込みを一時的に禁止する）。
 pub unsafe fn route_to_apic(
-    mapped: &crate::machine::pc::apic::MappedApic,
+    mapped: &crate::machine::pc::apic::MappedInterruptController,
     irq: IsaIrq,
     vector: u8,
     signaling: RouteSignaling,
@@ -1245,7 +1245,7 @@ pub unsafe fn route_to_apic(
 /// そのとき何を既定とするかは呼び出し側の判断である（PCI なら level・low）。
 /// **ビット定数は `crate::machine::pc::apic` の内側に留める**（あの到達範囲を広げない）。
 pub fn declared_signaling(
-    mmio: &crate::machine::pc::acpi::ApicMmio,
+    mmio: &crate::machine::pc::acpi::MadtSurvey,
     irq: IsaIrq,
 ) -> Option<(bool, bool)> {
     if !mmio.has_override_for_irq(irq.0) {
@@ -1259,7 +1259,7 @@ pub fn declared_signaling(
 }
 
 pub fn routed_entry_readback(
-    mapped: &crate::machine::pc::apic::MappedApic,
+    mapped: &crate::machine::pc::apic::MappedInterruptController,
     irq: IsaIrq,
 ) -> Option<RedirectionEntryView> {
     if !routed_to_apic(irq) {
