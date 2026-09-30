@@ -65,7 +65,7 @@ const READ_FAILED: &[u8] = b"ls: cannot read the directory\n";
 ///
 /// `stack` が `_start` の時点の `rsp` であること。
 #[no_mangle]
-pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
+pub unsafe extern "sysv64" fn zeikos_main(stack: *const u64) -> ! {
     // **パスは `argv[1]`、無ければルートである。**
     let mut path = [0u8; PATH_MAX];
     // SAFETY: 呼び出し元契約により `stack` は初期スタックの先頭を指す。

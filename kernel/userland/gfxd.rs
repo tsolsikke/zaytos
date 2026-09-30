@@ -114,7 +114,7 @@ fn fail(text: &[u8], code: i64, status: u64) -> ! {
 ///
 /// `stack` が `_start` の時点の `rsp` であること。
 #[no_mangle]
-pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
+pub unsafe extern "sysv64" fn zeikos_main(_stack: *const u64) -> ! {
     // **1. 前景でない者が開けないことを先に見る**（モジュールの doc）。
     let peer_argv: [*const u8; 2] = [PEER_ARG0.as_ptr(), core::ptr::null()];
     let peer_envp: [*const u8; 1] = [core::ptr::null()];

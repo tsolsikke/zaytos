@@ -140,7 +140,7 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
 
     // **共有する包み（S11-9）。** `ls` と `cat` が `mod userlib;` で取り込む。
     // **`PROGRAMS` には入れない**——単独ではビルドできない（`_start` はあるが
-    // `zaytos_main` が無い）。**変わったらビルドし直す必要はあるので、ここで見る。**
+    // `zeikos_main` が無い）。**変わったらビルドし直す必要はあるので、ここで見る。**
     println!("cargo:rerun-if-changed={manifest_dir}/userland/userlib.rs");
 
     // **`common` から取り込む純粋な論理（VIEW-a。ADR-0045 の決定 3）。**

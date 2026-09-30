@@ -189,7 +189,7 @@ static mut RECOVERIES: [[Recovery; MAX_EXCURSION_DEPTH]; USER_TASK_SLOTS] = [con
 ///
 /// # なぜアドレスを持つのか。**asm に深さを渡さないため**
 ///
-/// `zaytos_enter_ring3` と `zaytos_resume_from_ring3` は、かつて
+/// `zeikos_enter_ring3` と `zeikos_resume_from_ring3` は、かつて
 /// `lea rax, [rip + RECOVERY]` で回復点を直に指していた。**深さで添字を引く形に
 /// すると、asm が深さを読んで掛け算をすることになる。**
 ///
@@ -224,7 +224,7 @@ pub const USER_TASK_SLOTS: usize = 2;
 ///
 /// **`CURRENT_RECOVERY` と RSP0 はここに無い。** **どちらも「単一の既知の場所」で
 /// なければならない**——**前者はアセンブラが `[rip + sym]` で読み**（実測。
-/// [`zaytos_enter_ring3`] と [`zaytos_resume_from_ring3`]）、**後者は TSS の
+/// [`zeikos_enter_ring3`] と [`zeikos_resume_from_ring3`]）、**後者は TSS の
 /// 決まった欄である。** **あの 2 つはタスクが値を持ち、切り替えで入れ替える形になる
 /// （W1-b）。**
 ///
@@ -437,22 +437,22 @@ extern "C" {
     ///
     /// **飛び先と Ring 3 のスタック上端は引数で受け取る**（S9-a）。RDI が
     /// `user_rip`、RSI が `user_stack_top` である（System V の第 1・第 2 引数）。
-    fn zaytos_enter_ring3(user_rip: u64, user_stack_top: u64);
+    fn zeikos_enter_ring3(user_rip: u64, user_stack_top: u64);
     /// [`RECOVERY`] から RSP と callee-saved を復元し、復帰 RIP へ飛ぶ
     /// （longjmp 相当）。戻らない。
-    fn zaytos_resume_from_ring3() -> !;
+    fn zeikos_resume_from_ring3() -> !;
 }
 
 // 遠征の遷移ルーチン（setjmp + iretq）。
 //
 // RECOVERY へ callee-saved と RSP、復帰ラベルを保存してから、iretq 偽フレームを
-// 積んで Ring 3 へ落ちる。復帰ラベルへは例外による終了処理（zaytos_resume_from_ring3）だけが
+// 積んで Ring 3 へ落ちる。復帰ラベルへは例外による終了処理（zeikos_resume_from_ring3）だけが
 // 飛んでくる。そこで ret すると呼び出し元へ戻る。
 core::arch::global_asm!(
     ".section .text",
     ".p2align 4",
-    ".globl zaytos_enter_ring3",
-    "zaytos_enter_ring3:",
+    ".globl zeikos_enter_ring3",
+    "zeikos_enter_ring3:",
     // setjmp 相当: callee-saved と RSP、復帰 RIP を保存する。
     // **回復点は深さごとに違う**ので、アドレスを Rust が置いた場所から読む（S11-2）。
     "  mov rax, [rip + {recovery_ptr}]",
@@ -491,8 +491,8 @@ core::arch::global_asm!(
 core::arch::global_asm!(
     ".section .text",
     ".p2align 4",
-    ".globl zaytos_resume_from_ring3",
-    "zaytos_resume_from_ring3:",
+    ".globl zeikos_resume_from_ring3",
+    "zeikos_resume_from_ring3:",
     // **入った遠征と同じ回復点へ戻る**（S11-2）。
     "  mov rax, [rip + {recovery_ptr}]",
     "  mov rsp, [rax + 0]",
@@ -807,7 +807,7 @@ pub unsafe fn run_excursion(
     // **埋める（`fill_excursion_stack`。64 KiB）より後に置く**——**長い書き込みを
     // 割り込み禁止の区間へ入れない。**
     // SAFETY: 割り込みを止めるだけで、メモリには触らない。この後で割り込みを許すのは
-    // `zaytos_enter_ring3` の `iretq` だけで、そこまでに眠る処理もロックを取る処理も無い。
+    // `zeikos_enter_ring3` の `iretq` だけで、そこまでに眠る処理もロックを取る処理も無い。
     unsafe { common::arch::x86_64::cpu::disable_interrupts() };
 
     // RSP0 を遠征専用スタックへ据える。#GP はここへ切り替わる。
@@ -843,7 +843,7 @@ pub unsafe fn run_excursion(
     // SAFETY: 偽フレームを積んで Ring 3 へ落ちる。ユーザーページは呼び出し側が
     // マップ済み。畳みで戻ってくる（callee-saved と RSP は longjmp が復元する）。
     unsafe {
-        zaytos_enter_ring3(user_rip, user_stack_top);
+        zeikos_enter_ring3(user_rip, user_stack_top);
     }
 
     // データセグメントを復元する。**iretq で Ring 3（低特権）へ落ちるとき、CPU は
@@ -896,7 +896,7 @@ pub unsafe fn run_excursion(
     crate::task::note_current_excursion_depth(state.depth.load(Ordering::SeqCst));
 
     // **ウィンドウを戻す（S9-b-3-2b）。** ここは例外による終了処理で戻った場合も `exit` で戻った場合も
-    // 通る（どちらの longjmp も `zaytos_enter_ring3` の復帰点へ帰る）。
+    // 通る（どちらの longjmp も `zeikos_enter_ring3` の復帰点へ帰る）。
     crate::syscall::set_user_window(previous_window.0, previous_window.1);
 }
 
@@ -1046,7 +1046,7 @@ pub unsafe fn leave_user_mode() -> ! {
     state().in_ring3.store(false, Ordering::SeqCst);
     // SAFETY: 呼び出し側契約により RECOVERY は保存済み。longjmp は RSP と
     // callee-saved を復元して復帰 RIP へ飛ぶ。戻らない。
-    unsafe { zaytos_resume_from_ring3() }
+    unsafe { zeikos_resume_from_ring3() }
 }
 
 /// 例外による終了処理が起きたか（遠征後の会計）。

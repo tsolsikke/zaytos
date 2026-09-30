@@ -81,7 +81,7 @@ const SEEK_FAILED: &[u8] = b"tail: cannot seek\n";
 ///
 /// `stack` が `_start` の時点の `rsp` であること。
 #[no_mangle]
-pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
+pub unsafe extern "sysv64" fn zeikos_main(stack: *const u64) -> ! {
     // SAFETY: 呼び出し元契約により `stack` は初期スタックの先頭を指す。
     let Some(pointer) = (unsafe { userlib::argument(stack, 1) }) else {
         write_all(STDERR, USAGE);

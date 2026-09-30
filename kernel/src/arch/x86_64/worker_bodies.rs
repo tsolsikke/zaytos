@@ -22,8 +22,8 @@ use crate::task::{
 core::arch::global_asm!(
     ".section .text",
     ".p2align 4",
-    ".globl zaytos_worker_body",
-    "zaytos_worker_body:",
+    ".globl zeikos_worker_body",
+    "zeikos_worker_body:",
     "2:", // ラウンドループ
     "  call {current_base}",
     "  lea rbx, [rax + 1]",
@@ -91,8 +91,8 @@ core::arch::global_asm!(
 core::arch::global_asm!(
     ".section .text",
     ".p2align 4",
-    ".globl zaytos_preemptive_body",
-    "zaytos_preemptive_body:",
+    ".globl zeikos_preemptive_body",
+    "zeikos_preemptive_body:",
     "2:",
     // ループ先頭（IF=1、プリエンプト可）。base を得る。preempt-in-critical の
     // 破壊テストでの確認では、ここで DEMO_LOCK を保持したままスピンする（IF=1 なので

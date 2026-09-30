@@ -162,7 +162,7 @@ fn report(round: i64, fds: &[PollFd], names: [&[u8]; 2]) {
 ///
 /// `stack` が `_start` の時点の `rsp` であること。
 #[no_mangle]
-pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
+pub unsafe extern "sysv64" fn zeikos_main(_stack: *const u64) -> ! {
     let input = open_input();
     if input < 0 {
         fail(b"polld: open_input failed ", input, 1);

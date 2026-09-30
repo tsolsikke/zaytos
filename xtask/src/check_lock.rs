@@ -794,12 +794,12 @@ pub fn self_check(root: &Path) -> Result<String> {
     let marks = scratch.join("vbox-running");
     fs::create_dir_all(&marks).with_context(|| format!("could not create {}", marks.display()))?;
     fs::write(
-        marks.join("zaytos-selfcheck"),
+        marks.join("zeikos-selfcheck"),
         "started by the self-check\n",
     )
     .context("could not write a VirtualBox mark")?;
     let refused = try_in_child(&exe, &lock, Mode::Exclusive, None)?;
-    if refused.0 != Some(REFUSED_EXIT_CODE) || !refused.1.contains("zaytos-selfcheck") {
+    if refused.0 != Some(REFUSED_EXIT_CODE) || !refused.1.contains("zeikos-selfcheck") {
         bail!(
             "an exclusive try with a VM marked as running ended with {:?}, not {REFUSED_EXIT_CODE} \
              naming the VM: {}",
@@ -1104,7 +1104,7 @@ mod tests {
     /// 生きていても放れる。** **継がれていれば、子のコピーがロックを持ち続け、2 度目の取りが断られる。**
     #[test]
     fn the_lock_is_not_inherited_by_a_child() {
-        let dir = std::env::temp_dir().join(format!("zaytos-lock-inherit-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("zeikos-lock-inherit-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("check.lock");

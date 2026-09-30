@@ -594,7 +594,7 @@ pub fn open_input() -> i64 {
     unsafe { syscall3(SYS_OPEN_INPUT, 0, 0, 0) }
 }
 
-/// 画面を開く入口の番号（`ZAYTOS_PRIVATE_BASE + 9`。`ADR-0066` の Y-c）。
+/// 画面を開く入口の番号（`ZEIKOS_PRIVATE_BASE + 9`。`ADR-0066` の Y-c）。
 pub const SYS_OPEN_SCREEN: u64 = 0x1009;
 /// `FBIOGET_VSCREENINFO`（Linux の fbdev）。**カーネルの値と同じ。**
 pub const FBIOGET_VSCREENINFO: u64 = 0x4600;
@@ -682,10 +682,10 @@ pub fn getdents64(fd: u64, buf: &mut [u8]) -> i64 {
     }
 }
 
-/// `spawn` の番号（`ZAYTOS_PRIVATE_BASE + 4`。ZeikOS 独自）。
+/// `spawn` の番号（`ZEIKOS_PRIVATE_BASE + 4`。ZeikOS 独自）。
 pub const SYS_SPAWN: u64 = 0x1004;
 
-/// 切り離して起動する入口の番号（`ZAYTOS_PRIVATE_BASE + 5`。`ADR-0063` の (b3)）。
+/// 切り離して起動する入口の番号（`ZEIKOS_PRIVATE_BASE + 5`。`ADR-0063` の (b3)）。
 pub const SYS_SPAWN_DETACHED: u64 = 0x1005;
 
 /// 予約したパイプの読み端を fd 0 にして入れ子で起動する入口の番号（`+ 6`。`ADR-0063` の (b3)）。
@@ -1148,8 +1148,8 @@ core::arch::global_asm!(
     // `call` が戻りアドレスを 1 つ積むので、呼ばれた側の rsp は 16 の倍数 + 8 になる
     // （SysV の規約どおり）。
     "  mov rdi, rsp",
-    "  call zaytos_main",
-    // **ここへは戻らない。** `zaytos_main` は `-> !` で、型として戻れない。
+    "  call zeikos_main",
+    // **ここへは戻らない。** `zeikos_main` は `-> !` で、型として戻れない。
     // **それでも `call` の直後を空けない**——`exit` が効かなかったときに
     // 詰め物を走り抜けて次に置かれたものを実行する形にしない
     // （`hello.rs` の受け皿と同じ規律）。

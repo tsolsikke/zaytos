@@ -246,7 +246,7 @@ mod tests {
         bytes[OFFSET_SIGNATURE..OFFSET_SIGNATURE + SIGNATURE_LENGTH].copy_from_slice(signature);
         bytes[OFFSET_LENGTH..OFFSET_LENGTH + 4].copy_from_slice(&(length as u32).to_le_bytes());
         bytes[OFFSET_REVISION] = 1;
-        bytes[OFFSET_OEM_ID..OFFSET_OEM_ID + OEM_ID_LENGTH].copy_from_slice(b"ZAYTOS");
+        bytes[OFFSET_OEM_ID..OFFSET_OEM_ID + OEM_ID_LENGTH].copy_from_slice(b"ZEIKOS");
         bytes[HEADER_LENGTH..].copy_from_slice(body);
         let mut sum = 0u8;
         for &b in bytes.iter() {
@@ -270,7 +270,7 @@ mod tests {
         let header = parse_header(&bytes, HEADER_LENGTH as u32).unwrap();
         assert!(header.has_signature(&XSDT_SIGNATURE));
         assert_eq!(header.length, (HEADER_LENGTH + 16) as u32);
-        assert_eq!(&header.oem_id, b"ZAYTOS");
+        assert_eq!(&header.oem_id, b"ZEIKOS");
         assert_eq!(verify_checksum(&bytes, header.length), Ok(()));
     }
 

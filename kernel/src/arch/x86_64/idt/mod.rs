@@ -83,23 +83,23 @@ static mut IDT: [IdtEntry; IDT_ENTRY_COUNT] = [IdtEntry::missing(); IDT_ENTRY_CO
 core::arch::global_asm!(
     ".section .text",
     ".p2align 4",
-    ".globl zaytos_exception_stubs",
-    "zaytos_exception_stubs:",
+    ".globl zeikos_exception_stubs",
+    "zeikos_exception_stubs:",
     ".set stub_vector, 0",
     ".rept 256",
     // 刻み幅の検証に使う独立したラベル。アセンブラが算出するので、
     // Rust 側の base + n * STUB_SIZE という計算とは独立している。
     "  .if stub_vector == 8",
-    "    .globl zaytos_exception_stub_8",
-    "    zaytos_exception_stub_8:",
+    "    .globl zeikos_exception_stub_8",
+    "    zeikos_exception_stub_8:",
     "  .endif",
     "  .if stub_vector == 14",
-    "    .globl zaytos_exception_stub_14",
-    "    zaytos_exception_stub_14:",
+    "    .globl zeikos_exception_stub_14",
+    "    zeikos_exception_stub_14:",
     "  .endif",
     "  .if stub_vector == 255",
-    "    .globl zaytos_exception_stub_255",
-    "    zaytos_exception_stub_255:",
+    "    .globl zeikos_exception_stub_255",
+    "    zeikos_exception_stub_255:",
     "  .endif",
     "  .if (stub_vector == 8) || (stub_vector == 10) || (stub_vector == 11) || (stub_vector == 12) || (stub_vector == 13) || (stub_vector == 14) || (stub_vector == 17) || (stub_vector == 21) || (stub_vector == 29) || (stub_vector == 30)",
     "    push stub_vector",
@@ -107,18 +107,18 @@ core::arch::global_asm!(
     "    push 0",
     "    push stub_vector",
     "  .endif",
-    "  jmp zaytos_exception_common",
+    "  jmp zeikos_exception_common",
     "  .set stub_vector, stub_vector + 1",
     "  .p2align 4",
     ".endr",
     // 表の終端。ここまでの距離が 256 * STUB_SIZE であることを実行時に検証する。
-    ".globl zaytos_exception_stubs_end",
-    "zaytos_exception_stubs_end:",
+    ".globl zeikos_exception_stubs_end",
+    "zeikos_exception_stubs_end:",
     ".p2align 4",
     // **ラベルを公開する（2026-09-24）。** 全ゲートの飛び先を突き合わせる監視
     // （[`check_gates_lead_to_common_entries`]）が、このアドレスを読む。
-    ".globl zaytos_exception_common",
-    "zaytos_exception_common:",
+    ".globl zeikos_exception_common",
+    "zeikos_exception_common:",
     // ここに来た時点のスタック:
     //   [rsp]=ベクタ, +8=エラーコード, +16=RIP, +24=CS, +32=RFLAGS, +40=RSP, +48=SS
     //
@@ -273,83 +273,83 @@ const CLEAR_DF_ON_SYSCALL_ENTRY: usize = if cfg!(feature = "syscall-entry-keeps-
 core::arch::global_asm!(
     ".section .text",
     ".p2align 4",
-    ".globl zaytos_irq_stubs",
-    "zaytos_irq_stubs:",
+    ".globl zeikos_irq_stubs",
+    "zeikos_irq_stubs:",
     ".set irq_index, 0",
     ".rept 33",
     // スタブ表の刻み幅を独立に検証するためのラベル（例外側と同じ発想）。
     "  .if irq_index == 0",
-    "    .globl zaytos_irq_stub_0",
-    "    zaytos_irq_stub_0:",
+    "    .globl zeikos_irq_stub_0",
+    "    zeikos_irq_stub_0:",
     "  .endif",
     "  .if irq_index == 15",
-    "    .globl zaytos_irq_stub_15",
-    "    zaytos_irq_stub_15:",
+    "    .globl zeikos_irq_stub_15",
+    "    zeikos_irq_stub_15:",
     "  .endif",
     "  .if irq_index == 16",
-    "    .globl zaytos_irq_stub_16",
-    "    zaytos_irq_stub_16:",
+    "    .globl zeikos_irq_stub_16",
+    "    zeikos_irq_stub_16:",
     "  .endif",
     "  .if irq_index == 31",
-    "    .globl zaytos_irq_stub_31",
-    "    zaytos_irq_stub_31:",
+    "    .globl zeikos_irq_stub_31",
+    "    zeikos_irq_stub_31:",
     "  .endif",
     "  .if irq_index == 32",
-    "    .globl zaytos_irq_stub_32",
-    "    zaytos_irq_stub_32:",
+    "    .globl zeikos_irq_stub_32",
+    "    zeikos_irq_stub_32:",
     "  .endif",
     // IRQ にエラーコードは無い。ベクタ番号だけを積む。
     "  push irq_index + 0x20",
-    "  jmp zaytos_irq_common",
+    "  jmp zeikos_irq_common",
     "  .set irq_index, irq_index + 1",
     "  .p2align 4",
     ".endr",
-    ".globl zaytos_irq_stubs_end",
-    "zaytos_irq_stubs_end:",
+    ".globl zeikos_irq_stubs_end",
+    "zeikos_irq_stubs_end:",
     ".p2align 4",
     // Local APIC のスプリアス割り込み用スタブ（S2-d-1）。表の外に置く。
     //
     // 表は `0x20` から 33 本の連続範囲しか覆っておらず、スプリアスの
-    // `0xFF`（`crate::machine::pc::apic::SPURIOUS_VECTOR`）は範囲外である。`zaytos_yield_stub` と
-    // `zaytos_syscall_stub` が同じ形の前例で、非連続のベクタには専用スタブを置いて
-    // `zaytos_irq_common` へ合流させる。
+    // `0xFF`（`crate::machine::pc::apic::SPURIOUS_VECTOR`）は範囲外である。`zeikos_yield_stub` と
+    // `zeikos_syscall_stub` が同じ形の前例で、非連続のベクタには専用スタブを置いて
+    // `zeikos_irq_common` へ合流させる。
     //
     // `push 0xff` の符号拡張に注意が要る。`push imm8` は 64 ビットへ符号拡張
     // されるので、`0xff` を imm8 で積むと `-1` になる。表の中のベクタ（`0x20`-`0x40`）は
     // どれも `0x80` 未満なので、この問題は今まで現れなかった。アセンブラが
     // imm32 を選ぶことに依存しないよう、符号なしで安全な形を明示する。
     // 値が正しいことはビルド後に逆アセンブルで確かめる（`verification-coverage.md`）。
-    ".globl zaytos_spurious_stub",
-    "zaytos_spurious_stub:",
+    ".globl zeikos_spurious_stub",
+    "zeikos_spurious_stub:",
     "  .byte 0x68, 0xff, 0x00, 0x00, 0x00",
-    "  jmp zaytos_irq_common",
+    "  jmp zeikos_irq_common",
     ".p2align 4",
     // I/O APIC 経由のキーボード用スタブ（S2-d-1c）。表の外に置く。
     //
     // `0x42` は表（`0x20` から 33 本）の範囲外である。スプリアスと同じ形で、
-    // 専用スタブを置いて `zaytos_irq_common` へ合流させる。
+    // 専用スタブを置いて `zeikos_irq_common` へ合流させる。
     //
     // バイトを明示するのはスプリアスと揃えるためである。`0x42` は
     // `0x80` 未満なので `push imm8` でも符号拡張の問題は起きないが、
     // 書き方を揃えておけば「どちらの形だったか」を毎回考えずに済む。
-    ".globl zaytos_ioapic_keyboard_stub",
-    "zaytos_ioapic_keyboard_stub:",
+    ".globl zeikos_ioapic_keyboard_stub",
+    "zeikos_ioapic_keyboard_stub:",
     "  .byte 0x68, 0x42, 0x00, 0x00, 0x00",
-    "  jmp zaytos_irq_common",
+    "  jmp zeikos_irq_common",
     ".p2align 4",
     // Local APIC タイマ用スタブ（S2-d-2）。表の外に置く。
     //
     // `0xFE` は `0x80` 以上なので、`push imm8` だと符号拡張されて `-2` に
     // なる。スプリアスの `0xFF` と同じ罠で、バイトを明示して imm32 を
     // 固定する。値が正しいことはビルド後に逆アセンブルで確かめる。
-    ".globl zaytos_lapic_timer_stub",
-    "zaytos_lapic_timer_stub:",
+    ".globl zeikos_lapic_timer_stub",
+    "zeikos_lapic_timer_stub:",
     "  .byte 0x68, 0xfe, 0x00, 0x00, 0x00",
-    "  jmp zaytos_irq_common",
+    "  jmp zeikos_irq_common",
     // 測定用 IPI の専用スタブ（S5-a）。既存の専用スタブと同じ形である。
     // `IRQ_STYLE_STUB_COUNT` の範囲外のベクタは、この形で 1 本ずつ載せる。
-    ".globl zaytos_ipi_probe_stub",
-    "zaytos_ipi_probe_stub:",
+    ".globl zeikos_ipi_probe_stub",
+    "zeikos_ipi_probe_stub:",
     "  .byte 0x68, 0x43, 0x00, 0x00, 0x00",
     // 破壊テスト (2026-09-24, idt-stub-skips-common-entry): 共通の入口を通らず、Rust の `irq_entry` へ
     // 直に飛ぶ。**`cld` も退避も飛ばす入口が 1 つ増えた形である。** **ゲートはこのスタブを指した
@@ -357,17 +357,17 @@ core::arch::global_asm!(
     "  .if {stub_skips_common_entry}",
     "  jmp {skipped_to}",
     "  .else",
-    "  jmp zaytos_irq_common",
+    "  jmp zeikos_irq_common",
     "  .endif",
     ".p2align 4",
     // virtio-blk 用スタブ（S13-d）。既存の専用スタブと同じ形である。
-    ".globl zaytos_virtio_blk_stub",
-    "zaytos_virtio_blk_stub:",
+    ".globl zeikos_virtio_blk_stub",
+    "zeikos_virtio_blk_stub:",
     "  .byte 0x68, 0x44, 0x00, 0x00, 0x00",
-    "  jmp zaytos_irq_common",
+    "  jmp zeikos_irq_common",
     ".p2align 4",
-    ".globl zaytos_irq_common",
-    "zaytos_irq_common:",
+    ".globl zeikos_irq_common",
+    "zeikos_irq_common:",
     // 入場時のスタック: [rsp]=ベクタ, +8=RIP, +16=CS, +24=RFLAGS, +32=RSP, +40=SS
     //
     // GPR を退避する。順序は IrqContext のフィールド順と一対一。
@@ -431,10 +431,10 @@ core::arch::global_asm!(
     // ので、int YIELD_VECTOR が IRQ の退避・復元・スイッチ経路にそのまま
     // 載る。エラーコードは無いのでベクタ番号だけを積む。
     ".p2align 4",
-    ".globl zaytos_yield_stub",
-    "zaytos_yield_stub:",
+    ".globl zeikos_yield_stub",
+    "zeikos_yield_stub:",
     "  push {yield_vector}",
-    "  jmp zaytos_irq_common",
+    "  jmp zeikos_irq_common",
     handler = sym irq_entry,
     adjust = const STACK_ALIGN_ADJUST,
     yield_vector = const YIELD_VECTOR,
@@ -445,12 +445,12 @@ core::arch::global_asm!(
 
 extern "C" {
     /// 協調的 yield 用スタブの先頭（M5-c）。IDT の yield ゲートが指す。
-    static zaytos_yield_stub: u8;
+    static zeikos_yield_stub: u8;
 }
 
 // システムコール（int 0x80）用のスタブと共通経路（M5-f-1、ADR-0020）。
 //
-// IRQ スタイルの復元経路（zaytos_irq_common）をコピーした別ブロックである。
+// IRQ スタイルの復元経路（zeikos_irq_common）をコピーした別ブロックである。
 // 退避・整列・call・復元・iretq の骨格は同じで、違うのは call 先が
 // `crate::syscall::syscall_entry` で、context を *mut で渡し、戻り値を RAX へ
 // 書き戻す点だけである。本番 IRQ 経路（irq_entry）へ syscall 固有の分岐を
@@ -464,14 +464,14 @@ extern "C" {
 core::arch::global_asm!(
     ".section .text",
     ".p2align 4",
-    ".globl zaytos_syscall_stub",
-    "zaytos_syscall_stub:",
+    ".globl zeikos_syscall_stub",
+    "zeikos_syscall_stub:",
     // int 0x80 にエラーコードは無い。ベクタ番号だけを積む。
     "  push {syscall_vector}",
-    "  jmp zaytos_syscall_common",
+    "  jmp zeikos_syscall_common",
     ".p2align 4",
-    ".globl zaytos_syscall_common",
-    "zaytos_syscall_common:",
+    ".globl zeikos_syscall_common",
+    "zeikos_syscall_common:",
     // 入場時のスタック: [rsp]=ベクタ, +8=RIP, +16=CS, +24=RFLAGS, +32=RSP, +40=SS
     // GPR を退避する。順序は IrqContext のフィールド順と一対一（IRQ と同じ）。
     "  push r15",
@@ -529,34 +529,34 @@ core::arch::global_asm!(
 
 extern "C" {
     /// システムコール用スタブの先頭（M5-f-1）。IDT の 0x80 ゲートが指す。
-    static zaytos_syscall_stub: u8;
+    static zeikos_syscall_stub: u8;
 }
 
 extern "C" {
     /// `global_asm!` が定義するスタブ表の先頭。
-    static zaytos_exception_stubs: u8;
+    static zeikos_exception_stubs: u8;
     /// スタブ表の終端。先頭との差が `256 * STUB_SIZE` になるはず。
-    static zaytos_exception_stubs_end: u8;
+    static zeikos_exception_stubs_end: u8;
     /// 刻み幅の検証用に、アセンブラが直接付けたラベル。
-    static zaytos_exception_stub_8: u8;
-    static zaytos_exception_stub_14: u8;
-    static zaytos_exception_stub_255: u8;
+    static zeikos_exception_stub_8: u8;
+    static zeikos_exception_stub_14: u8;
+    static zeikos_exception_stub_255: u8;
 
     /// IRQ スタブ表の先頭・終端・刻み幅検証用ラベル。
     ///
     /// 例外用とは別の領域なので、範囲検証も別系統になる。
-    static zaytos_irq_stubs: u8;
-    static zaytos_irq_stubs_end: u8;
-    static zaytos_spurious_stub: u8;
-    static zaytos_ioapic_keyboard_stub: u8;
-    static zaytos_virtio_blk_stub: u8;
-    static zaytos_lapic_timer_stub: u8;
-    static zaytos_ipi_probe_stub: u8;
-    static zaytos_irq_stub_0: u8;
-    static zaytos_irq_stub_15: u8;
-    static zaytos_irq_stub_16: u8;
-    static zaytos_irq_stub_31: u8;
-    static zaytos_irq_stub_32: u8;
+    static zeikos_irq_stubs: u8;
+    static zeikos_irq_stubs_end: u8;
+    static zeikos_spurious_stub: u8;
+    static zeikos_ioapic_keyboard_stub: u8;
+    static zeikos_virtio_blk_stub: u8;
+    static zeikos_lapic_timer_stub: u8;
+    static zeikos_ipi_probe_stub: u8;
+    static zeikos_irq_stub_0: u8;
+    static zeikos_irq_stub_15: u8;
+    static zeikos_irq_stub_16: u8;
+    static zeikos_irq_stub_31: u8;
+    static zeikos_irq_stub_32: u8;
 }
 
 /// IRQ スタイルのスタブの本数。
@@ -653,7 +653,7 @@ pub fn note_ipi_probe_received() {
 /// 協調的 yield 用のソフトウェア割り込みベクタ（M5-c）。
 ///
 /// PIC の範囲（0x20-0x2F）とテストベクタ（0x40）の外の 0x41 を 1 本使う。
-/// 専用スタブ（`zaytos_yield_stub`）が `zaytos_irq_common` へ jmp するので、
+/// 専用スタブ（`zeikos_yield_stub`）が `zeikos_irq_common` へ jmp するので、
 /// `int YIELD_VECTOR` を実行すると IRQ の復元経路にそのまま載り、`irq_entry`
 /// が「次タスクの RSP」を返してコンテキストスイッチが起きる（ADR-0019 §2）。
 /// PIC 由来ではないので EOI の論理には一切絡まない。
@@ -719,8 +719,8 @@ pub const LAPIC_TIMER_VECTOR: usize = 0xFE;
 
 /// システムコール用のソフトウェア割り込みベクタ（M5-f-1、ADR-0020）。
 ///
-/// `int 0x80` の 0x80。専用スタブ（`zaytos_syscall_stub`）が
-/// `zaytos_syscall_common` へ jmp する。ゲートは DPL=3 で登録し、Ring 3 から
+/// `int 0x80` の 0x80。専用スタブ（`zeikos_syscall_stub`）が
+/// `zeikos_syscall_common` へ jmp する。ゲートは DPL=3 で登録し、Ring 3 から
 /// 呼べるようにする（他のゲートは DPL=0）。PIC 由来ではないので EOI の論理には
 /// 一切絡まない。
 pub const SYSCALL_VECTOR: usize = 0x80;
@@ -1512,15 +1512,15 @@ pub fn timer_delivery() -> TimerDelivery {
 /// 例外用（[`check_stub_table`]）と別系統である。表が別の領域にある
 /// ため、片方の検証がもう片方を保証しない。
 pub fn check_irq_stub_table() -> StubTableCheck {
-    let base = addr_of!(zaytos_irq_stubs) as u64;
-    let end = addr_of!(zaytos_irq_stubs_end) as u64;
+    let base = addr_of!(zeikos_irq_stubs) as u64;
+    let end = addr_of!(zeikos_irq_stubs_end) as u64;
     let expected_size = (IRQ_STYLE_STUB_COUNT * STUB_SIZE) as u64;
 
-    let stride_ok = addr_of!(zaytos_irq_stub_0) as u64 == base
-        && addr_of!(zaytos_irq_stub_15) as u64 == base + 15 * STUB_SIZE as u64
-        && addr_of!(zaytos_irq_stub_16) as u64 == base + 16 * STUB_SIZE as u64
-        && addr_of!(zaytos_irq_stub_31) as u64 == base + 31 * STUB_SIZE as u64
-        && addr_of!(zaytos_irq_stub_32) as u64 == base + 32 * STUB_SIZE as u64;
+    let stride_ok = addr_of!(zeikos_irq_stub_0) as u64 == base
+        && addr_of!(zeikos_irq_stub_15) as u64 == base + 15 * STUB_SIZE as u64
+        && addr_of!(zeikos_irq_stub_16) as u64 == base + 16 * STUB_SIZE as u64
+        && addr_of!(zeikos_irq_stub_31) as u64 == base + 31 * STUB_SIZE as u64
+        && addr_of!(zeikos_irq_stub_32) as u64 == base + 32 * STUB_SIZE as u64;
 
     // 0x20-0x2F の IDT エントリが、IRQ スタブ表の対応する位置を指すこと。
     // 上書きに失敗して例外スタブを指したままだと、IRQ が「戻らない」経路へ
@@ -1575,7 +1575,7 @@ fn irq_stub_address(index: usize) -> u64 {
     } else {
         index
     };
-    addr_of!(zaytos_irq_stubs) as u64 + (index * STUB_SIZE) as u64
+    addr_of!(zeikos_irq_stubs) as u64 + (index * STUB_SIZE) as u64
 }
 
 /// スタブ表の配置に関する検証結果。
@@ -1615,22 +1615,22 @@ pub const DEDICATED_STUB_COUNT: usize = 7;
 /// `addr_of!` は const ではないので、定数ではなく関数として持つ。
 fn dedicated_stubs() -> [(usize, u64); DEDICATED_STUB_COUNT] {
     [
-        (YIELD_VECTOR, addr_of!(zaytos_yield_stub) as u64),
-        (SYSCALL_VECTOR, addr_of!(zaytos_syscall_stub) as u64),
+        (YIELD_VECTOR, addr_of!(zeikos_yield_stub) as u64),
+        (SYSCALL_VECTOR, addr_of!(zeikos_syscall_stub) as u64),
         (
             crate::machine::pc::apic::SPURIOUS_VECTOR as usize,
-            addr_of!(zaytos_spurious_stub) as u64,
+            addr_of!(zeikos_spurious_stub) as u64,
         ),
         (
             IOAPIC_KEYBOARD_VECTOR,
-            addr_of!(zaytos_ioapic_keyboard_stub) as u64,
+            addr_of!(zeikos_ioapic_keyboard_stub) as u64,
         ),
         (
             IOAPIC_VIRTIO_VECTOR,
-            addr_of!(zaytos_virtio_blk_stub) as u64,
+            addr_of!(zeikos_virtio_blk_stub) as u64,
         ),
-        (LAPIC_TIMER_VECTOR, addr_of!(zaytos_lapic_timer_stub) as u64),
-        (IPI_PROBE_VECTOR, addr_of!(zaytos_ipi_probe_stub) as u64),
+        (LAPIC_TIMER_VECTOR, addr_of!(zeikos_lapic_timer_stub) as u64),
+        (IPI_PROBE_VECTOR, addr_of!(zeikos_ipi_probe_stub) as u64),
     ]
 }
 
@@ -1673,9 +1673,9 @@ pub fn check_dedicated_stubs() -> [DedicatedStubCheck; DEDICATED_STUB_COUNT] {
 
 extern "C" {
     /// 3 つの共通の入口（2026-09-24。[`check_gates_lead_to_common_entries`] が飛び先と突き合わせる）。
-    static zaytos_exception_common: u8;
-    static zaytos_irq_common: u8;
-    static zaytos_syscall_common: u8;
+    static zeikos_exception_common: u8;
+    static zeikos_irq_common: u8;
+    static zeikos_syscall_common: u8;
 }
 
 /// 全ゲートの飛び先を 3 つの共通の入口と突き合わせた結果（2026-09-24。`ADR-0018` の Addendum 9）。
@@ -1714,12 +1714,12 @@ impl CommonEntryCheck {
 /// その先の 16 バイトを読む。** **それ以外のアドレスは読まずに「どれにも行かない」とする**——任意の
 /// アドレスを読んで #PF にしない。
 pub fn check_gates_lead_to_common_entries() -> CommonEntryCheck {
-    let exception_common = addr_of!(zaytos_exception_common) as u64;
-    let irq_common = addr_of!(zaytos_irq_common) as u64;
-    let syscall_common = addr_of!(zaytos_syscall_common) as u64;
+    let exception_common = addr_of!(zeikos_exception_common) as u64;
+    let irq_common = addr_of!(zeikos_irq_common) as u64;
+    let syscall_common = addr_of!(zeikos_syscall_common) as u64;
     let exception_table =
-        addr_of!(zaytos_exception_stubs) as u64..addr_of!(zaytos_exception_stubs_end) as u64;
-    let irq_table = addr_of!(zaytos_irq_stubs) as u64..addr_of!(zaytos_irq_stubs_end) as u64;
+        addr_of!(zeikos_exception_stubs) as u64..addr_of!(zeikos_exception_stubs_end) as u64;
+    let irq_table = addr_of!(zeikos_irq_stubs) as u64..addr_of!(zeikos_irq_stubs_end) as u64;
     let dedicated = dedicated_stubs();
     let mut check = CommonEntryCheck {
         exception: 0,
@@ -1766,13 +1766,13 @@ pub fn check_gates_lead_to_common_entries() -> CommonEntryCheck {
 /// スタブに命令を 1 つ足して 16 バイトを超えると、終端までの距離が
 /// `256 * STUB_SIZE` からずれるため、ここで検出される。
 pub fn check_stub_table() -> StubTableCheck {
-    let base = addr_of!(zaytos_exception_stubs) as u64;
-    let end = addr_of!(zaytos_exception_stubs_end) as u64;
+    let base = addr_of!(zeikos_exception_stubs) as u64;
+    let end = addr_of!(zeikos_exception_stubs_end) as u64;
     let expected_size = (IDT_ENTRY_COUNT * STUB_SIZE) as u64;
 
-    let stride_ok = addr_of!(zaytos_exception_stub_8) as u64 == base + 8 * STUB_SIZE as u64
-        && addr_of!(zaytos_exception_stub_14) as u64 == base + 14 * STUB_SIZE as u64
-        && addr_of!(zaytos_exception_stub_255) as u64 == base + 255 * STUB_SIZE as u64;
+    let stride_ok = addr_of!(zeikos_exception_stub_8) as u64 == base + 8 * STUB_SIZE as u64
+        && addr_of!(zeikos_exception_stub_14) as u64 == base + 14 * STUB_SIZE as u64
+        && addr_of!(zeikos_exception_stub_255) as u64 == base + 255 * STUB_SIZE as u64;
 
     // 全エントリのハンドラが表の範囲内で、ベクタ番号と位置が対応すること。
     //
@@ -1829,7 +1829,7 @@ pub fn check_stub_table() -> StubTableCheck {
 
 /// `n` 番目のスタブのアドレス。
 fn stub_address(vector: usize) -> u64 {
-    let base = addr_of!(zaytos_exception_stubs) as u64;
+    let base = addr_of!(zeikos_exception_stubs) as u64;
     base + (vector * STUB_SIZE) as u64
 }
 
@@ -1895,11 +1895,11 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
             );
         }
 
-        // 協調的 yield 用のゲート（M5-c）。専用スタブが zaytos_irq_common へ
+        // 協調的 yield 用のゲート（M5-c）。専用スタブが zeikos_irq_common へ
         // jmp するので、int YIELD_VECTOR が IRQ の退避・復元・スイッチ経路に
         // 載る。割り込みゲート（IF を落とす）にする。
         (*idt)[YIELD_VECTOR] = IdtEntry::new(
-            addr_of!(zaytos_yield_stub) as u64,
+            addr_of!(zeikos_yield_stub) as u64,
             KERNEL_CODE_SELECTOR,
             GateType::Interrupt,
             0,
@@ -1912,7 +1912,7 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
         // 実際に起こりうるので、戻れる経路へ移す（EOI は送らない。判定は
         // `irq_entry` にある）。
         (*idt)[crate::machine::pc::apic::SPURIOUS_VECTOR as usize] = IdtEntry::new(
-            addr_of!(zaytos_spurious_stub) as u64,
+            addr_of!(zeikos_spurious_stub) as u64,
             KERNEL_CODE_SELECTOR,
             GateType::Interrupt,
             0,
@@ -1923,7 +1923,7 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
         // 配送を切り替える前に置く。ゲートが無い状態で redirection entry の
         // マスクを外すと、最初のキー入力で例外スタイルのスタブへ落ちて停止する。
         (*idt)[IOAPIC_KEYBOARD_VECTOR] = IdtEntry::new(
-            addr_of!(zaytos_ioapic_keyboard_stub) as u64,
+            addr_of!(zeikos_ioapic_keyboard_stub) as u64,
             KERNEL_CODE_SELECTOR,
             GateType::Interrupt,
             0,
@@ -1932,7 +1932,7 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
         // I/O APIC 経由の virtio-blk 用ゲート（S13-d）。キーボードと同じ形で、
         // 配送を開く前に置く。
         (*idt)[IOAPIC_VIRTIO_VECTOR] = IdtEntry::new(
-            addr_of!(zaytos_virtio_blk_stub) as u64,
+            addr_of!(zeikos_virtio_blk_stub) as u64,
             KERNEL_CODE_SELECTOR,
             GateType::Interrupt,
             0,
@@ -1943,7 +1943,7 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
         // LVT のマスクを外す前に置く。ゲートが無い状態で解禁すると、
         // 最初のティックで例外スタイルのスタブへ落ちて停止する。
         (*idt)[LAPIC_TIMER_VECTOR] = IdtEntry::new(
-            addr_of!(zaytos_lapic_timer_stub) as u64,
+            addr_of!(zeikos_lapic_timer_stub) as u64,
             KERNEL_CODE_SELECTOR,
             GateType::Interrupt,
             0,
@@ -1956,7 +1956,7 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
         // 載せずに IPI を送ると、例外スタイルのスタブへ落ちて停止する。
         // 実際に踏んだ——載せる前に送ったところ、AP が 1 ティックで死んだ。
         (*idt)[IPI_PROBE_VECTOR] = IdtEntry::new(
-            addr_of!(zaytos_ipi_probe_stub) as u64,
+            addr_of!(zeikos_ipi_probe_stub) as u64,
             KERNEL_CODE_SELECTOR,
             GateType::Interrupt,
             0,
@@ -1969,7 +1969,7 @@ pub unsafe fn init(double_fault_ist_index: Option<u8>, page_fault_ist_index: Opt
         // の「入場時 IF=0」を保つ。IST は使わず、特権変化のたびに CPU が TSS.RSP0 の
         // スタックへ切り替える。
         (*idt)[SYSCALL_VECTOR] = IdtEntry::new(
-            addr_of!(zaytos_syscall_stub) as u64,
+            addr_of!(zeikos_syscall_stub) as u64,
             KERNEL_CODE_SELECTOR,
             GateType::Interrupt,
             SYSCALL_GATE_DPL,

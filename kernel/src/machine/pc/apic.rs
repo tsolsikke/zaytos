@@ -1569,8 +1569,8 @@ pub fn set_spurious_vector(logger: &mut Logger<Serial>, mapped: &MappedInterrupt
     // S2-b の時点では例外スタイルのスタブのままで、起きればダンプして停止する
     // 状態だった（`idt::init` は 256 本を例外スタイルで埋め、IRQ スタイルで
     // 上書きするのは `0x20`-`0x40` と yield / syscall だけで、`0xFF` はどれにも
-    // 当たらなかった）。専用スタブ（`zaytos_spurious_stub`）を置いて
-    // `zaytos_irq_common` へ合流させ、戻れる経路にした。
+    // 当たらなかった）。専用スタブ（`zeikos_spurious_stub`）を置いて
+    // `zeikos_irq_common` へ合流させ、戻れる経路にした。
     //
     // EOI を送らない判定も明示にした。以前送られなかったのは「PIC の担当範囲の
     // 外だから」という偶然で、S2-d で Local APIC が配送を担うと壊れる一致だった。

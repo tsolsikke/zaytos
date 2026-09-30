@@ -7,8 +7,8 @@
 //! # 入口の機構
 //!
 //! ベクタ 0x80 の IDT ゲートを DPL=3 の割り込みゲートにし、[`crate::arch::x86_64::idt`] の
-//! `zaytos_syscall_stub` へ向ける。スタブは IRQ スタイルの復元経路をコピーした
-//! `zaytos_syscall_common` へ jmp し、GPR 15 本を退避して [`syscall_entry`] を
+//! `zeikos_syscall_stub` へ向ける。スタブは IRQ スタイルの復元経路をコピーした
+//! `zeikos_syscall_common` へ jmp し、GPR 15 本を退避して [`syscall_entry`] を
 //! 呼ぶ。Ring 3 からの `int 0x80` は特権変化（3→0）なので、CPU が TSS.RSP0 の
 //! スタックへ自動で切り替える（M5-c/d で更新している RSP0 がここで効く）。
 //!
@@ -1541,7 +1541,7 @@ fn poll_is_ready(reason: crate::task::Wait) -> bool {
 /// # 番号と配置は Linux から採る。意味は最小の部分集合である
 ///
 /// **`ADR-0020` に従う**——**`poll`(7) と `struct pollfd`（`fd` 4＋`events` 2＋`revents` 2）を
-/// そのまま採る。** **独自番号にしない**（**Linux に対応する入口が在るので、`ZAYTOS_PRIVATE_BASE`
+/// そのまま採る。** **独自番号にしない**（**Linux に対応する入口が在るので、`ZEIKOS_PRIVATE_BASE`
 /// は使わない**。`ADR-0066` の「番号」）。
 ///
 /// **`ADR-0066` の Q3 は「一般の `poll` は作らない」と決めた。** **作らないのは意味の側である**
@@ -2727,7 +2727,7 @@ unsafe fn spawn_from_ring3(
     }
 }
 
-/// `zaytos_syscall_common` から `extern "sysv64"` で呼ばれる。**[`SYS_EXIT`] 以外は戻る。**
+/// `zeikos_syscall_common` から `extern "sysv64"` で呼ばれる。**[`SYS_EXIT`] 以外は戻る。**
 ///
 /// # exit は出口を通らない（S9-b-3-1）
 ///

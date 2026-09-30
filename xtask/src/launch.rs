@@ -761,7 +761,7 @@ pub fn spawn(spec: &Spec<'_>) -> Result<QemuRun> {
     command
         .arg("-c")
         .arg(IGNORE_XFSZ_THEN_EXEC)
-        .arg("zaytos-qemu")
+        .arg("zeikos-qemu")
         .arg("prlimit")
         .arg(format!("--fsize={}", spec.file_limit))
         .arg("--core=0")

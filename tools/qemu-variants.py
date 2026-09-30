@@ -70,7 +70,7 @@ import check_lock  # noqa: E402
 # EFBIG で失敗するだけで、コアを吐かない。WSL の core_pattern はパイプで、RLIMIT_CORE が届かない）。
 # 自分の組で起動し、止めるときは組ごと SIGKILL を送る。
 QEMU_FILE_LIMIT = 4 << 30
-CAPPED = ["sh", "-c", "trap '' XFSZ; exec \"$@\"", "zaytos-qemu", "prlimit",
+CAPPED = ["sh", "-c", "trap '' XFSZ; exec \"$@\"", "zeikos-qemu", "prlimit",
           f"--fsize={QEMU_FILE_LIMIT}", "--core=0", "--"]
 
 
@@ -140,7 +140,7 @@ def run_variant(name, wait, image):
     shutil.copy(OVMF_VARS, os.path.join(out, "vars.fd"))
     # **socket のパスは短く保つ**（`sun_path` は 108 バイト。`xtask` の `ensure_socket_path_fits`）。
     # **pid を入れる**（2026-09-25）——**/tmp はホスト全体で共有され、同じ変種を 2 つ起動するとぶつかる。**
-    sock = f"/tmp/zaytos-variant-{name}-{os.getpid()}.sock"
+    sock = f"/tmp/zeikos-variant-{name}-{os.getpid()}.sock"
     if os.path.exists(sock):
         os.remove(sock)
     serial_arg = "none" if serial == "none" else f"file:{out}/serial.log"

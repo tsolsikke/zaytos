@@ -599,7 +599,7 @@ def lock_refusals():
     vm = Vm.__new__(Vm)
     vm.name = guard("zaytos-selftest")
     calls = (("start", lambda: start(vm, False)), ("run", lambda: run(vm, "/dev/null", 1)))
-    with tempfile.TemporaryDirectory(prefix="zaytos-vbox-selftest-") as directory:
+    with tempfile.TemporaryDirectory(prefix="zeikos-vbox-selftest-") as directory:
         holder = subprocess.Popen(
             [sys.executable, "-c", HOLD_EXCLUSIVELY, os.path.join(directory, "check.lock")],
             stdout=subprocess.PIPE,

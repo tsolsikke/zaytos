@@ -56,7 +56,7 @@ const PAGE: usize = 4096;
 ///
 /// `stack` が `_start` の時点の `rsp` であること。
 #[no_mangle]
-pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
+pub unsafe extern "sysv64" fn zeikos_main(_stack: *const u64) -> ! {
     // SAFETY: このプロセスは単一の実行文脈で、これらを触るのはここだけである。
     let zeros = unsafe { &mut *core::ptr::addr_of_mut!(ZEROS) };
     // SAFETY: 上と同じ。

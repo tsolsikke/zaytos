@@ -5,7 +5,7 @@
 //! **Linux の ABI ではないものを [`crate::abi::linux`] に混ぜない。**
 //!
 //! **CPU によらない**——独自のシステムコールの番号は、x86_64 と aarch64 のどちらの Linux の番号とも重ならない
-//! （[`ZAYTOS_PRIVATE_BASE`] の doc に、測った最大値がある）。`ioctl` の要求とビットは値をそのまま決めているので、
+//! （[`ZEIKOS_PRIVATE_BASE`] の doc に、測った最大値がある）。`ioctl` の要求とビットは値をそのまま決めているので、
 //! CPU で変わらない。
 //!
 //! **置くのは、値と値の決め方（番号の範囲、独自にした理由、引数と戻り値の形、ビットの位置）である。** 断り方や
@@ -34,17 +34,17 @@
 /// 同じ番号にできる。** x32 ABI が使う `0x4000_0000` のビット（`__X32_SYSCALL_BIT`）とも重ならない。
 ///
 /// **独自の呼び出しを足すときは、必ずこの基点より上に置くこと。**
-pub const ZAYTOS_PRIVATE_BASE: u64 = 0x1000;
+pub const ZEIKOS_PRIVATE_BASE: u64 = 0x1000;
 
-/// 検証用 probe システムコールの番号（ZeikOS 独自。[`ZAYTOS_PRIVATE_BASE`]）。
-pub const PROBE_NUMBER: u64 = ZAYTOS_PRIVATE_BASE;
+/// 検証用 probe システムコールの番号（ZeikOS 独自。[`ZEIKOS_PRIVATE_BASE`]）。
+pub const PROBE_NUMBER: u64 = ZEIKOS_PRIVATE_BASE;
 
 /// ユーザーポインタを取る検証用システムコールの番号（M5-f-2-1）。第 1 引数が `buf`、第 2 引数が `len`。
-pub const SYS_CHECK_PTR: u64 = ZAYTOS_PRIVATE_BASE + 1;
+pub const SYS_CHECK_PTR: u64 = ZEIKOS_PRIVATE_BASE + 1;
 
 /// ユーザーバッファのバイト総和（チェックサム）を返すシステムコールの番号（M5-f-2-2）。第 1 引数が `buf`、
 /// 第 2 引数が `len`。
-pub const SYS_CHECKSUM: u64 = ZAYTOS_PRIVATE_BASE + 2;
+pub const SYS_CHECKSUM: u64 = ZEIKOS_PRIVATE_BASE + 2;
 
 /// `spawn(path, argv, envp)`——イメージを読み、子プロセスを起動し、**終わるまで待つ**（S11-5。ZeikOS 独自）。
 ///
@@ -74,7 +74,7 @@ pub const SYS_CHECKSUM: u64 = ZAYTOS_PRIVATE_BASE + 2;
 /// 終了させられたなら [`SPAWN_FOLDED_FLAG`] とベクタ。
 /// 起動できなかったなら `-errno`。**`docs/coding-standards.md` の「`-errno` の範囲と
 /// 紛れない値にする」に従い、正の側は 0x1FFF を越えない。**
-pub const SYS_SPAWN: u64 = ZAYTOS_PRIVATE_BASE + 4;
+pub const SYS_SPAWN: u64 = ZEIKOS_PRIVATE_BASE + 4;
 
 /// [`SYS_SPAWN`] の戻り値のうち「子は終了ではなく畳まれて終わった」を表すビット。
 ///
@@ -108,7 +108,7 @@ pub const SPAWN_INTERRUPTED_FLAG: u64 = 0x200;
 ///
 /// 引数は `path` / `argv` / `envp` / `flags`（[`DETACHED_STDOUT_TO_PIPE`]）。**戻り値はハンドル**
 /// （`crate::task::ring3_task_handle`。(b2) の形）**か `-errno`。**
-pub const SYS_SPAWN_DETACHED: u64 = ZAYTOS_PRIVATE_BASE + 5;
+pub const SYS_SPAWN_DETACHED: u64 = ZEIKOS_PRIVATE_BASE + 5;
 
 /// [`SYS_SPAWN_DETACHED`] の `flags`——子の fd 1 をパイプの書き端にし、読み手を予約する
 /// （`crate::pipe` の doc の「読み手の予約」）。
@@ -119,14 +119,14 @@ pub const DETACHED_STDOUT_TO_PIPE: u64 = 1;
 /// **[`SYS_SPAWN`] と同じ形で戻る**（終わり方のビット）。
 /// **[`SYS_SPAWN`] に `flags` を足さない理由**——**既存の呼び手は `r10` を置かないので、
 /// 4 つ目の引数を見る形にすると、置いていない値を読む。**
-pub const SYS_SPAWN_WITH_PIPED_STDIN: u64 = ZAYTOS_PRIVATE_BASE + 6;
+pub const SYS_SPAWN_WITH_PIPED_STDIN: u64 = ZEIKOS_PRIVATE_BASE + 6;
 
 /// 切り離して起動した子を待って回収する（`ADR-0063` の (b3)）。**私物。**
 ///
 /// **引数はハンドル。** **戻り値は終わり方のビット**（[`SYS_SPAWN`] と同じ）**か `-ECHILD`**
 /// （ハンドルが合わない・終わった後の二重待ち）。**`wait4` を採らない**——**形が合わない**
 /// （`docs/architecture.md` の「合わせるのは合わせられる形について」）。
-pub const SYS_WAIT_CHILD: u64 = ZAYTOS_PRIVATE_BASE + 7;
+pub const SYS_WAIT_CHILD: u64 = ZEIKOS_PRIVATE_BASE + 7;
 
 /// 入力の生イベントの fd を開く（`ADR-0066` の Y-a）。**私物。**
 ///
@@ -135,7 +135,7 @@ pub const SYS_WAIT_CHILD: u64 = ZAYTOS_PRIVATE_BASE + 7;
 /// 同じ。`ADR-0020` の「合わせられる形について合わせる」）。
 ///
 /// **読みは `read` が `struct input_event` を返す。**
-pub const SYS_OPEN_INPUT: u64 = ZAYTOS_PRIVATE_BASE + 8;
+pub const SYS_OPEN_INPUT: u64 = ZEIKOS_PRIVATE_BASE + 8;
 
 /// 画面を開く入口の番号（`ADR-0066` の Y-c）。**開くと図形モードへ入る。**
 ///
@@ -144,7 +144,7 @@ pub const SYS_OPEN_INPUT: u64 = ZAYTOS_PRIVATE_BASE + 8;
 /// 同じ理由）。**開いた後の形は Linux の fbdev に合わせる**——**形は `ioctl` の
 /// [`FBIOGET_VSCREENINFO`](crate::abi::linux::FBIOGET_VSCREENINFO) /
 /// [`FBIOGET_FSCREENINFO`](crate::abi::linux::FBIOGET_FSCREENINFO)、画素は `mmap`。**
-pub const SYS_OPEN_SCREEN: u64 = ZAYTOS_PRIVATE_BASE + 9;
+pub const SYS_OPEN_SCREEN: u64 = ZEIKOS_PRIVATE_BASE + 9;
 
 /// **永久に実装しない番号**（S9-b-3-2a）。`-ENOSYS` の的である。
 ///
@@ -154,9 +154,9 @@ pub const SYS_OPEN_SCREEN: u64 = ZAYTOS_PRIVATE_BASE + 9;
 /// 確かめていた検査は静かに別のものを見はじめる（戻り値が変わるので落ちはするが、
 /// **落ちた理由が「実装したから」だと分かる材料がどこにも無い**）。
 ///
-/// **予約しておけば、実装しようとした人がこの doc を読む。** [`ZAYTOS_PRIVATE_BASE`]
+/// **予約しておけば、実装しようとした人がこの doc を読む。** [`ZEIKOS_PRIVATE_BASE`]
 /// の上に置くので、Linux の番号表とも衝突しない。
-pub const SYS_NEVER_IMPLEMENTED: u64 = ZAYTOS_PRIVATE_BASE + 0xFF;
+pub const SYS_NEVER_IMPLEMENTED: u64 = ZEIKOS_PRIVATE_BASE + 0xFF;
 
 /// `TIOCZTAKE`——溜まっているエラーを取り出す要求（ADR-0046）。
 ///

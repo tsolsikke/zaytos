@@ -54,7 +54,7 @@
 #![no_std]
 #![no_main]
 
-/// `spawn` の番号（`ZAYTOS_PRIVATE_BASE + 4`）。
+/// `spawn` の番号（`ZEIKOS_PRIVATE_BASE + 4`）。
 const SYS_SPAWN: u32 = 0x1004;
 /// `exit` の番号（Linux と同じ 60）。
 const SYS_EXIT: u32 = 60;

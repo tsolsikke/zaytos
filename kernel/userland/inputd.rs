@@ -134,7 +134,7 @@ fn event_value(event: &[u8]) -> i32 {
 ///
 /// `stack` が `_start` の時点の `rsp` であること。
 #[no_mangle]
-pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
+pub unsafe extern "sysv64" fn zeikos_main(stack: *const u64) -> ! {
     // **`probe` の 1 本——開こうとして、返った値を印字して終わる**（モジュールの doc）。**引数が
     // 在れば `probe` である**（起動するのはこのプログラム自身だけ）。
     // SAFETY: 呼び出し元契約により `stack` は初期スタックの先頭を指す。

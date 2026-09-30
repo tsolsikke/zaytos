@@ -57,7 +57,7 @@ const READ_FAILED: &[u8] = b"cat: cannot read\n";
 ///
 /// `stack` が `_start` の時点の `rsp` であること。
 #[no_mangle]
-pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
+pub unsafe extern "sysv64" fn zeikos_main(stack: *const u64) -> ! {
     // SAFETY: 呼び出し元契約により `stack` は初期スタックの先頭を指す。
     let (fd, opened) = match unsafe { userlib::argument(stack, 1) } {
         Some(pointer) => {

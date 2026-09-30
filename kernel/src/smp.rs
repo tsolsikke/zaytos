@@ -40,9 +40,9 @@ const MAX_APS: usize = common::percpu::MAX_CPUS - 1;
 /// ロックを取らない。`Logger` と `Serial` にロックは無いので、
 /// BSP が 1 つずつ起動することで混線を避けている（同時に書くとバイトが混ざる）。
 #[no_mangle]
-pub extern "C" fn zaytos_ap_entry(index: u64) -> ! {
+pub extern "C" fn zeikos_ap_entry(index: u64) -> ! {
     // **アセンブリから入る入口なので、先に入り方の決まりを確かめる**（2026-09-28）。
-    crate::arch::x86_64::check_entry_stack_alignment("zaytos_ap_entry");
+    crate::arch::x86_64::check_entry_stack_alignment("zeikos_ap_entry");
     let mut serial = Serial::primary();
     serial.init();
     let _ = writeln!(
@@ -277,7 +277,7 @@ pub unsafe fn wake_application_processors(
     // SAFETY: frame は S1 が予約した 4KiB 境界の物理フレームで、他の誰も使わない。
     // BSP は本番 CR3 で走るので direct map 越しに触る（AP は恒等で触る）。
     let installed =
-        unsafe { crate::arch::x86_64::install_trampoline(logger, frame, zaytos_ap_entry) };
+        unsafe { crate::arch::x86_64::install_trampoline(logger, frame, zeikos_ap_entry) };
 
     // この値は BSP の ID とは限らない。MADT の最初の使用可能な Local APIC
     // エントリであって、エントリ順が BSP を先頭にする保証は仕様に無い

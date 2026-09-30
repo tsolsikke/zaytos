@@ -163,7 +163,7 @@ fn acquire_uart() -> SerialGuard {
 /// # なぜ [`cpu_id`](crate::percpu::cpu_id) を使わないのか
 ///
 /// **試作で踏んだ（2026-09-12）。** **AP は自分の per-CPU GDT を載せるより前に
-/// シリアルへ書く**（`kernel/src/smp.rs` の `zaytos_ap_entry`。**「まだ per-CPU の
+/// シリアルへ書く**（`kernel/src/smp.rs` の `zeikos_ap_entry`。**「まだ per-CPU の
 /// GDT/TSS/IDT が無いので `cpu_id()` は使わない」と、あちらの行自身が書いている**）。
 ///
 /// **そこで `cpu_id()` を呼ぶと止まる。** **GDTR からスロットを導けないとき、あの関数は

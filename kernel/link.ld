@@ -22,7 +22,7 @@
  * elf.entry_point（トランポリンの VMA=高位）を LMA へ変換した低位アドレス
  * （KERNEL_LOAD_ADDR）へ飛ぶ。トランポリンが CR3 を静的初期テーブルへ切り替え、
  * 高位 _start へ jmp する。 */
-ENTRY(zaytos_trampoline)
+ENTRY(zeikos_trampoline)
 
 KERNEL_LOAD_ADDR = 0x100000;
 

@@ -118,7 +118,7 @@ fn fail(text: &[u8], code: i64, status: u64) -> ! {
 ///
 /// `stack` が `_start` の時点の `rsp` であること。
 #[no_mangle]
-pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
+pub unsafe extern "sysv64" fn zeikos_main(_stack: *const u64) -> ! {
     let conn = socket();
     if conn < 0 {
         fail(b"compc: socket failed ", conn, 1);

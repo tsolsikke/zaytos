@@ -120,20 +120,20 @@ macro_rules! tramp_stack_sabotage {
 core::arch::global_asm!(
     ".section .text.trampoline,\"ax\",@progbits",
     ".p2align 12",
-    ".globl zaytos_trampoline",
-    "zaytos_trampoline:",
-    "  mov rax, [rip + zaytos_tramp_pml4]",   // 48 8B 05 <rel32>: PML4 物理をロード
+    ".globl zeikos_trampoline",
+    "zeikos_trampoline:",
+    "  mov rax, [rip + zeikos_tramp_pml4]",   // 48 8B 05 <rel32>: PML4 物理をロード
     "  mov cr3, rax",                          // 0F 22 D8: 切り替え
     tramp_sabotage!(),                         // (d) 既定は空。feature 時のみ絶対参照を 1 行挿入
-    "  mov rsp, [rip + zaytos_tramp_stack]",   // 48 8B 25 <rel32>: 高位ブートスタック頂点を RSP へ
+    "  mov rsp, [rip + zeikos_tramp_stack]",   // 48 8B 25 <rel32>: 高位ブートスタック頂点を RSP へ
     // 高位 _start へは `call` で入る（2026-09-28）。`jmp` で入ると、入口の RSP が System V の決まり（16 で割ると
     // 8 余る）から 8 ずれる（スタックの頂点は 4 KiB 境界）。_start の先頭で確かめる。
-    "  call [rip + zaytos_tramp_entry]",       // FF 15 <rel32>: 高位 _start へ間接 call
+    "  call [rip + zeikos_tramp_entry]",       // FF 15 <rel32>: 高位 _start へ間接 call
     "  ud2",                                   // 0F 0B: _start は戻らない。戻ったら落とす
     ".p2align 3",
-    "zaytos_tramp_pml4:  .quad zaytos_boot_pml4 - {kvb}",   // PML4 の LMA（= 物理）
-    concat!("zaytos_tramp_stack: .quad zaytos_boot_stack_top", tramp_stack_sabotage!()), // 高位 VA
-    "zaytos_tramp_entry: .quad _start",                      // 高位 VA
+    "zeikos_tramp_pml4:  .quad zeikos_boot_pml4 - {kvb}",   // PML4 の LMA（= 物理）
+    concat!("zeikos_tramp_stack: .quad zeikos_boot_stack_top", tramp_stack_sabotage!()), // 高位 VA
+    "zeikos_tramp_entry: .quad _start",                      // 高位 VA
     kvb = const kernel::link_symbols::KERNEL_VIRT_BASE,
 );
 
@@ -153,22 +153,22 @@ core::arch::global_asm!(
 core::arch::global_asm!(
     ".section .data.bootpt,\"aw\",@progbits",
     ".p2align 12",
-    ".globl zaytos_boot_pml4",
-    "zaytos_boot_pml4:",
-    "  .quad zaytos_boot_pdpt_low - {kvb} + {pml4_0}",   // (a) 既定 0x03 / feature 0x02（P クリア）
+    ".globl zeikos_boot_pml4",
+    "zeikos_boot_pml4:",
+    "  .quad zeikos_boot_pdpt_low - {kvb} + {pml4_0}",   // (a) 既定 0x03 / feature 0x02（P クリア）
     "  .fill 510, 8, 0",
-    "  .quad zaytos_boot_pdpt_high - {kvb} + 0x03",
+    "  .quad zeikos_boot_pdpt_high - {kvb} + 0x03",
     ".p2align 12",
-    "zaytos_boot_pdpt_low:",
-    "  .quad zaytos_boot_pd_shared - {kvb} + 0x03",
+    "zeikos_boot_pdpt_low:",
+    "  .quad zeikos_boot_pd_shared - {kvb} + 0x03",
     "  .fill 511, 8, 0",
     ".p2align 12",
-    "zaytos_boot_pdpt_high:",
+    "zeikos_boot_pdpt_high:",
     "  .fill {hi_before}, 8, 0",                          // (b) 既定 510 / feature 509
-    "  .quad zaytos_boot_pd_shared - {kvb} + 0x03",
+    "  .quad zeikos_boot_pd_shared - {kvb} + 0x03",
     "  .fill {hi_after}, 8, 0",                           // (b) 既定 1 / feature 2（合計 512 を保つ）
     ".p2align 12",
-    "zaytos_boot_pd_shared:",
+    "zeikos_boot_pd_shared:",
     "  .set idx, 0",
     "  .rept 512",
     "    .quad (idx << 21) | 0x83",
@@ -200,20 +200,20 @@ const BOOT_STACK_POISON: u8 = 0xC5;
 core::arch::global_asm!(
     ".section .data.bootstack,\"aw\",@progbits",
     ".p2align 12",
-    ".globl zaytos_boot_stack",
-    "zaytos_boot_stack:",
+    ".globl zeikos_boot_stack",
+    "zeikos_boot_stack:",
     "  .fill 16384, 1, 0xC5",
-    ".globl zaytos_boot_stack_top",
-    "zaytos_boot_stack_top:",
+    ".globl zeikos_boot_stack_top",
+    "zeikos_boot_stack_top:",
 );
 
-// `zaytos_trampoline` は Rust から触らないので extern 宣言を置かない
+// `zeikos_trampoline` は Rust から触らないので extern 宣言を置かない
 // （静的検査は nm/objdump で拾う）。下の 2 つは Rust から読むので宣言する。
 extern "C" {
     /// ブートスタックの下端（低位側）。深さ実測の走査起点。
-    static zaytos_boot_stack: u8;
+    static zeikos_boot_stack: u8;
     /// 静的初期 PML4 の先頭。CR3 との突き合わせに使う。
-    static zaytos_boot_pml4: u8;
+    static zeikos_boot_pml4: u8;
 }
 
 /// ブートスタックの最大深さを実測してログに出す。
@@ -221,7 +221,7 @@ extern "C" {
 /// 下端から連続する毒値（未使用バイト）を数えて使用量を出す。
 /// ガードページを持たないブートスタックの、オーバーフロー検出を兼ねた会計である。
 fn report_boot_stack_usage(logger: &mut Logger<Serial>) {
-    let base = addr_of!(zaytos_boot_stack);
+    let base = addr_of!(zeikos_boot_stack);
     let mut unused = 0usize;
     while unused < BOOT_STACK_SIZE {
         // SAFETY: base..base+BOOT_STACK_SIZE は静的なブートスタックの範囲内。
@@ -257,7 +257,7 @@ fn report_high_half_arrival(logger: &mut Logger<Serial>) {
 
     // CR3 は静的初期 PML4 の物理を指しているはず（まだ M2-d へ切り替える前）。
     let boot_pml4_phys = kernel::kernel_phys_from_virt(
-        VirtAddr::new(addr_of!(zaytos_boot_pml4) as u64)
+        VirtAddr::new(addr_of!(zeikos_boot_pml4) as u64)
             .expect("the boot PML4 symbol is canonical"),
     );
     let cr3_is_bootstrap = cr3 == boot_pml4_phys;

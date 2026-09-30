@@ -139,7 +139,7 @@
 #![no_std]
 #![no_main]
 
-/// 検証用 probe の番号（`ZAYTOS_PRIVATE_BASE`）。
+/// 検証用 probe の番号（`ZEIKOS_PRIVATE_BASE`）。
 const PROBE_NUMBER: u32 = 0x1000;
 /// probe が返す既知の値。
 const PROBE_RETURN: u32 = 0x00C0_FFEE;
@@ -297,7 +297,7 @@ const ARGV1_LEN: u32 = 6;
 ///
 /// **数え方**——**`kernel/src/userland.rs` の `MAX_ENVP`（8）に 1 を足した。**
 const ENVP_WALK_MAX: usize = 9;
-/// `spawn` の番号（`ZAYTOS_PRIVATE_BASE + 4`）。
+/// `spawn` の番号（`ZEIKOS_PRIVATE_BASE + 4`）。
 const SYS_SPAWN: u32 = 0x1004;
 
 /// `brk` の番号（Linux と同じ。H-a。ADR-0044）。

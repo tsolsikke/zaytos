@@ -2248,7 +2248,7 @@ mod tests {
     /// **並んで書いても行は混ざらない**（ロックと 1 回の書き込み）。
     #[test]
     fn appends_survive_a_torn_tail_and_concurrent_writers() {
-        let dir = std::env::temp_dir().join(format!("zaytos-records-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("zeikos-records-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let path = dir.join("records.tsv");
         let line = format_record(&record("base", "pass", "c1", "t1", 0));
@@ -2365,7 +2365,7 @@ mod tests {
     #[test]
     fn the_selection_names_its_base_and_falls_to_all_when_it_cannot_compare() {
         let scratch =
-            std::env::temp_dir().join(format!("zaytos-select-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("zeikos-select-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&scratch);
         let repo = scratch.join("repo");
         fs::create_dir_all(&repo).unwrap();
@@ -2521,7 +2521,7 @@ mod tests {
     /// 断られ、フラグで越えると記録が残る。** **作った git のツリーとリモートで確かめる。**
     #[test]
     fn the_push_gate_passes_recorded_commits_refuses_the_rest_and_records_the_flag() {
-        let scratch = std::env::temp_dir().join(format!("zaytos-gate-test-{}", std::process::id()));
+        let scratch = std::env::temp_dir().join(format!("zeikos-gate-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&scratch);
         let repo = scratch.join("repo");
         let remote = scratch.join("remote.git");
@@ -2635,7 +2635,7 @@ mod tests {
     #[test]
     fn the_pre_push_gate_counts_what_git_sends() {
         let scratch =
-            std::env::temp_dir().join(format!("zaytos-prepush-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("zeikos-prepush-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&scratch);
         let repo = scratch.join("repo");
         let remote = scratch.join("remote.git");
@@ -3028,7 +3028,7 @@ mod tests {
     #[test]
     fn a_worktree_in_the_old_place_is_moved_next_to_the_main_tree() {
         let scratch =
-            std::env::temp_dir().join(format!("zaytos-worktree-move-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("zeikos-worktree-move-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&scratch);
         let repo = scratch.join("repo");
         fs::create_dir_all(&repo).unwrap();
@@ -3094,7 +3094,7 @@ mod tests {
     #[test]
     fn records_are_written_to_the_git_dir_and_the_old_place_is_still_read() {
         let scratch =
-            std::env::temp_dir().join(format!("zaytos-records-move-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("zeikos-records-move-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&scratch);
         let repo = scratch.join("repo");
         fs::create_dir_all(&repo).unwrap();

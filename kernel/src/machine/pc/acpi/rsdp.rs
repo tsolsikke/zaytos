@@ -310,7 +310,7 @@ mod tests {
         };
         let mut bytes = vec![0u8; total];
         bytes[OFFSET_SIGNATURE..OFFSET_SIGNATURE + SIGNATURE.len()].copy_from_slice(&SIGNATURE);
-        bytes[OFFSET_OEM_ID..OFFSET_OEM_ID + OEM_ID_LENGTH].copy_from_slice(b"ZAYTOS");
+        bytes[OFFSET_OEM_ID..OFFSET_OEM_ID + OEM_ID_LENGTH].copy_from_slice(b"ZEIKOS");
         bytes[OFFSET_REVISION] = revision;
         bytes[OFFSET_RSDT_ADDRESS..OFFSET_RSDT_ADDRESS + 4]
             .copy_from_slice(&rsdt_address.to_le_bytes());
@@ -344,7 +344,7 @@ mod tests {
         let header = parse_header(&bytes).unwrap();
         assert_eq!(header.revision, 0);
         assert_eq!(header.rsdt_address, 0x1234_5678);
-        assert_eq!(&header.oem_id, b"ZAYTOS");
+        assert_eq!(&header.oem_id, b"ZEIKOS");
         assert!(!header.has_extended_part());
     }
 
@@ -479,7 +479,7 @@ mod tests {
     fn revision_two_with_an_xsdt_follows_the_xsdt() {
         let header = RsdpHeader {
             revision: 2,
-            oem_id: *b"ZAYTOS",
+            oem_id: *b"ZEIKOS",
             rsdt_address: 0x1000,
         };
         let extended = RsdpExtended {
@@ -498,7 +498,7 @@ mod tests {
     fn revision_two_without_an_xsdt_falls_back_to_the_rsdt() {
         let header = RsdpHeader {
             revision: 2,
-            oem_id: *b"ZAYTOS",
+            oem_id: *b"ZEIKOS",
             rsdt_address: 0x1000,
         };
         let extended = RsdpExtended {
@@ -515,7 +515,7 @@ mod tests {
     fn revision_zero_follows_the_rsdt() {
         let header = RsdpHeader {
             revision: 0,
-            oem_id: *b"ZAYTOS",
+            oem_id: *b"ZEIKOS",
             rsdt_address: 0x1000,
         };
         assert_eq!(
@@ -528,7 +528,7 @@ mod tests {
     fn no_addresses_at_all_means_there_is_nothing_to_follow() {
         let header = RsdpHeader {
             revision: 0,
-            oem_id: *b"ZAYTOS",
+            oem_id: *b"ZEIKOS",
             rsdt_address: 0,
         };
         assert_eq!(root_table(&header, None), None);

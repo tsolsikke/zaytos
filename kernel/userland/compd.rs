@@ -129,7 +129,7 @@ fn le_u32(bytes: &[u8], at: usize) -> u32 {
 ///
 /// `stack` が `_start` の時点の `rsp` であること。
 #[no_mangle]
-pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
+pub unsafe extern "sysv64" fn zeikos_main(_stack: *const u64) -> ! {
     let input = open_input();
     if input < 0 {
         fail(b"compd: open_input failed ", input, 1);

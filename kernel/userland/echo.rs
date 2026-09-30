@@ -69,7 +69,7 @@ fn push(out: &mut [u8; OUT_MAX], used: &mut usize, bytes: &[u8]) {
 ///
 /// `stack` が `_start` の時点の `rsp` であること。
 #[no_mangle]
-pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
+pub unsafe extern "sysv64" fn zeikos_main(stack: *const u64) -> ! {
     let mut out = [0u8; OUT_MAX];
     let mut used = 0usize;
     let mut index = 1usize;

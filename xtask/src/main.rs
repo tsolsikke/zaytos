@@ -1518,10 +1518,10 @@ const HIGHHALF_TESTS: &[HighhalfTest] = &[
 /// `jmp` では入口の RSP が 8 ずれていた）。`call` の後に `ud2` を足したので、データの置き場が 8 バイト下がり、
 /// rel32 が 3 つとも変わった。末尾の 1 バイトは `ud2` の先頭である（以前は `.p2align 3` の詰め物の `0x90`）。
 const EXPECTED_TRAMPOLINE_BYTES: [u8; 24] = [
-    0x48, 0x8b, 0x05, 0x19, 0x00, 0x00, 0x00, // mov rax, [rip + zaytos_tramp_pml4]
+    0x48, 0x8b, 0x05, 0x19, 0x00, 0x00, 0x00, // mov rax, [rip + zeikos_tramp_pml4]
     0x0f, 0x22, 0xd8, // mov cr3, rax
-    0x48, 0x8b, 0x25, 0x17, 0x00, 0x00, 0x00, // mov rsp, [rip + zaytos_tramp_stack]
-    0xff, 0x15, 0x19, 0x00, 0x00, 0x00, // call [rip + zaytos_tramp_entry]
+    0x48, 0x8b, 0x25, 0x17, 0x00, 0x00, 0x00, // mov rsp, [rip + zeikos_tramp_stack]
+    0xff, 0x15, 0x19, 0x00, 0x00, 0x00, // call [rip + zeikos_tramp_entry]
     0x0f, // ud2 の先頭（0F 0B）
 ];
 
@@ -11565,7 +11565,7 @@ fn cmd_ttf_test(features: &[&str], expect_pass: bool) -> Result<()> {
     }
 
     let stripped = strip_ansi(&serial);
-    let zaytos: Vec<String> = stripped
+    let zeikos: Vec<String> = stripped
         .lines()
         .map(|line| line.trim().to_string())
         .filter(|line| line.starts_with("ttf: "))
@@ -11590,13 +11590,13 @@ fn cmd_ttf_test(features: &[&str], expect_pass: bool) -> Result<()> {
     let host_cc = host_cc_version();
 
     // **判定**——**バイト単位で一致する。**
-    let matched = zaytos == host;
-    let first_difference = zaytos
+    let matched = zeikos == host;
+    let first_difference = zeikos
         .iter()
         .zip(host.iter())
         .find(|(a, b)| a != b)
-        .map(|(a, b)| format!("zaytos {a:?} vs host {b:?}"))
-        .unwrap_or_else(|| format!("zaytos has {} line(s), host {}", zaytos.len(), host.len()));
+        .map(|(a, b)| format!("zeikos {a:?} vs host {b:?}"))
+        .unwrap_or_else(|| format!("zeikos has {} line(s), host {}", zeikos.len(), host.len()));
 
     println!("{context}: (signal) the host side ran to its end = {host_complete}");
     println!("{context}: (signal) the script reached its end = {script_finished}");
@@ -20097,7 +20097,7 @@ const DIRECT_SERIAL_PORT_ALLOWLIST: &[DirectSerialPortSite] = &[
     // (d) AP の起動経路。**BKL に参加する前である。**
     DirectSerialPortSite {
         file: "kernel/src/smp.rs",
-        item: "zaytos_ap_entry",
+        item: "zeikos_ap_entry",
         reason: "AP の入口。per-CPU もスタックもまだ整っていない",
     },
     DirectSerialPortSite {
@@ -21962,7 +21962,7 @@ const FIXED_RUN_NAMES: &[(&str, &str)] = &[
     ("join(\"ovmf\")", "the directory of the OVMF variables"),
     ("\"OVMF_VARS_4M.fd\"", "the copy of the OVMF variables"),
     // **分けて書く**——続けて書くと、この表の行そのものに当たる（ほかの型は引用符を `\"` で書くので当たらない）。
-    (concat!("/tmp/", "zaytos-xtask-"), "a monitor socket"),
+    (concat!("/tmp/", "zeikos-xtask-"), "a monitor socket"),
 ];
 
 /// 道具（`tools/*.py`）が、決まった置き場の像を読む形（2026-09-29。案 B の ①）。**道具は `--image` で回の置き場を
@@ -22455,12 +22455,12 @@ const COMMIT_BODY_LINES: core::ops::RangeInclusive<usize> = 2..=5;
 /// AP の per-CPU 資産と CURRENT の sentinel の破壊テストでの確認（S3-b-2b-2）。
 const SMP_AP_TESTS: &[CriticalTest] = &[
     // 2026-09-28: AP のトランポリンが Rust の入口へ `call` する前に RSP を 8 ずらす。**入口の確かめが
-    // `zaytos_ap_entry` の名前つきで止めること。** 止めた後は、AP の最初のログ（起動の署名の行）が出ない。
+    // `zeikos_ap_entry` の名前つきで止めること。** 止めた後は、AP の最初のログ（起動の署名の行）が出ない。
     CriticalTest {
         name: "ap-entry-misaligned",
         feature: "ap-entry-misalign-test",
         expected_markers: &[
-            "stack alignment: zaytos_ap_entry was entered with a stack that breaks the SysV ABI",
+            "stack alignment: zeikos_ap_entry was entered with a stack that breaks the SysV ABI",
             "halting (cli + hlt loop)",
         ],
         forbidden_markers: &["smp: application processor 1 started"],
@@ -32952,7 +32952,7 @@ mod tests {
     /// （2026-09-29。案 B の ②）。
     #[test]
     fn a_copy_is_written_aside_and_then_put_in_place() {
-        let root = std::env::temp_dir().join(format!("zaytos-copy-aside-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("zeikos-copy-aside-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let built = root.join("built.efi");
         fs::write(&built, b"MZ new").unwrap();
@@ -32975,7 +32975,7 @@ mod tests {
     /// 写すと中身を空にする）。
     #[test]
     fn a_copy_onto_itself_is_refused_and_the_file_is_kept() {
-        let root = std::env::temp_dir().join(format!("zaytos-keep-a-copy-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("zeikos-keep-a-copy-{}", std::process::id()));
         let key = kernel_builds::key_of(&[]);
         let kept = root
             .join("target")
@@ -33788,7 +33788,7 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
             assert!(moved.contains(part), "{moved}");
         }
         let dir =
-            std::env::temp_dir().join(format!("zaytos-built-elsewhere-{}", std::process::id()));
+            std::env::temp_dir().join(format!("zeikos-built-elsewhere-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("tree").join("xtask")).unwrap();
         std::os::unix::fs::symlink(dir.join("tree"), dir.join("link")).unwrap();
@@ -34158,7 +34158,7 @@ fn read_cr3() -> u64 {
     #[test]
     fn a_log_within_the_limit_is_read_whole() {
         let dir = env::temp_dir().join(format!(
-            "zaytos-xtask-test-{}-{}",
+            "zeikos-xtask-test-{}-{}",
             std::process::id(),
             line!()
         ));
@@ -34172,7 +34172,7 @@ fn read_cr3() -> u64 {
     #[test]
     fn a_log_over_the_limit_keeps_its_head_and_tail_and_says_what_was_skipped() {
         let dir = env::temp_dir().join(format!(
-            "zaytos-xtask-test-{}-{}",
+            "zeikos-xtask-test-{}-{}",
             std::process::id(),
             line!()
         ));
@@ -34193,7 +34193,7 @@ fn read_cr3() -> u64 {
     #[test]
     fn panic_markers_present_requires_both_markers() {
         let dir = env::temp_dir().join(format!(
-            "zaytos-xtask-test-{}-{}",
+            "zeikos-xtask-test-{}-{}",
             std::process::id(),
             line!()
         ));

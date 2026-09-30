@@ -917,7 +917,7 @@ python3 tools/judgement-map.py /tmp/full.txt
 | `interrupt-test-enable-only` | 全IRQをマスクしたまま`sti`する | 何も届かないこと |
 | `interrupt-test-irq-path` | `int 0x40`を発行する | IRQ経路がGPRを復元すること |
 | `misalign-test` | IRQスタブのスタック16バイト調整を外す | 境界検証が発火すること |
-| `ap-entry-misalign-test` | APのトランポリンがRustの入口へ`call`する前に、RSPを8ずらす（2026-09-28） | 入口の確かめ（`check_entry_stack_alignment`）が`zaytos_ap_entry`の名前つきで止めること |
+| `ap-entry-misalign-test` | APのトランポリンがRustの入口へ`call`する前に、RSPを8ずらす（2026-09-28） | 入口の確かめ（`check_entry_stack_alignment`）が`zeikos_ap_entry`の名前つきで止めること |
 | `bsp-entry-misalign-test` | 起動のトランポリンが載せる起動用のスタックの頂点を8下げ、`_start`の入口をずらす（2026-09-28） | 入口の確かめが`_start`の名前つきで止めること。止めた目印を見たら抜け、期限まで待たない |
 | `idt-irq-stub-offset-test` | IRQスタブ表の索引を1本ずらす（ベクタ`0x3F`の1本だけ） | 配置検証（`check_irq_stub_table`の`entries_ok`）が落ち、ADR-0018 §2の門が`sti`を拒むこと |
 | `addrspace-no-kernel-share` | 新しいアドレス空間へカーネルの上位256本をコピーしない | CR3を差し替えた瞬間に命令フェッチが翻訳できなくなり、「切り替えた後」の行が出ないこと |
@@ -5339,24 +5339,24 @@ TCGで守れないもの
    **`dmesg`は、後から`tail`だけを見るとどの行が今回のものか分からないためである**
 
         md5sum target/fs-extract-<CONFIG>.img
-        sudo dmesg | wc -l > /tmp/zaytos-dmesg-before.txt
+        sudo dmesg | wc -l > /tmp/zeikos-dmesg-before.txt
         sudo dmesg | tail -3
 
 3. マウントする。**`-t ext2`を明示する**（理由は下記）
 
-        mkdir -p /tmp/zaytos-mnt
-        sudo mount -t ext2 -o loop,ro target/fs-extract-<CONFIG>.img /tmp/zaytos-mnt
-        mount | grep zaytos-mnt
+        mkdir -p /tmp/zeikos-mnt
+        sudo mount -t ext2 -o loop,ro target/fs-extract-<CONFIG>.img /tmp/zeikos-mnt
+        mount | grep zeikos-mnt
 
 4. **ツリーを丸ごと見る。** **ZeikOSが触っていないものが壊れていないことは、
    まだ誰も言っていない**
 
-        ls -lnR /tmp/zaytos-mnt
+        ls -lnR /tmp/zeikos-mnt
 
 5. **会計をドライバに読ませる。** **`e2fsck`と`dumpe2fs`はどちらも`libext2fs`だが、
    これは別の実装である**——**ZeikOSが書いた空き数の欄を、独立な読み手が報告する**
 
-        stat -f /tmp/zaytos-mnt
+        stat -f /tmp/zeikos-mnt
 
    **期待値は判定行から取る。定数で書かない。**
    `fs-extract`の判定行が`built`と`extracted`の両方を出しており、
@@ -5374,7 +5374,7 @@ TCGで守れないもの
 
         python3 -c "
         import os
-        base = '/tmp/zaytos-mnt/data/'
+        base = '/tmp/zeikos-mnt/data/'
         for name in ('created', 'writable'):
             path = base + name
             if not os.path.exists(path):
@@ -5390,8 +5390,8 @@ TCGで守れないもの
 
 7. 今回出た`dmesg`だけを見て、外し、**`md5`が変わっていないことを見る**
 
-        sudo dmesg | tail -n +$(( $(cat /tmp/zaytos-dmesg-before.txt) + 1 ))
-        sudo umount /tmp/zaytos-mnt
+        sudo dmesg | tail -n +$(( $(cat /tmp/zeikos-dmesg-before.txt) + 1 ))
+        sudo umount /tmp/zeikos-mnt
         md5sum target/fs-extract-<CONFIG>.img
 
 **`-t ext2`を明示する理由。** **この環境のカーネルは`ext2`・`ext3`・`ext4`の3つを

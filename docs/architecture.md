@@ -304,10 +304,10 @@ M4で実装した割り込み基盤の現在の姿。
 | `257..510` | | 空き（SMPのper-CPU用に温存。BKLで使う。ADR-0023/ADR-0024） |
 | `511` | `0xFFFF_FFFF_8000_0000` | kernelイメージ（`code-model=kernel`が要求する上位2GiB） |
 
-**ブートフロー（B完了時点）。** エントリは`_start`ではなく`zaytos_trampoline`である（再リンクで`_start`すら低位では走れない。ADR-0021 B Addendum）。
+**ブートフロー（B完了時点）。** エントリは`_start`ではなく`zeikos_trampoline`である（再リンクで`_start`すら低位では走れない。ADR-0021 B Addendum）。
 
 1. bootloaderはkernel ELFを**LMA（`p_paddr`、低位）**へ配置し、`elf.entry_point`（再リンク後は高位VMA）を**LMAへ変換した低位アドレス**へjmpする（ADR-0008「ローダは薄く」を維持。変更はp_paddr配置とエントリのVMA-delta変換だけ）。
-2. `zaytos_trampoline`（`.text.trampoline`、絶対即値を持たずRIP相対のみ）が静的初期テーブル（`.data.bootpt`、恒等+高位の`[0,1GiB)`）へCR3を切り替え、静的ブートスタック（`.data.bootstack`、16KiB）へRSPを移し、高位`_start`へjmpする。
+2. `zeikos_trampoline`（`.text.trampoline`、絶対即値を持たずRIP相対のみ）が静的初期テーブル（`.data.bootpt`、恒等+高位の`[0,1GiB)`）へCR3を切り替え、静的ブートスタック（`.data.bootstack`、16KiB）へRSPを移し、高位`_start`へjmpする。
 3. `_start`（高位）がフレームアロケータ・本流ページテーブル（M2-d/A-1、恒等+高位+direct map）を構築しCR3を切り替える。
 4. direct mapを高位ウィンドウへ差し替え（A-2）、ヒープを高位化し、各検証サイトを走らせた後、**恒等（`PML4[0]`）を外す（B-2b-4）**。除去は「フレーム会計→落とす→独立walkerで必須領域を検証→CR3リロード（全TLBフラッシュ）→読み戻し」の順で、失敗すればフラッシュ前に書き戻して復帰する。以降カーネルは高位のみで走る。
 

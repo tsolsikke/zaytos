@@ -149,7 +149,7 @@ impl RunDir {
     /// 道の長さの上限の確かめは、呼ぶ側が今までどおり行う（`ensure_socket_path_fits`）。
     pub fn monitor_socket(&self, kind: &str) -> PathBuf {
         PathBuf::from(format!(
-            "/tmp/zaytos-xtask-{kind}-{}-{}.sock",
+            "/tmp/zeikos-xtask-{kind}-{}-{}.sock",
             std::process::id(),
             self.number
         ))

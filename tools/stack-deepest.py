@@ -62,7 +62,7 @@ import check_lock  # noqa: E402
 # EFBIG で失敗するだけで、コアを吐かない。WSL の core_pattern はパイプで、RLIMIT_CORE が届かない）。
 # 自分の組で起動し、止めるときは組ごと SIGKILL を送る。
 QEMU_FILE_LIMIT = 4 << 30
-CAPPED = ["sh", "-c", "trap '' XFSZ; exec \"$@\"", "zaytos-qemu", "prlimit",
+CAPPED = ["sh", "-c", "trap '' XFSZ; exec \"$@\"", "zeikos-qemu", "prlimit",
           f"--fsize={QEMU_FILE_LIMIT}", "--core=0", "--"]
 
 
@@ -180,7 +180,7 @@ def serial_text(work):
 def dump_at_prompt():
     """プロンプトまで起こし、スタックを読んで、塗りの残っていない最も低い深さを返す。"""
     work = os.path.join(OUT, "prompt")
-    sock = f"/tmp/zaytos-stack-deepest-{os.getpid()}.sock"
+    sock = f"/tmp/zeikos-stack-deepest-{os.getpid()}.sock"
     child = launch(work, ["-monitor", f"unix:{sock},server,nowait"])
     dump = os.path.join(work, "stack.bin")
     try:

@@ -764,7 +764,7 @@ fn write_prompt() {
 ///
 /// `stack` が `_start` の時点の `rsp` であること。
 #[no_mangle]
-pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
+pub unsafe extern "sysv64" fn zeikos_main(stack: *const u64) -> ! {
     // **初期スタックの環境を表へコピーする（f-2。`ADR-0053`）。**
     // **以後、`TERM` も `PATH` も `$NAME` も、引くのは表である。**
     // SAFETY: 呼び出し元契約により `stack` は初期スタックの先頭を指す。

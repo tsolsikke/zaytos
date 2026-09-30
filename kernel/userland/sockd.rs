@@ -114,7 +114,7 @@ fn say(text: &[u8]) {
 ///
 /// `stack` が `_start` の時点の `rsp` であること。
 #[no_mangle]
-pub unsafe extern "sysv64" fn zaytos_main(stack: *const u64) -> ! {
+pub unsafe extern "sysv64" fn zeikos_main(stack: *const u64) -> ! {
     let mut name = [0u8; NAME_MAX];
     // SAFETY: 呼び出し元契約により `stack` は初期スタックの先頭を指す。
     let name_len = match unsafe { userlib::argument(stack, 1) } {

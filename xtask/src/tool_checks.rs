@@ -353,7 +353,7 @@ mod tests {
     /// **PNG の署名と IHDR から大きさを読む。** **署名の無いものと 0 の大きさは断る。**
     #[test]
     fn png_dimensions_are_read_from_the_header() {
-        let dir = std::env::temp_dir().join(format!("zaytos-png-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("zeikos-png-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let mut good = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
         good.extend_from_slice(&1280u32.to_be_bytes());

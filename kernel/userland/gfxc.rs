@@ -78,7 +78,7 @@ impl Line {
 ///
 /// `stack` が `_start` の時点の `rsp` であること。
 #[no_mangle]
-pub unsafe extern "sysv64" fn zaytos_main(_stack: *const u64) -> ! {
+pub unsafe extern "sysv64" fn zeikos_main(_stack: *const u64) -> ! {
     let screen = open_screen();
     let mut line = Line::new();
     line.push(b"gfxc: open_screen returned ");

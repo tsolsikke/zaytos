@@ -753,7 +753,7 @@ mod tests {
     #[test]
     fn a_copy_is_accepted_only_when_it_is_a_build_of_its_set() {
         let debug =
-            std::env::temp_dir().join(format!("zaytos-artifacts-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("zeikos-artifacts-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&debug);
         let write = |path: PathBuf, text: &str| {
             fs::create_dir_all(path.parent().unwrap()).unwrap();

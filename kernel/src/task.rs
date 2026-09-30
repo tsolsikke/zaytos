@@ -889,7 +889,7 @@ pub fn start_ring3_task() -> Option<u64> {
             RING3_TASK_STACK_SIZE,
         )
     };
-    let entry = addr_of!(zaytos_ring3_task_body) as u64;
+    let entry = addr_of!(zeikos_ring3_task_body) as u64;
     // SAFETY: top はガードページを設けた静的スタックの頂点で、まだ誰も使っていない。
     // 4KiB 境界（`align(4096)` の構造体の末尾）に載っている。
     let saved_stack_pointer = unsafe { build_initial_context(top, entry) };
@@ -954,7 +954,7 @@ pub fn ring3_task_finished() -> bool {
 
 extern "C" {
     /// 足した 1 本の入口（`global_asm!`）。偽 `IrqContext` の RIP が指す。
-    static zaytos_ring3_task_body: u8;
+    static zeikos_ring3_task_body: u8;
 }
 
 // 足した 1 本の入口（W1-c-4）。**`call` で Rust へ入る**——**`iretq` した直後の RSP はスタック頂点
@@ -963,8 +963,8 @@ extern "C" {
 core::arch::global_asm!(
     ".section .text",
     ".p2align 4",
-    ".globl zaytos_ring3_task_body",
-    "zaytos_ring3_task_body:",
+    ".globl zeikos_ring3_task_body",
+    "zeikos_ring3_task_body:",
     "  call {body}",
     "  ud2",
     body = sym ring3_task_main,
@@ -1571,7 +1571,7 @@ fn bsp_idle_stack_bounds() -> (VirtAddr, VirtAddr) {
 
 extern "C" {
     /// BSP 用アイドルタスクの入口（`global_asm!`）。偽 `IrqContext` の RIP が指す。
-    static zaytos_bsp_idle_body: u8;
+    static zeikos_bsp_idle_body: u8;
 }
 
 // BSP 用アイドルタスクの入口（W2-a）。**`call` で Rust へ入る**——**`iretq` した直後の RSP は
@@ -1580,8 +1580,8 @@ extern "C" {
 core::arch::global_asm!(
     ".section .text",
     ".p2align 4",
-    ".globl zaytos_bsp_idle_body",
-    "zaytos_bsp_idle_body:",
+    ".globl zeikos_bsp_idle_body",
+    "zeikos_bsp_idle_body:",
     "  call {body}",
     "  ud2",
     body = sym bsp_idle_main,
@@ -1858,7 +1858,7 @@ const AP_IDLE_TASK_OWNER: usize = 1;
 
 extern "C" {
     /// ワーカー本体（`global_asm!` で定義）。偽 `IrqContext` の RIP が指す。
-    static zaytos_worker_body: u8;
+    static zeikos_worker_body: u8;
 }
 
 /// 観測用のシリアル（PC では COM1）へ 1 行書く小さな補助。デモの出力はメインループの外の複数文脈から
@@ -2051,7 +2051,7 @@ pub fn run_cooperative_demo(allocator: &mut crate::frame_allocator::FrameAllocat
 /// 起動時の単一実行文脈から 1 回だけ呼ぶこと。自前のページテーブルへ切り替え
 /// 済みであること（ガードページの unmap に使う）。
 unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
-    let entry = addr_of!(zaytos_worker_body) as u64;
+    let entry = addr_of!(zeikos_worker_body) as u64;
 
     // タスク 0 = メイン。実行中なので saved_stack_pointer は初回 yield で埋まる。
     // メインのスタック頂点は通常のカーネルスタック（RSP0 用）。
@@ -2148,7 +2148,7 @@ unsafe fn setup_tasks(allocator: &mut crate::frame_allocator::FrameAllocator) {
                 &mut serial_line,
             );
         }
-        let entry = addr_of!(zaytos_bsp_idle_body) as u64;
+        let entry = addr_of!(zeikos_bsp_idle_body) as u64;
         // SAFETY: top は今ガードページを設けた静的スタックの頂点で、まだ誰も使っていない。
         // 4KiB 境界（`align(4096)` の構造体の末尾）に載っている。
         let saved_stack_pointer = unsafe { build_initial_context(top, entry) };
@@ -2795,7 +2795,7 @@ const PREEMPTIVE_DEMO_TICKS: u64 = 200;
 extern "C" {
     /// プリエンプティブなワーカー本体（`global_asm!`）。yield を呼ばず、GPR に
     /// pattern を保持しながらビジーループする。timer が切り替える。
-    static zaytos_preemptive_body: u8;
+    static zeikos_preemptive_body: u8;
 }
 
 /// プリエンプティブデモを実行し、検証する（M5-d）。
@@ -2882,7 +2882,7 @@ pub fn run_preemptive_demo() {
 /// デモが終わっていること（ワーカースタックのガードページは M5-c で設置済み。
 /// ここでは再設置しない）。
 unsafe fn setup_preemptive_tasks() {
-    let entry = addr_of!(zaytos_preemptive_body) as u64;
+    let entry = addr_of!(zeikos_preemptive_body) as u64;
     let main_top = crate::arch::x86_64::kernel_stack_range().top.as_u64();
 
     // SAFETY: 単一実行文脈。timer は IF=1 だが、この関数は yield する前に

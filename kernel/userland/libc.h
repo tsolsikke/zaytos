@@ -9,8 +9,8 @@
  * **ヘッダは 1 本である。** 標準の `<string.h>` や `<stdio.h>` の分け方を
  * 真似ない——**面が 7 つしか無いので、分けると読む先が増えるだけである。** */
 
-#ifndef ZAYTOS_LIBC_H
-#define ZAYTOS_LIBC_H
+#ifndef ZEIKOS_LIBC_H
+#define ZEIKOS_LIBC_H
 
 typedef unsigned long size_t;
 

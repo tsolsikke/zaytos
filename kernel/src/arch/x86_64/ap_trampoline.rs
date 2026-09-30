@@ -132,7 +132,7 @@ static AP_STACK_FRAMES: [AtomicU64; MAX_APS] = [const { AtomicU64::new(NO_FRAME)
 const MAX_APS: usize = common::percpu::MAX_CPUS - 1;
 
 /// 恒等マッピングが覆う上限。静的初期テーブルの `PML4[0]` は 2MiB ページ 512 本で
-/// 低位 1GiB を覆う（`kernel/src/main.rs` の `zaytos_boot_pd_shared`）。
+/// 低位 1GiB を覆う（`kernel/src/main.rs` の `zeikos_boot_pd_shared`）。
 const IDENTITY_LIMIT: u64 = 1024 * 1024 * 1024;
 
 /// AP 用スタックのフレームを予約する（S3-b-2b-1）。
@@ -188,7 +188,7 @@ pub fn ap_stack_frame(index: usize) -> Option<PhysAddr> {
 // - 絶対値が要る箇所（GDTR のベース、CR3、RSP、64 ビットの飛び先）は
 //   BSP がコピー後に書き込む。自己再配置はしない。
 //
-// CR3 に載せるのは `zaytos_boot_pml4`（静的初期テーブル）である。
+// CR3 に載せるのは `zeikos_boot_pml4`（静的初期テーブル）である。
 // 本番テーブルは恒等（`PML4[0]`）を除去済みなので、載せると次の命令フェッチが
 // 解決できない。この静的テーブルは `PML4[0]`（低位 1GiB の恒等）と
 // `PML4[511]`（高位）を持つ。
@@ -227,12 +227,12 @@ mod layout {
     ///
     /// 位置を定数で持たない。far jump は `mov cr0` の直後でなければならず、
     /// そこまでのコード長は書き換えるたびに変わる。シンボル
-    /// `zaytos_ap_tramp_farjmp` からの相対で求める。
+    /// `zeikos_ap_tramp_farjmp` からの相対で求める。
     pub const FARJMP_OPCODE_LEN: u64 = 2;
 }
 
 /// 破壊テスト（`ap-entry-misalign-test`。2026-09-28）: Rust の入口へ `call` する前に RSP を 8 ずらす。入口の確かめ
-/// （[`crate::arch::x86_64::check_entry_stack_alignment`]）が `zaytos_ap_entry` の名前つきで止めることを見る。
+/// （[`crate::arch::x86_64::check_entry_stack_alignment`]）が `zeikos_ap_entry` の名前つきで止めることを見る。
 /// 既定は空の文字列で、トランポリンのバイト列は変わらない。**雛形そのものを変えるので、設置の照合（コピーと雛形の
 /// 突き合わせ）は通る**——止めるのは入口の確かめである。
 #[cfg(feature = "ap-entry-misalign-test")]
@@ -251,8 +251,8 @@ macro_rules! ap_entry_sabotage {
 core::arch::global_asm!(
     ".section .rodata.aptramp,\"a\",@progbits",
     ".p2align 12",
-    ".globl zaytos_ap_tramp_start",
-    "zaytos_ap_tramp_start:",
+    ".globl zeikos_ap_tramp_start",
+    "zeikos_ap_tramp_start:",
     ".code16",
     // --- リアルモード。DS = CS にしてフレーム内を参照できるようにする ---
     "  cli",
@@ -292,8 +292,8 @@ core::arch::global_asm!(
     // アセンブラの構文に依存せずオペコードとオフセットの位置を固定できる
     // （`push imm8` の符号拡張で採ったのと同じ理由）。
     // 飛び先の u32 は BSP が書き込む。位置は下のシンボルで受け渡す。
-    ".globl zaytos_ap_tramp_farjmp",
-    "zaytos_ap_tramp_farjmp:",
+    ".globl zeikos_ap_tramp_farjmp",
+    "zeikos_ap_tramp_farjmp:",
     "  .byte 0x66, 0xea",
     "  .long 0",            // 飛び先（オペコード 2 バイトの後ろ）
     "  .word 0x08",         // 一時 GDT の 64bit コードセレクタ
@@ -315,15 +315,15 @@ core::arch::global_asm!(
     // RIP 相対であることを明示し、同じセクション内のラベルを指す。
     // トランポリンはコピーされて走るが、コピー先でも RIP とデータの相対距離は
     // 変わらないので、これは位置独立である。
-    "  mov rsp, [rip + zaytos_ap_tramp_data_rsp]",
+    "  mov rsp, [rip + zeikos_ap_tramp_data_rsp]",
     // 自分の索引を第 1 引数へ。GDT に依存しない身元の出所である。
-    "  mov rdi, [rip + zaytos_ap_tramp_data_index]",
+    "  mov rdi, [rip + zeikos_ap_tramp_data_index]",
     // 起動したことを BSP へ知らせる。BSP はこれをポーリングして次の AP へ進む。
-    "  mov qword ptr [rip + zaytos_ap_tramp_data_started], 1",
+    "  mov qword ptr [rip + zeikos_ap_tramp_data_started], 1",
     // 高位 VA の Rust の入口へ `call` で入る。戻らない。**`jmp` で入ると、入口の RSP が System V の決まり
     // （16 で割ると 8 余る）から 8 ずれる**（スタックの頂点は 4 KiB 境界。2026-09-28 に直した）。入口の先頭で
     // 確かめる（`check_entry_stack_alignment`）。戻ったら `ud2` で落とす。
-    "  mov rax, [rip + zaytos_ap_tramp_data_entry]",
+    "  mov rax, [rip + zeikos_ap_tramp_data_entry]",
     ap_entry_sabotage!(), // 既定は空。feature のときだけ RSP を 8 ずらす
     "  call rax",
     "  ud2",
@@ -333,22 +333,22 @@ core::arch::global_asm!(
     "  .quad 0x00AF9A000000FFFF",      // 0x08: 64bit code, DPL0, L=1
     "  .quad 0x00CF92000000FFFF",      // 0x10: data
     ".org 0xF20",
-    ".globl zaytos_ap_tramp_gdtr",
-    "zaytos_ap_tramp_gdtr:",
+    ".globl zeikos_ap_tramp_gdtr",
+    "zeikos_ap_tramp_gdtr:",
     "  .word 23",                      // limit = 3*8 - 1
     "  .long 0",                       // base（BSP が書き込む）
     ".org 0xF40",
     // データブロック。64 ビット側は RIP 相対でここを指すので、
     // 各フィールドにラベルを置く。オフセット定数（BSP が書き込む側）と
     // 同じ位置を指していることが、レイアウトの唯一の接点である。
-    "zaytos_ap_tramp_data_cr3:     .quad 0",
-    "zaytos_ap_tramp_data_rsp:     .quad 0",
-    "zaytos_ap_tramp_data_entry:   .quad 0",
-    "zaytos_ap_tramp_data_index:   .quad 0",
-    "zaytos_ap_tramp_data_started: .quad 0",
+    "zeikos_ap_tramp_data_cr3:     .quad 0",
+    "zeikos_ap_tramp_data_rsp:     .quad 0",
+    "zeikos_ap_tramp_data_entry:   .quad 0",
+    "zeikos_ap_tramp_data_index:   .quad 0",
+    "zeikos_ap_tramp_data_started: .quad 0",
     ".org 0x1000",
-    ".globl zaytos_ap_tramp_end",
-    "zaytos_ap_tramp_end:",
+    ".globl zeikos_ap_tramp_end",
+    "zeikos_ap_tramp_end:",
     ".code64",
     gdtr = const layout::GDTR,
     data = const layout::DATA,
@@ -484,16 +484,16 @@ pub unsafe fn install_trampoline(
     entry: extern "C" fn(u64) -> !,
 ) -> InstalledTrampoline {
     extern "C" {
-        static zaytos_ap_tramp_start: u8;
-        static zaytos_ap_tramp_end: u8;
-        static zaytos_ap_tramp_farjmp: u8;
+        static zeikos_ap_tramp_start: u8;
+        static zeikos_ap_tramp_end: u8;
+        static zeikos_ap_tramp_farjmp: u8;
     }
 
-    let src = core::ptr::addr_of!(zaytos_ap_tramp_start) as u64;
+    let src = core::ptr::addr_of!(zeikos_ap_tramp_start) as u64;
     // far jump の位置は、`mov cr0` の直後に置く制約からコード長で決まる。
     // 定数で持たず、シンボルからの相対で求める。
-    let farjmp_offset = core::ptr::addr_of!(zaytos_ap_tramp_farjmp) as u64 - src;
-    let end = core::ptr::addr_of!(zaytos_ap_tramp_end) as u64;
+    let farjmp_offset = core::ptr::addr_of!(zeikos_ap_tramp_farjmp) as u64 - src;
+    let end = core::ptr::addr_of!(zeikos_ap_tramp_end) as u64;
     let len = end - src;
 
     // 1 ページに収まることを確かめる。収まらない場合の隣接ページの確保は
@@ -516,10 +516,10 @@ pub unsafe fn install_trampoline(
 
     // AP が使う CR3。静的初期テーブルの物理である。
     extern "C" {
-        static zaytos_boot_pml4: u8;
+        static zeikos_boot_pml4: u8;
     }
     let cr3 = crate::kernel_phys_from_virt(
-        common::addr::VirtAddr::new(core::ptr::addr_of!(zaytos_boot_pml4) as u64)
+        common::addr::VirtAddr::new(core::ptr::addr_of!(zeikos_boot_pml4) as u64)
             .expect("the static boot page table has a canonical address"),
     )
     .as_u64();
@@ -602,13 +602,13 @@ fn verify_installed_trampoline(
     farjmp_offset: u64,
 ) -> bool {
     extern "C" {
-        static zaytos_ap_tramp_gdtr: u8;
-        static zaytos_ap_tramp_data_cr3: u8;
-        static zaytos_ap_tramp_data_started: u8;
+        static zeikos_ap_tramp_gdtr: u8;
+        static zeikos_ap_tramp_data_cr3: u8;
+        static zeikos_ap_tramp_data_started: u8;
     }
-    let gdtr_off = core::ptr::addr_of!(zaytos_ap_tramp_gdtr) as u64 - src;
-    let data_off = core::ptr::addr_of!(zaytos_ap_tramp_data_cr3) as u64 - src;
-    let data_end = core::ptr::addr_of!(zaytos_ap_tramp_data_started) as u64 - src + 8;
+    let gdtr_off = core::ptr::addr_of!(zeikos_ap_tramp_gdtr) as u64 - src;
+    let data_off = core::ptr::addr_of!(zeikos_ap_tramp_data_cr3) as u64 - src;
+    let data_end = core::ptr::addr_of!(zeikos_ap_tramp_data_started) as u64 - src + 8;
 
     // BSP が書き込む領域。ここだけを除外する。
     let patched: [(u64, u64); 3] = [
