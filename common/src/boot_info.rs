@@ -15,7 +15,7 @@ use core::fmt;
 /// 起動直後にこれを検証し、不一致ならシリアルにエラーを出して停止する。
 use crate::addr::PhysAddr;
 
-pub const BOOT_INFO_MAGIC: u64 = u64::from_le_bytes(*b"ZAYTBOOT");
+pub const BOOT_INFO_MAGIC: u64 = u64::from_le_bytes(*b"ZEIKBOOT");
 
 /// `BootInfo` のレイアウトバージョン。フィールドを追加・変更したら上げる。
 ///

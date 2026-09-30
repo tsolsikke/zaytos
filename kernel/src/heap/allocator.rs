@@ -47,7 +47,7 @@ struct AllocatedBlockHeader {
     requested_size: u64,
 }
 
-const HEADER_MAGIC: u64 = 0x5A61_7974_4845_4144; // "ZaytHEAD" 由来の目印。
+const HEADER_MAGIC: u64 = 0x5A65_696B_4845_4144; // "ZeikHEAD" 由来の目印。
 
 struct HeapState {
     free_list_head: Option<NonNull<FreeBlockNode>>,
