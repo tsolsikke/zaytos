@@ -23472,6 +23472,9 @@ fn read_x86_word_baseline(text: &str) -> Result<(usize, usize)> {
 /// 数えない**（[`code_for_word_count`]）。**追跡していない新しいファイルも数える**（[`checked_files`]。2026-09-28。
 /// 以前は追跡下だけを数えていて、`git add` の前の検査を新しいファイルが素通りした）。
 /// 置き場（[`X86_WORD_HOMES`]）の中の数は出すだけである。
+///
+/// **共通の側は 0 を求める**（2026-09-30。境界の段階の手順 2 の区切り。運用者の決定）——**基準のファイルに依らず、
+/// 0 でなければ落ちる。** 基準を手で上げても通らない。`main.rs` は、これまでどおり基準より増えたら落ちる。
 fn check_x86_words(workspace_root: &Path, update: bool) -> Result<String> {
     let mut common = 0usize;
     let mut boot = 0usize;
@@ -23505,6 +23508,23 @@ fn check_x86_words(workspace_root: &Path, update: bool) -> Result<String> {
         bail!(
             "X86_WORD_EXCEPTIONS has dead rows (the identifier is not in the file's code; remove the row): {}",
             dead.join("; ")
+        );
+    }
+    if common != 0 {
+        // **どのファイルのどの語かを出す。**
+        for (path, counts) in &per_file {
+            if x86_word_side(path) != X86WordSide::Common || counts.is_empty() {
+                continue;
+            }
+            let words: Vec<String> = counts
+                .iter()
+                .map(|(word, count)| format!("{word} {count}"))
+                .collect();
+            println!("    {path}: {}", words.join(", "));
+        }
+        bail!(
+            "x86 words on the common side must be 0, found {common}. Keep CPU, machine and ABI words in \
+             arch/, machine/ and abi/ (call them through functions); this does not depend on the baseline file"
         );
     }
     let reference = workspace_root.join(REFERENCE_X86_WORDS);
@@ -27490,11 +27510,11 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     }
 
     // **共通の側と `main.rs` に x86 の言葉が増えないこと**（2026-09-27。境界の段階の手順 2。`ADR-0070` の
-    // 3 の (5)。運用者の決定）。
+    // 3 の (5)。運用者の決定）。**共通の側は 0 を求める**（2026-09-30。手順 2 の区切り）。
     total += 1;
     begin_item(
         Family::Base,
-        "x86 words on the common side and in main.rs do not grow beyond the baseline",
+        "x86 words: none on the common side, and main.rs does not grow beyond the baseline",
     );
     match check_x86_words(&workspace_root, update_reference) {
         Ok(message) => println!("--- x86 words: {message}"),
