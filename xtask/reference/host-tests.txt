@@ -334,6 +334,7 @@ kernel::arch::x86_64::paging::entry::tests::the_parent_entry_does_not_inherit_th
 kernel::arch::x86_64::paging::entry::tests::the_parent_entry_inherits_the_user_bit
 kernel::arch::x86_64::paging::entry::tests::the_parent_entry_points_at_a_table_and_is_not_a_page
 kernel::arch::x86_64::paging::entry::tests::the_two_address_masks_differ_at_the_pat_bit
+kernel::arch::x86_64::paging::verify::tests::a_resolved_leaf_answers_writable_and_user_from_its_own_bits
 kernel::arch::x86_64::stack::tests::a_range_contains_its_own_bounds
 kernel::arch::x86_64::stack::tests::each_stack_sits_directly_above_its_guard
 kernel::arch::x86_64::stack::tests::the_block_is_exactly_the_sum_of_its_parts

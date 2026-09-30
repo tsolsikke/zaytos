@@ -1594,9 +1594,8 @@ fn load_user_program_into(
         // SAFETY: この空間の PML4 は有効で、direct map が配下を覆っている。読み取りのみ。
         match unsafe { walk_page_table(process.space.root(), direct_map, virt) } {
             Ok(resolved) => {
-                let writable =
-                    resolved.entry & crate::arch::x86_64::paging::entry::PTE_WRITABLE != 0;
-                let user = resolved.entry & crate::arch::x86_64::paging::entry::PTE_USER != 0;
+                let writable = resolved.leaf_writable();
+                let user = resolved.leaf_user_accessible();
                 if writable != expected_writable || !user {
                     mismatches += 1;
                     logger.error(format_args!(

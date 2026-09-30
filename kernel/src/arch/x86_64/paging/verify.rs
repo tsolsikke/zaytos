@@ -29,6 +29,8 @@ use common::addr::{DirectMap, PhysAddr, VirtAddr};
 mod bits {
     /// Present。
     pub const PRESENT: u64 = 1 << 0;
+    /// Read/Write。立っていれば書き込める（2026-09-30。walk の結果を読むメソッドのために足した）。
+    pub const WRITABLE: u64 = 1 << 1;
     /// User/Supervisor。立っていれば Ring 3 から到達可能（M5-e-2）。
     pub const USER: u64 = 1 << 2;
     /// PD / PDPT レベルの「ページそのもの」ビット。
@@ -50,7 +52,26 @@ pub struct Resolved {
     ///
     /// **フラグを読み戻すために持つ。** マップした側とは独立にここまで降りてきた
     /// 値なので、`W` や `U` が実際に立っているかをこの値で照合できる。
+    ///
+    /// **共通の側はこの欄のビットを直に読まず、メソッド（[`Resolved::leaf_writable`]・[`Resolved::leaf_user_accessible`]）
+    /// を使う**（2026-09-30）。数値で直に読む形は、直下を通す検査では捕まらないので、ここに書いて残す。
     pub entry: u64,
+}
+
+impl Resolved {
+    /// 葉のエントリが書き込みを許すか（x86 では R/W ビット。2026-09-30）。**共通の側はビットを読まず、これを使う。**
+    ///
+    /// **見るのは葉だけである**——書けるかは、途中の段のビットも揃って初めて決まる（x86）。
+    pub const fn leaf_writable(&self) -> bool {
+        self.entry & bits::WRITABLE != 0
+    }
+
+    /// 葉のエントリがユーザーから触れる印を持つか（x86 では U/S ビット。2026-09-30）。
+    ///
+    /// **見るのは葉だけである**——中間の段も含めて確かめるのは [`walk_page_table_user_accessible`] である。
+    pub const fn leaf_user_accessible(&self) -> bool {
+        self.entry & bits::USER != 0
+    }
 }
 
 /// 辿れなかった理由。
@@ -67,7 +88,8 @@ pub enum WalkError {
 /// # 契約（境界の関数。2026-09-30）
 ///
 /// - 根から仮想番地を辿って訳を返すだけで、何も変えない。
-/// - 共通の側は、読み込んだプログラムの写像の確かめ（`crate::userland`）に使う。
+/// - 共通の側は、読み込んだプログラムの写像の確かめ（`crate::userland`）に使う。書けるか・ユーザーから触れるかは、
+///   訳のメソッド（[`Resolved::leaf_writable`]・[`Resolved::leaf_user_accessible`]）で読み、項目のビットを直に読まない。
 ///
 /// # Safety
 ///
@@ -420,4 +442,29 @@ pub(crate) unsafe fn collect_subtree_table_frames(
     }
 
     Some(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **walk の訳のメソッドは、葉のエントリの R/W と U/S だけを見る**（2026-09-30）。ほかのビットが立っていても
+    /// 答えは変わらない。
+    #[test]
+    fn a_resolved_leaf_answers_writable_and_user_from_its_own_bits() {
+        let leaf = |entry| Resolved {
+            phys: PhysAddr::new_const(0x1000),
+            huge: false,
+            entry,
+        };
+        assert!(!leaf(bits::PRESENT).leaf_writable());
+        assert!(!leaf(bits::PRESENT).leaf_user_accessible());
+        assert!(leaf(bits::PRESENT | bits::WRITABLE).leaf_writable());
+        assert!(!leaf(bits::PRESENT | bits::WRITABLE).leaf_user_accessible());
+        assert!(leaf(bits::PRESENT | bits::USER).leaf_user_accessible());
+        assert!(!leaf(bits::PRESENT | bits::USER).leaf_writable());
+        let all =
+            leaf(bits::PRESENT | bits::WRITABLE | bits::USER | bits::PAGE_SIZE | bits::ADDR_4K);
+        assert!(all.leaf_writable() && all.leaf_user_accessible());
+    }
 }
