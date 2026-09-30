@@ -362,7 +362,7 @@ pub fn read_events(dst: &mut [u8]) -> usize {
     } else {
         crate::arch::x86_64::monotonic_ticks()
     };
-    let hz = u64::from(crate::machine::pc::irq::timer_frequency_hz());
+    let hz = u64::from(crate::machine::pc::timer_frequency_hz());
     let (secs, nanos) = common::time::timespec_from_ticks(ticks, hz);
     let usecs = nanos / 1000;
 

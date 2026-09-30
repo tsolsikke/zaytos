@@ -4029,7 +4029,7 @@ unsafe fn sys_clock_gettime(
     // **値はもっともらしいまま進むので、2 回読んで比べる検算でしか検出されない。**
     #[cfg(feature = "clock-goes-backwards")]
     let ticks = u64::MAX - ticks;
-    let hz = u64::from(crate::machine::pc::irq::timer_frequency_hz());
+    let hz = u64::from(crate::machine::pc::timer_frequency_hz());
     // **換算はホストで固定してある**（`common::time`）。
     let (secs, nsecs) = common::time::timespec_from_ticks(ticks, hz);
 
@@ -4116,7 +4116,7 @@ unsafe fn sys_nanosleep(
     // **欄から値へ変換するのは abi の `parse_timespec` で、値の範囲を見るのはここである**（`common::time`）。
     let request = parse_timespec(&raw);
 
-    let hz = u64::from(crate::machine::pc::irq::timer_frequency_hz());
+    let hz = u64::from(crate::machine::pc::timer_frequency_hz());
     let Ok(ticks) = common::time::ticks_for_duration(request.sec, request.nsec, hz) else {
         return (-EINVAL) as u64;
     };

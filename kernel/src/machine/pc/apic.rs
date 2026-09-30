@@ -1679,8 +1679,9 @@ const FIRST_EDGE_TIMEOUT_CYCLES: u64 = 1_000_000_000;
 ///
 /// # 契約（境界の型。2026-09-30）
 ///
-/// - 較正の基準で、[`calibrate_local_timer`] の結果に載る。共通の側は、PIT が刻んだかを決めるのに
-///   読むだけである（PM タイマで測った回は、PIT のティックが 1 本も来なかった回である）。
+/// - 較正の基準で、[`calibrate_local_timer`] の結果に載る。共通の側は、起動のタイマが刻んだかを
+///   [`CalibrationReference::boot_timer_ticked`] で決めるだけである（PM タイマで測った回は、PIT のティックが
+///   1 本も来なかった回である）。変種の名前は機械の時計の名前なので、共通の側は書かない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CalibrationReference {
     /// PIT の IRQ0 のティック（既定）。
@@ -1689,12 +1690,48 @@ pub enum CalibrationReference {
     PmTimer,
 }
 
+impl CalibrationReference {
+    /// 起動のタイマ（PC では PIT）のティックで測ったか（2026-09-30）。**機械の時計で測ったのは、起動のタイマの
+    /// ティックが 1 本も来なかった回だけである**（[`calibrate_local_timer`]）。共通の側は、ICW2 の事後証明が取れるかを
+    /// これで決める。
+    pub const fn boot_timer_ticked(self) -> bool {
+        matches!(self, Self::Pit)
+    }
+}
+
 impl core::fmt::Display for CalibrationReference {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Pit => write!(f, "the PIT"),
             Self::PmTimer => write!(f, "the ACPI PM timer"),
         }
+    }
+}
+
+/// 較正に使える、機械の時計（2026-09-30。境界の段階の手順 2 の区切り。運用者の決定）。
+///
+/// PC では ACPI の PM タイマで、FADT が読めるポートを示したときだけ在る。**共通の側は機械の時計の名前を持たない**
+/// ——ARM の機械には PM タイマが無いので、共通の側がその名前の型を持つと、ARM を足すときに名前を変えることになる。
+///
+/// # 契約（境界の型。2026-09-30）
+///
+/// - 作るのは起動の順（`main.rs` が [`CalibrationClock::from_pm_timer`] で作る）である。共通の側は中を読まずに、
+///   [`calibrate_local_timer`] へ渡すだけにする。
+/// - 無い形（[`CalibrationClock::absent`]）なら、較正は起動のタイマのティックだけで測る。
+#[derive(Debug, Clone, Copy)]
+pub struct CalibrationClock {
+    pm_timer: Option<crate::machine::pc::pmtimer::PmTimer>,
+}
+
+impl CalibrationClock {
+    /// 機械の時計が無い形（起動のタイマのティックだけで較正する）。
+    pub const fn absent() -> Self {
+        Self { pm_timer: None }
+    }
+
+    /// FADT が示した PM タイマから作る（読めるポートが無ければ、無い形になる）。
+    pub const fn from_pm_timer(pm_timer: Option<crate::machine::pc::pmtimer::PmTimer>) -> Self {
+        Self { pm_timer }
     }
 }
 
@@ -1970,12 +2007,13 @@ unsafe fn sample_with_pm_timer(
 /// - 書くのはこの CPU の Local APIC の Divide Configuration と Initial Count だけである。
 ///   LVT Timer・LINT0・SVR は前後で読み戻して、触っていないことを確かめる。
 /// - 待ちには上限があり、測れなければ `None` を返して止まらない（タイマは PIT のまま進む）。
-///   PIT のティックが 1 本も来なければ、PM タイマで測る（`pm_timer` があるとき）。
+///   PIT のティックが 1 本も来なければ、機械の時計で測る（[`CalibrationClock`] に PM タイマがあるとき）。
 pub fn calibrate_local_timer(
     logger: &mut Logger<Serial>,
     mapped: &MappedInterruptController,
-    pm_timer: Option<crate::machine::pc::pmtimer::PmTimer>,
+    clock: CalibrationClock,
 ) -> Option<TimerCalibration> {
+    let pm_timer = clock.pm_timer;
     let direct_map = common::addr::direct_map();
     let lapic = direct_map.phys_to_virt(mapped.local_apic).as_u64();
 
@@ -2164,6 +2202,14 @@ unsafe fn write_lapic(base_virt: u64, offset: u64, value: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **起動のタイマが刻んだと答えるのは、PIT で測った回だけである**（2026-09-30）。共通の側は、これで ICW2 の
+    /// 事後証明が取れるかを決める。
+    #[test]
+    fn only_a_pit_calibration_says_the_boot_timer_ticked() {
+        assert!(CalibrationReference::Pit.boot_timer_ticked());
+        assert!(!CalibrationReference::PmTimer.boot_timer_ticked());
+    }
 
     /// **VirtualBox の読み**（実測。版 0x00170020・ID レジスタ 0・MADT の ID 1）——**マップされていて、
     /// ID だけが食い違う。**

@@ -1608,6 +1608,11 @@ pub unsafe fn configure_timer(frequency_hz: u32) -> Result<TimerSetup, TimerErro
 }
 
 /// タイマに要求する周波数。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 決まった値を返すだけで、何も変えない。共通の側は、ティックを時間へ直すのに使う（`crate::input`・
+///   `crate::syscall`・`crate::interrupts`）。
 pub const fn timer_frequency_hz() -> u32 {
     pit::TARGET_FREQUENCY_HZ
 }
@@ -1946,6 +1951,11 @@ impl fmt::Display for ServiceSnapshot {
 }
 
 /// 配送中の割り込みを読み戻す（ログ用）。
+///
+/// # 契約（境界の関数。2026-09-30）
+///
+/// - 割り込みコントローラが配送中の割り込みを読み戻し、表示の形で返す（共通の側は中を読まずに心拍の行へ出す。
+///   `crate::interrupts`）。読むときにコントローラの状態を書くので、排他が要る（`# Safety`）。
 ///
 /// # Safety
 ///

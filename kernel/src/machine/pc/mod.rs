@@ -18,13 +18,16 @@ pub use acpi::MadtSurvey;
 pub use ap_start::{
     record_started_processor, start_processor, started_processor, ProcessorId, StartAddress,
 };
-pub use apic::{calibrate_local_timer, CalibrationReference, MappedInterruptController};
+pub use apic::{
+    calibrate_local_timer, CalibrationClock, CalibrationReference, MappedInterruptController,
+};
 pub use i8042::{keyboard_data_ready, read_keyboard_data};
 pub use irq::{
     claim, complete, delivered_count, disable_and_complete,
     enable_interrupt_controller_for_this_cpu, enable_local_timer_for_this_cpu, first_arrival,
-    probe_ipi, send_ipi_probe, source_for_isa_irq, source_for_pci_intx, spurious_counts,
-    survey_interrupt_masks, Arrival, Claim, FirstArrival, IsaIrq, PciIntx,
+    probe_ipi, send_ipi_probe, service_snapshot, source_for_isa_irq, source_for_pci_intx,
+    spurious_counts, survey_interrupt_masks, timer_frequency_hz, Arrival, Claim, FirstArrival,
+    IsaIrq, PciIntx,
 };
 pub use lapic_timer::switch_to_local_timer;
 pub use pci::{RegisterCell, RegisterWindow, VirtioBlkLocation};

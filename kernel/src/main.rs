@@ -5009,7 +5009,7 @@ fn start_timer(
             shell_after_heartbeats,
             apic,
             virtio,
-            fadt.pm_timer,
+            kernel::machine::pc::CalibrationClock::from_pm_timer(fadt.pm_timer),
         );
     }
 

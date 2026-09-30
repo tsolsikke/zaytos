@@ -669,7 +669,7 @@ pub unsafe fn run_timer_loop(
     shell_after_heartbeats: u64,
     controller: Option<&crate::machine::pc::MappedInterruptController>,
     virtio: Option<&mut crate::virtio::VirtioBlk>,
-    pm_timer: Option<crate::machine::pc::pmtimer::PmTimer>,
+    calibration_clock: crate::machine::pc::CalibrationClock,
 ) {
     // 最初のティックが来るまで何も出ないとハングと区別できないので、
     // 待ちに入ることを先に宣言する。
@@ -708,15 +708,16 @@ pub unsafe fn run_timer_loop(
     // 較正は測るだけで、LAPIC タイマをタイマとして使わない。LVT Timer は
     // マスクされたままで、LINT0 と SVR にも触らない。
     if let Some(controller) = controller {
-        // 破壊テスト (HW-c, pm-timer-treated-as-absent): PM タイマを無いものとして渡す。
+        // 破壊テスト (HW-c, pm-timer-treated-as-absent): 機械の時計（PC では PM タイマ）を無い形にして渡す。
         // **PIT が刻まない構成（`pit=off`）で、両方無い道を通す**——**較正の基準が 1 つも
         // 無いことを示して止まる行が出る。** **直す前は黙って止まっていた。**
-        let pm_timer = if cfg!(feature = "pm-timer-treated-as-absent") {
-            None
+        let calibration_clock = if cfg!(feature = "pm-timer-treated-as-absent") {
+            crate::machine::pc::CalibrationClock::absent()
         } else {
-            pm_timer
+            calibration_clock
         };
-        let calibration = crate::machine::pc::calibrate_local_timer(logger, controller, pm_timer);
+        let calibration =
+            crate::machine::pc::calibrate_local_timer(logger, controller, calibration_clock);
 
         // === S2-d-1b: 2 つ目のコントローラ実装を 1 回だけ読ませる ===
         //
@@ -757,10 +758,9 @@ pub unsafe fn run_timer_loop(
         // **PIT が刻まなかった回は、ICW2 の事後証明が取れない**（HW-c。`ADR-0068`）——
         // **PIC の割り込みが 1 本も届かないので、`first_pic_vector` は `None` のままである。**
         // **較正の基準を見て決める**（`None` を一色に扱うと、ICW2 の誤りと PIT の不在が混ざる）。
-        boot_timer_never_ticked = matches!(
-            calibration.as_ref().map(|value| value.reference()),
-            Some(crate::machine::pc::CalibrationReference::PmTimer)
-        );
+        boot_timer_never_ticked = calibration
+            .as_ref()
+            .is_some_and(|value| !value.reference().boot_timer_ticked());
         if let Some(calibration) = calibration {
             // SAFETY: ここは起動の途中に BSP が 1 回だけ通る（`run_timer_loop` を呼ぶのは `main.rs` の `start_timer` だけで、
             // `start_timer` は戻らない）。ベクタ LAPIC_TIMER_VECTOR には専用スタブのゲートが入っており（`idt::init`）、
@@ -1266,7 +1266,7 @@ pub unsafe fn run_timer_loop(
                      stray={} {}, \
                      irq1={} balanced={}, max tick jump={}, i8042 OBF={}, PIC ISR={}, \
                      uart forced={} reentry={}",
-                        ticks / crate::machine::pc::irq::timer_frequency_hz() as u64,
+                        ticks / crate::machine::pc::timer_frequency_hz() as u64,
                         common::percpu::cpu_id(),
                         ap_tick_summary(),
                         crate::arch::x86_64::timer_ticks_total(),
@@ -1337,7 +1337,7 @@ pub unsafe fn run_timer_loop(
                         // ISR を読んでも元に戻す必要がない読み出し専用の操作しか
                         // しないため、競合しても値がずれるだけで壊れない。
                         // **失効条件は「AP がこの経路へ入るようになるとき」である。**
-                        unsafe { crate::machine::pc::irq::service_snapshot() },
+                        unsafe { crate::machine::pc::service_snapshot() },
                         // **UART のロックの計測（シリアルの排他の段）。**
                         //
                         // **どちらも 0 が正常である。** **`forced` が 0 でなければ

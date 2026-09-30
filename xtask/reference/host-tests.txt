@@ -556,6 +556,7 @@ kernel::machine::pc::ap_start::tests::a_start_address_off_a_page_boundary_is_ref
 kernel::machine::pc::apic::tests::a_zero_id_register_with_a_plausible_version_still_decodes
 kernel::machine::pc::apic::tests::all_zeros_and_all_ones_are_undecoded
 kernel::machine::pc::apic::tests::coverage_counts_from_the_gsi_base
+kernel::machine::pc::apic::tests::only_a_pit_calibration_says_the_boot_timer_ticked
 kernel::machine::pc::apic::tests::qemu_matches_its_madt
 kernel::machine::pc::apic::tests::the_id_comes_from_bits_27_to_24
 kernel::machine::pc::i8042::tests::a_config_without_the_keyboard_interrupt_is_not_ready
