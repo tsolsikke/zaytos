@@ -49,9 +49,9 @@ use crate::abi::linux::{
     Iovec, Msghdr, Stat, Timespec, Winsize, AF_UNIX, CLOCK_MONOTONIC, CMSG_ONE_FD_LEN,
     DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, DT_DIR, DT_REG, DT_UNKNOWN,
     FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, FB_TYPE_PACKED_PIXELS, FB_VISUAL_TRUECOLOR,
-    INPUT_EVENT_LEN, IOVEC_LEN, MSGHDR_LEN, O_ACCMODE, O_APPEND, O_CREAT, O_RDONLY, O_TRUNC,
-    O_WRONLY, POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET, SOCKADDR_UN_LEN, SOCK_STREAM,
-    SOL_SOCKET, TIMESPEC_LEN, TIOCGWINSZ, WINSIZE_LEN,
+    INPUT_EVENT_LEN, IOVEC_LEN, MSGHDR_CONTROLLEN, MSGHDR_LEN, O_ACCMODE, O_APPEND, O_CREAT,
+    O_RDONLY, O_TRUNC, O_WRONLY, POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET,
+    SOCKADDR_UN_LEN, SOCK_STREAM, SOL_SOCKET, TIMESPEC_LEN, TIOCGWINSZ, WINSIZE_LEN,
 };
 use crate::abi::linux::{
     E2BIG, EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, EBUSY, ECHILD, ECONNREFUSED, EEXIST,
@@ -2136,7 +2136,9 @@ unsafe fn read_msghdr(
     want_fd: bool,
 ) -> Result<ParsedMsg, i64> {
     // SAFETY: 呼び出し元契約による。
-    let Some(slice) = (unsafe { validate_user_range(pml4_phys, direct_map, msg, 56) }) else {
+    let Some(slice) =
+        (unsafe { validate_user_range(pml4_phys, direct_map, msg, MSGHDR_LEN as u64) })
+    else {
         return Err(EFAULT);
     };
     let mut hdr = [0u8; MSGHDR_LEN];
@@ -2166,7 +2168,9 @@ unsafe fn read_msghdr(
     }
     // **iovec を読む（16 バイト）。**
     // SAFETY: 呼び出し元契約による。
-    let Some(iov_slice) = (unsafe { validate_user_range(pml4_phys, direct_map, iov, 16) }) else {
+    let Some(iov_slice) =
+        (unsafe { validate_user_range(pml4_phys, direct_map, iov, IOVEC_LEN as u64) })
+    else {
         return Err(EFAULT);
     };
     let mut iovbuf = [0u8; IOVEC_LEN];
@@ -2183,8 +2187,9 @@ unsafe fn read_msghdr(
     if want_fd && control != 0 && controllen >= CMSG_ONE_FD_LEN as u64 {
         // **cmsghdr を読む（16 バイト）＋ fd（4 バイト）。**
         // SAFETY: 呼び出し元契約による。
-        let Some(cmsg_slice) = (unsafe { validate_user_range(pml4_phys, direct_map, control, 20) })
-        else {
+        let Some(cmsg_slice) = (unsafe {
+            validate_user_range(pml4_phys, direct_map, control, CMSG_ONE_FD_LEN as u64)
+        }) else {
             return Err(EFAULT);
         };
         let mut cbuf = [0u8; CMSG_ONE_FD_LEN];
@@ -2312,18 +2317,25 @@ unsafe fn recvmsg_from_ring3(
             fd: new_fd as u32,
         });
         // SAFETY: 呼び出し元契約による。
-        let Some(cslice) =
-            (unsafe { validate_user_range(pml4_phys, direct_map, parsed.control, 20) })
-        else {
+        let Some(cslice) = (unsafe {
+            validate_user_range(
+                pml4_phys,
+                direct_map,
+                parsed.control,
+                CMSG_ONE_FD_LEN as u64,
+            )
+        }) else {
             return (-EFAULT) as u64;
         };
         // SAFETY: 検証済み 20 バイト。
         unsafe { copy_to_user(&cslice, 0, &cbuf) };
         // **msg_controllen を 20 に書き戻す。**
         // SAFETY: 呼び出し元契約による。
-        if let Some(mslice) = unsafe { validate_user_range(pml4_phys, direct_map, msg + 40, 8) } {
+        if let Some(mslice) =
+            unsafe { validate_user_range(pml4_phys, direct_map, msg + MSGHDR_CONTROLLEN as u64, 8) }
+        {
             // SAFETY: 検証済み 8 バイト。
-            unsafe { copy_to_user(&mslice, 0, &20u64.to_le_bytes()) };
+            unsafe { copy_to_user(&mslice, 0, &(CMSG_ONE_FD_LEN as u64).to_le_bytes()) };
         }
         crate::shm::note_fd_received();
     }

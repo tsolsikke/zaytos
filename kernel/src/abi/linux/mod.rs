@@ -25,8 +25,8 @@ pub use layout::{
     timespec_bytes, winsize_bytes, CmsgOneFd, Dirent64, DrmClipRect, FbBitfield, FbFixScreeninfo,
     FbVarScreeninfo, InputEvent, Iovec, Msghdr, Pollfd, SockaddrUn, Stat, Timespec, Winsize,
     CMSG_ONE_FD_LEN, DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, FB_FIX_SCREENINFO_LEN,
-    FB_VAR_SCREENINFO_LEN, INPUT_EVENT_LEN, IOVEC_LEN, MSGHDR_LEN, POLLFD_LEN, SOCKADDR_UN_LEN,
-    TIMESPEC_LEN, WINSIZE_LEN,
+    FB_VAR_SCREENINFO_LEN, INPUT_EVENT_LEN, IOVEC_LEN, MSGHDR_CONTROLLEN, MSGHDR_LEN, POLLFD_LEN,
+    SOCKADDR_UN_LEN, TIMESPEC_LEN, WINSIZE_LEN,
 };
 
 mod request;

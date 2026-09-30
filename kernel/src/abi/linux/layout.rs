@@ -65,6 +65,9 @@ pub const POLLFD_LEN: usize = 8;
 /// `msg_controllen` 40・`msg_flags` 48。glibc の `bits/socket.h`）。
 pub const MSGHDR_LEN: usize = 56;
 
+/// `struct msghdr` の `msg_controllen` の位置。**`recvmsg` が、書いた補助データの長さを書き戻す欄である。**
+pub const MSGHDR_CONTROLLEN: usize = 40;
+
 /// `struct iovec` のバイト数（`iov_base` 0・`iov_len` 8。glibc の `bits/types/struct_iovec.h`）。
 pub const IOVEC_LEN: usize = 16;
 
@@ -394,7 +397,7 @@ pub fn parse_msghdr(raw: &[u8; MSGHDR_LEN]) -> Msghdr {
         iov: u64_at(16),
         iovlen: u64_at(24),
         control: u64_at(32),
-        controllen: u64_at(40),
+        controllen: u64_at(MSGHDR_CONTROLLEN),
     }
 }
 
