@@ -869,6 +869,7 @@ xtask::tests::the_interrupt_control_scan_sees_the_save_and_restore_entry_points
 xtask::tests::the_kernel_layout_names_each_section_and_its_two_mib_pages
 xtask::tests::the_lines_that_start_a_child_that_does_not_end_keep_the_fixed_wait
 xtask::tests::the_machine_variant_table_parses_and_rejects_broken_rows
+xtask::tests::the_port_io_scan_sees_calls_and_raw_instructions_only
 xtask::tests::the_range_flags_turn_the_rules_off
 xtask::tests::the_selection_score_separates_caught_from_complete
 xtask::tests::the_stop_watch_waits_one_more_round

@@ -20292,6 +20292,143 @@ const DIRECT_INTERRUPT_CONTROL_ALLOWLIST: &[DirectInterruptControlSite] = &[
     },
 ];
 
+/// 直にポートを読み書きする所（`port` の `inb`・`outb`・`inw`・`outw`・`inl`・`outl` を呼ぶ所と、`asm!` の中の生の
+/// `in`・`out`）を許す所（2026-09-30。境界の段階の手順 2 の区切り。運用者の決定）。
+///
+/// **ポートを叩く所を、装置ごとのドライバに閉じる**（`common/src/arch/x86_64/port.rs` の doc）。**共通の側は x86 の
+/// 言葉の検査が見る**（`port`・`inb` などを数え、0 を求める）ので、**ここが主に見るのは置き場の中である**（それまでは、
+/// 置き場の中で新しくポートを叩いても、どの検査も落ちなかった。2026-09-30 に一時の破壊で確かめた）。
+///
+/// **`port.rs` の中は見ない**——命令の定義本体と、`0x80` へ捨て書きする `io_wait` である。
+///
+/// # 粒度の限界
+///
+/// 所属は関数の名前で見る（[`DirectInterruptControlSite`] と同じ）。**同じファイルの同じ名前の関数は区別できない**
+/// （`pci.rs` の `read8` は、窓と控えの 2 つを 1 行が覆う）。
+struct DirectPortIoSite {
+    /// ワークスペース相対パス。
+    file: &'static str,
+    /// 所属する関数名。`global_asm!` の中は `"global_asm!"`。
+    item: &'static str,
+    /// なぜ直に叩いてよいのか。
+    reason: &'static str,
+}
+
+/// 直にポートを読み書きする所の許可の表（[`DirectPortIoSite`]。2026-09-30。境界の段階の手順 2 の区切り。運用者の決定）。
+const DIRECT_PORT_IO_ALLOWLIST: &[DirectPortIoSite] = &[
+    // シリアル（COM1 だけ）。
+    DirectPortIoSite {
+        file: "common/src/machine/pc/serial.rs",
+        item: "init",
+        reason: "16550 の初期化の手順（COM1 の決まった番地。`Serial::new` は外へ出していない）",
+    },
+    DirectPortIoSite {
+        file: "common/src/machine/pc/serial.rs",
+        item: "transmit_ready",
+        reason: "送信の空きを読む（COM1 の決まった番地）",
+    },
+    DirectPortIoSite {
+        file: "common/src/machine/pc/serial.rs",
+        item: "write_byte",
+        reason: "1 バイトを書く（COM1 の決まった番地）",
+    },
+    // i8042（キーボードのコントローラ）。
+    DirectPortIoSite {
+        file: "kernel/src/machine/pc/i8042.rs",
+        item: "status",
+        reason: "ステータスを読む（0x64。読むだけで、状態を変えない）",
+    },
+    DirectPortIoSite {
+        file: "kernel/src/machine/pc/i8042.rs",
+        item: "read_keyboard_data",
+        reason: "データを 1 バイト読む（0x60。unsafe fn）",
+    },
+    DirectPortIoSite {
+        file: "kernel/src/machine/pc/i8042.rs",
+        item: "read_config",
+        reason: "コンフィグバイトを読む手順（0x64 と 0x60）",
+    },
+    DirectPortIoSite {
+        file: "kernel/src/machine/pc/i8042.rs",
+        item: "write_config",
+        reason: "コンフィグバイトを書く手順（0x64 と 0x60）",
+    },
+    // 8259 PIC。
+    DirectPortIoSite {
+        file: "kernel/src/machine/pc/irq/pic.rs",
+        item: "read_masks",
+        reason: "8259 の IMR を読む（決まった番地）",
+    },
+    DirectPortIoSite {
+        file: "kernel/src/machine/pc/irq/pic.rs",
+        item: "set_masks",
+        reason: "8259 の IMR を書く（決まった番地）",
+    },
+    DirectPortIoSite {
+        file: "kernel/src/machine/pc/irq/pic.rs",
+        item: "remap",
+        reason: "8259 の初期化の手順（ICW1〜4）",
+    },
+    DirectPortIoSite {
+        file: "kernel/src/machine/pc/irq/pic.rs",
+        item: "read_isr",
+        reason: "8259 の ISR を読む手順（OCW3 の後に読む）",
+    },
+    DirectPortIoSite {
+        file: "kernel/src/machine/pc/irq/pic.rs",
+        item: "send_eoi_for",
+        reason: "8259 へ EOI を送る",
+    },
+    // PIT。
+    DirectPortIoSite {
+        file: "kernel/src/machine/pc/irq/pit.rs",
+        item: "configure_channel0",
+        reason: "PIT のチャネル 0 を設定する手順",
+    },
+    // PCI（構成空間の対と、BAR のレジスタの窓）。
+    DirectPortIoSite {
+        file: "kernel/src/machine/pc/pci.rs",
+        item: "config_read",
+        reason: "PCI の構成空間の対（0xCF8 と 0xCFC。unsafe fn）",
+    },
+    DirectPortIoSite {
+        file: "kernel/src/machine/pc/pci.rs",
+        item: "read8",
+        reason: "レジスタの窓と控えの 1 バイトの読み（位置は作る所と控える所が確かめる。同じ名前の 2 つを 1 行が覆う）",
+    },
+    DirectPortIoSite {
+        file: "kernel/src/machine/pc/pci.rs",
+        item: "read16",
+        reason: "レジスタの窓の 2 バイトの読み",
+    },
+    DirectPortIoSite {
+        file: "kernel/src/machine/pc/pci.rs",
+        item: "read32",
+        reason: "レジスタの窓の 4 バイトの読み",
+    },
+    DirectPortIoSite {
+        file: "kernel/src/machine/pc/pci.rs",
+        item: "write8",
+        reason: "レジスタの窓の 1 バイトの書き（unsafe fn）",
+    },
+    DirectPortIoSite {
+        file: "kernel/src/machine/pc/pci.rs",
+        item: "write16",
+        reason: "レジスタの窓の 2 バイトの書き（unsafe fn）",
+    },
+    DirectPortIoSite {
+        file: "kernel/src/machine/pc/pci.rs",
+        item: "write32",
+        reason: "レジスタの窓の 4 バイトの書き（unsafe fn）",
+    },
+    // ACPI の PM タイマ。
+    DirectPortIoSite {
+        file: "kernel/src/machine/pc/pmtimer.rs",
+        item: "read",
+        reason: "PM タイマを読む（FADT が名乗ったポート。作る所が unsafe fn）",
+    },
+];
+
 /// 許可リストに無い直接の割り込み制御を探す。
 ///
 /// 対象は `cpu::disable_interrupts` / `cpu::enable_interrupts`
@@ -20598,6 +20735,123 @@ fn mentions_raw_instruction(line: &str) -> bool {
             .split(|c: char| c.is_whitespace() || c == ';' || c == ',')
             .next()
             .is_some_and(|token| token == "cli" || token == "sti")
+    })
+}
+
+/// 許可の表に無い所で、ポートを直に読み書きしている行を探す（[`DirectPortIoSite`]）。**死んだ行も探す。**
+///
+/// 走査の形は [`find_unapproved_interrupt_control`] と同じである（所属は [`function_name_declared_on`]、コメントの行は
+/// 見ない、`asm!` の塊を追う、追跡していない新しいファイルも見る）。
+fn find_unapproved_port_io(
+    workspace_root: &Path,
+    approved_occurrences: &mut usize,
+) -> Result<Vec<String>> {
+    let mut used = vec![false; DIRECT_PORT_IO_ALLOWLIST.len()];
+    let listing = checked_files(workspace_root, &["*.rs"])?;
+    let mut findings = Vec::new();
+    for relative in listing.iter().map(String::as_str) {
+        if relative == "common/src/arch/x86_64/port.rs" || relative.starts_with("xtask/") {
+            continue;
+        }
+        let path = workspace_root.join(relative);
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let mut current_item = "<file scope>";
+        let mut in_global_asm = false;
+        let mut in_asm = false;
+        for (index, line) in source.lines().enumerate() {
+            let trimmed = line.trim_start();
+            let opens_asm = line.contains("asm!(");
+            let closes_on_same_line = opens_asm && asm_call_closes_on_same_line(line);
+            if opens_asm {
+                if !closes_on_same_line {
+                    in_asm = true;
+                    if line.contains("global_asm!(") {
+                        in_global_asm = true;
+                        current_item = "global_asm!";
+                    }
+                }
+            } else if in_asm && trimmed.starts_with(");") {
+                in_asm = false;
+                if in_global_asm {
+                    in_global_asm = false;
+                    current_item = "<file scope>";
+                }
+            } else if !in_global_asm {
+                if let Some(name) = function_name_declared_on(line) {
+                    current_item = name;
+                }
+            }
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            let hit = (in_asm || opens_asm) && mentions_raw_port_instruction(line)
+                || mentions_port_primitive(line);
+            if !hit {
+                continue;
+            }
+            let matched = DIRECT_PORT_IO_ALLOWLIST
+                .iter()
+                .position(|site| site.file == relative && site.item == current_item);
+            if let Some(index) = matched {
+                *approved_occurrences += 1;
+                used[index] = true;
+                continue;
+            }
+            findings.push(format!(
+                "{relative}:{} (in {current_item}): {}",
+                index + 1,
+                line.trim().chars().take(60).collect::<String>()
+            ));
+        }
+    }
+    for (index, hit) in used.iter().enumerate() {
+        if !hit {
+            let site = &DIRECT_PORT_IO_ALLOWLIST[index];
+            findings.push(format!(
+                "dead allowlist entry (nothing matched): {} / {} / {}",
+                site.file, site.item, site.reason
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+/// その行がポートの関数（`inb`・`outb`・`inw`・`outw`・`inl`・`outl`）を呼んでいるか。**別の識別子の一部は拾わない**
+/// （直前が識別子の文字でなく、直後が `(` であること）。
+fn mentions_port_primitive(line: &str) -> bool {
+    ["inb", "outb", "inw", "outw", "inl", "outl"]
+        .iter()
+        .any(|needle| {
+            let mut rest = line;
+            let mut base = 0usize;
+            while let Some(position) = rest.find(needle) {
+                let absolute = base + position;
+                let preceded_by_identifier = line[..absolute]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
+                let followed_by_call = line[absolute + needle.len()..]
+                    .trim_start()
+                    .starts_with('(');
+                if !preceded_by_identifier && followed_by_call {
+                    return true;
+                }
+                base = absolute + needle.len();
+                rest = &line[base..];
+            }
+            false
+        })
+}
+
+/// `asm!` の中の文字列が、生の `in`・`out` 命令で始まるか（[`mentions_raw_instruction`] と同じ読み方）。
+fn mentions_raw_port_instruction(line: &str) -> bool {
+    line.split('"').skip(1).step_by(2).any(|literal| {
+        literal
+            .trim()
+            .split(|c: char| c.is_whitespace() || c == ';' || c == ',')
+            .next()
+            .is_some_and(|token| token == "in" || token == "out")
     })
 }
 
@@ -25480,6 +25734,35 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         failed.push("direct cli/sti".to_string());
     }
 
+    // **置き場の中でポートを直に叩く所の許可の表**（2026-09-30。境界の段階の手順 2 の区切り。運用者の決定）。
+    total += 1;
+    begin_item(Family::Base, "direct port I/O stays on the approved list");
+    let mut approved_port_occurrences = 0usize;
+    let unapproved_port_io =
+        find_unapproved_port_io(&workspace_root, &mut approved_port_occurrences)?;
+    if unapproved_port_io.is_empty() {
+        println!(
+            "--- direct port I/O: OK ({} approved entr(y/ies) = file+item pairs, covering {} \
+             occurrence(s) = port lines)",
+            DIRECT_PORT_IO_ALLOWLIST.len(),
+            approved_port_occurrences
+        );
+    } else {
+        for finding in &unapproved_port_io {
+            println!("    {finding}");
+        }
+        println!("    approved sites (file / item / reason):");
+        for site in DIRECT_PORT_IO_ALLOWLIST {
+            println!("      {} / {} / {}", site.file, site.item, site.reason);
+        }
+        println!(
+            "--- direct port I/O: FAILED ({} unapproved site(s); port access belongs in a device \
+             driver under machine/, or add an entry with a reason)",
+            unapproved_port_io.len()
+        );
+        failed.push("direct port I/O".to_string());
+    }
+
     // **起動ログの参照の終わり**（5.a の監視の (iii)。2026-09-25）。**QEMU を起動せずに見る。**
     total += 1;
     begin_item(
@@ -28510,8 +28793,8 @@ fn count_elements(text: &str) -> usize {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 57,
-    full: 426,
+    base: 58,
+    full: 427,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -32691,6 +32974,30 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
         ] {
             assert!(!opens_serial_port_directly(line), "{line}");
         }
+    }
+
+    /// **ポートを直に叩く所の走査は、ポートの関数の呼び出しと、asm の中の生の in/out を拾う**（2026-09-30）。
+    /// **別の識別子の一部と、呼び出しでない所は拾わない。**
+    #[test]
+    fn the_port_io_scan_sees_calls_and_raw_instructions_only() {
+        assert!(mentions_port_primitive(
+            "let status = inb(STATUS_COMMAND_PORT);"
+        ));
+        assert!(mentions_port_primitive(
+            "port::outl(CONFIG_ADDRESS, address);"
+        ));
+        assert!(mentions_port_primitive(
+            "outb (self.base + DATA_OFFSET, byte);"
+        ));
+        assert!(!mentions_port_primitive("let pinb = inbound(3);"));
+        assert!(!mentions_port_primitive(
+            "use crate::arch::x86_64::port::{inb, outb};"
+        ));
+        assert!(mentions_raw_port_instruction(r#"    "out dx, al","#));
+        assert!(mentions_raw_port_instruction(
+            r#"core::arch::asm!("in eax, dx", out("eax") value);"#
+        ));
+        assert!(!mentions_raw_port_instruction(r#"    "mov eax, 1","#));
     }
 
     /// **cli/sti の許可の表の走査は、arch の保存して止める・元へ戻す入口も拾う**（2026-09-30。`common::critical` から
