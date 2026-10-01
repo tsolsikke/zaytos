@@ -28,8 +28,15 @@
 //! **この 5 件は「誰も見ていない」という意味ではない**（S9-b-3-2b で数え直した）。
 //! ロードする側で実際に何が起きるかは 3 つに分かれる——既定ビルドが確かめている
 //! もの、置けない場所には置けないので実質の判定があるもの、そもそも読んでいない
-//! ので害が無いもの。**残る穴は区画の重なり 1 件だけである。**
+//! ので害が無いもの。
 //! 内訳は `docs/verification-coverage.md` の「ELF の検査を 3 つに分ける」にある。
+//!
+//! # 区画の並びは、ページ単位で写す側のために別に確かめる
+//!
+//! **[`Elf::parse`] は区画の並びを見ない**（上の理由）。**ページ単位で写すローダーは、写す前に
+//! [`Elf::check_load_layout`] を呼ぶ**——番地の順、重なり、ページへの切り上げのあふれ、同じページに
+//! 載る区画の権限を確かめる。ユーザーのプログラムを読むカーネルが呼ぶ。`kernel.elf` を読む
+//! bootloader は呼ばない（配置の方針が違う）。
 
 use core::ops::Range;
 
@@ -43,6 +50,18 @@ const EM_X86_64: u16 = 62;
 
 /// `Elf64_Phdr.p_type` の値。ロード可能なセグメントを示す。
 pub const PT_LOAD: u32 = 1;
+
+/// `Elf64_Phdr.p_flags` の実行可のビット。
+pub const PF_X: u32 = 1;
+/// `Elf64_Phdr.p_flags` の書き込み可のビット。
+pub const PF_W: u32 = 2;
+/// `Elf64_Phdr.p_flags` の読み取り可のビット。
+pub const PF_R: u32 = 4;
+/// `p_flags` のうち、権限を表す 3 ビット。
+const PF_PERMISSIONS: u32 = PF_X | PF_W | PF_R;
+
+/// [`Elf::check_load_layout`] が前提にするページの大きさ（4KiB）。
+pub const LOAD_PAGE_SIZE: u64 = 4096;
 
 /// Elf64_Ehdr のうち、パースに必要な部分の固定オフセット・サイズ。
 const EHDR_SIZE: usize = 64;
@@ -78,6 +97,28 @@ pub enum ElfError {
     SegmentMemorySmallerThanFile,
     /// `p_vaddr + p_memsz` が u64 を超える。
     SegmentAddressOverflow,
+}
+
+/// ページ単位で写すローダーが、区画の並びを受け付けられない理由（[`Elf::check_load_layout`]）。
+///
+/// `index` は `PT_LOAD` だけを数えた番号（0 から）である。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutError {
+    /// `p_memsz` が 0 の区画がある。**写すページが無く、最終ページの計算 `p_vaddr + p_memsz - 1` が
+    /// 成り立たない。**
+    EmptySegment { index: usize },
+    /// 終わりの番地をページの境界へ切り上げると u64 を越える（`p_vaddr + p_memsz` のあふれを含む）。
+    AddressOverflow { index: usize },
+    /// 番地の順に並んでいない（前の区画より低い番地から始まる）。
+    OutOfOrder { index: usize },
+    /// 前の区画と番地が重なる。
+    Overlap { index: usize },
+    /// 前の区画の最終ページから始まり、権限（読み・書き・実行）が前の区画と違う。
+    /// **1 枚のページは 1 つの権限しか持てない。**
+    MixedPermissionsInPage { index: usize, page: u64 },
+    /// 前の区画の最終ページから始まり、そのページに置くファイルの中身を持つ。
+    /// **共有するページは前の区画が写したものを使うので、後ろの区画の中身を重ねる経路が無い。**
+    FileDataInSharedPage { index: usize, page: u64 },
 }
 
 /// パース済みの ELF64 実行ファイル。元のバイトスライスを借用するのみで、
@@ -231,6 +272,11 @@ impl<'a> Elf<'a> {
         self.program_headers().filter(|ph| ph.p_type == PT_LOAD)
     }
 
+    /// ページ単位で写すローダーのために、`PT_LOAD` の並びを確かめる（[`check_load_layout`]）。
+    pub fn check_load_layout(&self) -> Result<(), LayoutError> {
+        check_load_layout(self.load_segments())
+    }
+
     /// このセグメントに対応するファイル内容のバイトスライスを返す。
     ///
     /// # パーサーが作ったヘッダであることを前提にしない
@@ -243,6 +289,59 @@ impl<'a> Elf<'a> {
     pub fn segment_data(&self, ph: &ProgramHeader) -> Result<&'a [u8], ElfError> {
         Ok(&self.data[file_range(self.data.len(), ph)?])
     }
+}
+
+/// ページ単位（[`LOAD_PAGE_SIZE`]）で写すローダーのために、`PT_LOAD` の並びを確かめる（純粋な論理）。
+///
+/// **通った並びについて、次が成り立つ。** ローダーはこれを前提に計算してよい。
+///
+/// - どの区画も `p_memsz > 0` で、`p_vaddr + p_memsz` も、それをページの境界へ切り上げた値も u64 に収まる
+///   （最終ページ `(p_vaddr + p_memsz - 1)` の切り下げと、ページを 1 枚ずつ進める加算があふれない）
+/// - 区画は番地の順に並び、重ならない（`p_vaddr` が前の区画の終わり以上）
+/// - 2 つの区画が同じページに載るのは、後ろの区画が前の区画の最終ページから始まる形だけで、そのとき
+///   2 つの権限（`p_flags` の読み・書き・実行）は同じで、後ろの区画はファイルの中身を持たない
+///   （`.data` の直後から `.bss` が始まる形。`ADR-0039`）
+///
+/// **`p_vaddr` が置いてよい範囲に在るかは見ない**（ユーザーの範囲の外は、写すときに断られる）。
+///
+/// **[`ProgramHeader`] は誰でも作れるので、[`Elf::parse`] を通った値であることを前提にしない**
+/// （加算は確かめてから行う）。`PT_LOAD` でないものが混ざっていても、同じ規則で見る。
+pub fn check_load_layout(segments: impl Iterator<Item = ProgramHeader>) -> Result<(), LayoutError> {
+    let page_mask = !(LOAD_PAGE_SIZE - 1);
+    // 前の区画の（始まり・終わり・権限）。
+    let mut previous: Option<(u64, u64, u32)> = None;
+    for (index, ph) in segments.enumerate() {
+        if ph.p_memsz == 0 {
+            return Err(LayoutError::EmptySegment { index });
+        }
+        let end = ph
+            .p_vaddr
+            .checked_add(ph.p_memsz)
+            .ok_or(LayoutError::AddressOverflow { index })?;
+        end.checked_add(LOAD_PAGE_SIZE - 1)
+            .ok_or(LayoutError::AddressOverflow { index })?;
+        let permissions = ph.p_flags & PF_PERMISSIONS;
+        if let Some((previous_start, previous_end, previous_permissions)) = previous {
+            if ph.p_vaddr < previous_start {
+                return Err(LayoutError::OutOfOrder { index });
+            }
+            if ph.p_vaddr < previous_end {
+                return Err(LayoutError::Overlap { index });
+            }
+            let page = ph.p_vaddr & page_mask;
+            // `previous_end` は前の区画の `p_memsz > 0` により `previous_start` より大きいので、1 を引ける。
+            if (previous_end - 1) & page_mask == page {
+                if permissions != previous_permissions {
+                    return Err(LayoutError::MixedPermissionsInPage { index, page });
+                }
+                if ph.p_filesz != 0 {
+                    return Err(LayoutError::FileDataInSharedPage { index, page });
+                }
+            }
+        }
+        previous = Some((ph.p_vaddr, end, permissions));
+    }
+    Ok(())
 }
 
 /// セグメントのファイル内範囲 [p_offset, p_offset+p_filesz) を返す。
@@ -492,6 +591,183 @@ mod tests {
         assert_eq!(
             elf.segment_data(&forged).unwrap_err(),
             ElfError::SegmentFileRangeOutOfBounds
+        );
+    }
+
+    /// 並びの確かめに渡す `PT_LOAD` を 1 つ作る。
+    fn load(p_vaddr: u64, p_filesz: u64, p_memsz: u64, p_flags: u32) -> ProgramHeader {
+        ProgramHeader {
+            p_type: PT_LOAD,
+            p_flags,
+            p_offset: 0,
+            p_vaddr,
+            p_paddr: p_vaddr,
+            p_filesz,
+            p_memsz,
+            p_align: 0x1000,
+        }
+    }
+
+    const RX: u32 = PF_R | PF_X;
+    const R: u32 = PF_R;
+    const RW: u32 = PF_R | PF_W;
+
+    /// 今のユーザープログラムの形（`.text`・`.rodata`・`.data` がページの境界から始まり、`.bss` が
+    /// `.data` の直後から始まる）は通る。区画が無い像も、1 つだけの像も通る。
+    #[test]
+    fn the_layout_check_accepts_the_shapes_the_toolchain_produces() {
+        // `/bin/zi` の実測の形（2026-10-01）。
+        let zi = [
+            load(0x400000, 0x3904, 0x3904, RX),
+            load(0x404000, 0xb68, 0xb68, R),
+            load(0x405000, 0x40, 0x40, RW),
+            load(0x405040, 0, 0x5018, RW),
+        ];
+        assert_eq!(check_load_layout(zi.into_iter()), Ok(()));
+        assert_eq!(
+            check_load_layout([load(0x400000, 0x42, 0x42, RX)].into_iter()),
+            Ok(())
+        );
+        assert_eq!(check_load_layout(core::iter::empty()), Ok(()));
+        // 前の区画がページの境界ちょうどで終わり、次がその境界から始まる形は、ページを共有しない。
+        let touching = [
+            load(0x400000, 0x1000, 0x1000, RX),
+            load(0x401000, 0x10, 0x10, RW),
+        ];
+        assert_eq!(check_load_layout(touching.into_iter()), Ok(()));
+    }
+
+    /// 同じページに権限の違う区画が載る並びを断る。**重なってはいない**（後ろの区画は前の区画の
+    /// 終わりより後ろから始まる）ので、重なりの確かめでは拾えない形である。
+    #[test]
+    fn the_layout_check_rejects_segments_with_different_permissions_in_one_page() {
+        for (first, second) in [(RX, R), (RX, RW), (R, RW), (RW, R), (RW, RX)] {
+            let segments = [
+                load(0x400000, 0x42, 0x42, first),
+                load(0x400050, 0, 0x12, second),
+            ];
+            assert_eq!(
+                check_load_layout(segments.into_iter()),
+                Err(LayoutError::MixedPermissionsInPage {
+                    index: 1,
+                    page: 0x400000
+                }),
+                "{first:#x} then {second:#x}"
+            );
+        }
+        // 3 つ目が 2 つ目の最終ページに載る形も、同じ規則で断る。
+        let third = [
+            load(0x400000, 0x42, 0x42, RX),
+            load(0x401000, 0x12, 0x12, R),
+            load(0x401800, 0, 0x100, RW),
+        ];
+        assert_eq!(
+            check_load_layout(third.into_iter()),
+            Err(LayoutError::MixedPermissionsInPage {
+                index: 2,
+                page: 0x401000
+            })
+        );
+        // 権限に入らないビットの違いは見ない。
+        let other_bits = [
+            load(0x402000, 0x8, 0x8, RW),
+            load(0x402008, 0, 0x2000, RW | 0x0010_0000),
+        ];
+        assert_eq!(check_load_layout(other_bits.into_iter()), Ok(()));
+    }
+
+    /// 前の区画と同じページから始まる区画が、そのページにファイルの中身を持つ並びを断る
+    /// （権限は同じ）。**ローダーは共有するページへ後ろの区画の中身を重ねない。**
+    #[test]
+    fn the_layout_check_rejects_file_data_in_a_shared_page() {
+        let segments = [
+            load(0x402000, 0x8, 0x8, RW),
+            load(0x402008, 0x10, 0x2000, RW),
+        ];
+        assert_eq!(
+            check_load_layout(segments.into_iter()),
+            Err(LayoutError::FileDataInSharedPage {
+                index: 1,
+                page: 0x402000
+            })
+        );
+    }
+
+    /// 番地の順でない並びと、重なる並びを断る。**理由を分ける。**
+    #[test]
+    fn the_layout_check_rejects_segments_out_of_order_or_overlapping() {
+        let reversed = [
+            load(0x401000, 0x12, 0x12, R),
+            load(0x400000, 0x42, 0x42, RX),
+        ];
+        assert_eq!(
+            check_load_layout(reversed.into_iter()),
+            Err(LayoutError::OutOfOrder { index: 1 })
+        );
+        // 前の区画の中身の内側から始まる（起動の途中の検査が使う形と同じ）。
+        let inside = [
+            load(0x400000, 0x42, 0x42, RX),
+            load(0x400030, 0x12, 0x12, R),
+        ];
+        assert_eq!(
+            check_load_layout(inside.into_iter()),
+            Err(LayoutError::Overlap { index: 1 })
+        );
+        // 同じ番地から始まる。
+        let same = [
+            load(0x400000, 0x42, 0x42, RX),
+            load(0x400000, 0x12, 0x12, RX),
+        ];
+        assert_eq!(
+            check_load_layout(same.into_iter()),
+            Err(LayoutError::Overlap { index: 1 })
+        );
+        // 前の区画の終わりちょうどから始まる形は重なりではない（権限が同じで中身が無ければ通る）。
+        let adjacent = [load(0x402000, 0x8, 0x8, RW), load(0x402008, 0, 0x2000, RW)];
+        assert_eq!(check_load_layout(adjacent.into_iter()), Ok(()));
+    }
+
+    /// 計算があふれる値を断る——大きさ 0 の区画（最終ページの引き算）、終わりの番地のあふれ、
+    /// ページの境界への切り上げのあふれ。
+    #[test]
+    fn the_layout_check_rejects_values_whose_arithmetic_overflows() {
+        // 番地 0 で大きさ 0。`p_vaddr + p_memsz - 1` が 0 - 1 になる形。
+        assert_eq!(
+            check_load_layout([load(0, 0, 0, R)].into_iter()),
+            Err(LayoutError::EmptySegment { index: 0 })
+        );
+        let second_empty = [load(0x400000, 0x42, 0x42, RX), load(0x401000, 0, 0, R)];
+        assert_eq!(
+            check_load_layout(second_empty.into_iter()),
+            Err(LayoutError::EmptySegment { index: 1 })
+        );
+        // `p_vaddr + p_memsz` が u64 を越える（`Elf::parse` も断るが、ここでも確かめる）。
+        assert_eq!(
+            check_load_layout([load(u64::MAX, 0, 2, R)].into_iter()),
+            Err(LayoutError::AddressOverflow { index: 0 })
+        );
+        // 終わりの番地は収まるが、ページの境界へ切り上げると越える。
+        assert_eq!(
+            check_load_layout([load(u64::MAX - 0x800, 0, 0x100, R)].into_iter()),
+            Err(LayoutError::AddressOverflow { index: 0 })
+        );
+        // 切り上げても収まる上限は通る（置いてよい範囲かは、ここでは見ない）。
+        assert_eq!(
+            check_load_layout([load(u64::MAX - 0x1FFF, 0, 0x1000, R)].into_iter()),
+            Ok(())
+        );
+    }
+
+    /// 像から取り出した区画で確かめる入口（[`Elf::check_load_layout`]）は、`PT_LOAD` だけを見る。
+    #[test]
+    fn the_layout_check_on_an_image_looks_at_its_load_segments() {
+        let bytes = build_test_elf(0x100650, &[0xAA, 0xBB, 0xCC], 0x100000, 0x2000);
+        assert_eq!(Elf::parse(&bytes).unwrap().check_load_layout(), Ok(()));
+        // 大きさ 0 の区画を持つ像は、パースは通り、並びの確かめで断られる。
+        let empty = build_test_elf(0, &[], 0, 0);
+        assert_eq!(
+            Elf::parse(&empty).unwrap().check_load_layout(),
+            Err(LayoutError::EmptySegment { index: 0 })
         );
     }
 

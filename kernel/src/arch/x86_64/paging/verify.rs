@@ -258,6 +258,15 @@ pub unsafe fn audit_user_supervisor(
     audit
 }
 
+/// カーネルがユーザーの範囲へどう触るか（2026-10-01）。[`walk_page_table_user_accessible`] に渡す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserAccess {
+    /// 読む。ユーザーから触れることだけを求める。
+    Read,
+    /// 書く。ユーザーから触れることに加えて、書き込み可を求める。
+    Write,
+}
+
 /// ユーザーアクセス可能性の walk の失敗理由（M5-f-2-1）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserAccessError {
@@ -266,14 +275,46 @@ pub enum UserAccessError {
     /// present だが、ある階層で U=0（Ring 3 から到達不可）。**U/S は全階層の AND**
     /// なので、中間階層が U=0 でも Ring 3 からは届かない。
     SupervisorOnly,
+    /// present でユーザーから触れるが、ある階層で W=0（書けない）。[`UserAccess::Write`] のときだけ返す。
+    /// **書き込み可も全階層の AND である。**
+    ReadOnly,
     /// PDPT レベルで 1GiB ページ。ZeikOS は作らない。
     GiantPage,
     /// PD レベルで 2MiB ページ。ユーザーページは 4KiB のみを想定し、想定外として弾く。
     HugePage,
 }
 
+/// 1 つの階層のエントリが、求める触り方を許すか（純粋な論理。2026-10-01）。
+///
+/// **present と U=1 はどの触り方でも求め、[`UserAccess::Write`] なら W=1 も求める。** 順は present、U、W である
+/// （不在のエントリのほかのビットは意味を持たない）。
+fn level_allows(entry: u64, access: UserAccess) -> Result<(), UserAccessError> {
+    if entry & bits::PRESENT == 0 {
+        return Err(UserAccessError::NotPresent);
+    }
+    // 破壊テスト (M5-f-2-1, skip-us): U=1 判定を外す。ユーザー範囲内で present だが U=0 の
+    // ページ（無効3）が誤って受理され、battery が「拒否すべきを受理」を検出して halt
+    // する。walk_page_table_user_accessible を新設した中核（U 判定）そのものの破壊テストでの確認。
+    #[cfg(not(feature = "syscall-test-validate-skip-us"))]
+    if entry & bits::USER == 0 {
+        return Err(UserAccessError::SupervisorOnly);
+    }
+    // 破壊テスト (2026-10-01, validate-skip-writable): 書き込み可を見ない。読み取り専用のユーザーページを
+    // 書き込み先に渡した `read` が断られず、カーネルが書いて Ring 0 の #PF で止まる。
+    if access == UserAccess::Write
+        && entry & bits::WRITABLE == 0
+        && !cfg!(feature = "syscall-test-validate-skip-writable")
+    {
+        return Err(UserAccessError::ReadOnly);
+    }
+    Ok(())
+}
+
 /// 指定 VA が Ring 3 からアクセス可能な 4KiB ユーザーページに解決されることを、
 /// **各階層で present かつ U=1** を確かめながら独立に walk して判定する（M5-f-2-1）。
+/// **`access` が [`UserAccess::Write`] なら、各階層で W=1 も確かめる**（2026-10-01）——カーネルがユーザーの
+/// 範囲へ書く前の確かめである。書き込み禁止のページへカーネルが書くと、`CR0.WP` が立っていれば Ring 0 の
+/// #PF になり、直接写像を通して書けば CPU は書き込み禁止を守らない。どちらも、書く前にここで断る。
 ///
 /// 既存の [`walk_page_table`] は present のみを見る（M5-e-2 の呼び出し元がそれを前提にする）ため
 /// 別関数にする。**U/S は全階層の AND であり、葉の U だけを見る `translate` では中間
@@ -282,8 +323,10 @@ pub enum UserAccessError {
 ///
 /// # 契約（境界の関数。2026-09-30）
 ///
-/// - 根から辿り、どの段でもユーザーから触れる印が立っているかを確かめるだけで、何も変えない。
+/// - 根から辿り、どの段でもユーザーから触れる印（書くなら書き込み可の印も）が立っているかを確かめるだけで、
+///   何も変えない。
 /// - 共通の側は、ユーザーのポインタを確かめる所（`crate::syscall`）で使う。
+/// - **答えは呼んだ時点の表についてのものである。** 確かめた後に表が変わらないことは、呼ぶ側が保証する。
 ///
 /// # Safety
 ///
@@ -292,6 +335,7 @@ pub unsafe fn walk_page_table_user_accessible(
     pml4_phys: PhysAddr,
     direct_map: DirectMap,
     virt: VirtAddr,
+    access: UserAccess,
 ) -> Result<(), UserAccessError> {
     let read = |table: PhysAddr, index: usize| -> u64 {
         // SAFETY: 呼び出し元契約による。読み取りのみ。
@@ -300,41 +344,26 @@ pub unsafe fn walk_page_table_user_accessible(
         }
     };
 
-    // ある階層のエントリが present && U=1 であることを確かめる。
-    let present_and_user = |entry: u64| -> Result<(), UserAccessError> {
-        if entry & bits::PRESENT == 0 {
-            return Err(UserAccessError::NotPresent);
-        }
-        // 破壊テスト (M5-f-2-1, skip-us): U=1 判定を外す。ユーザー範囲内で present だが U=0 の
-        // ページ（無効3）が誤って受理され、battery が「拒否すべきを受理」を検出して halt
-        // する。walk_page_table_user_accessible を新設した中核（U 判定）そのものの破壊テストでの確認。
-        #[cfg(not(feature = "syscall-test-validate-skip-us"))]
-        if entry & bits::USER == 0 {
-            return Err(UserAccessError::SupervisorOnly);
-        }
-        Ok(())
-    };
-
     let pml4e = read(pml4_phys, virt.top_index());
-    present_and_user(pml4e)?;
+    level_allows(pml4e, access)?;
 
     let pdpt = PhysAddr::new_const(pml4e & bits::ADDR_4K);
     let pdpte = read(pdpt, virt.upper_index());
-    present_and_user(pdpte)?;
+    level_allows(pdpte, access)?;
     if pdpte & bits::PAGE_SIZE != 0 {
         return Err(UserAccessError::GiantPage);
     }
 
     let pd = PhysAddr::new_const(pdpte & bits::ADDR_4K);
     let pde = read(pd, virt.middle_index());
-    present_and_user(pde)?;
+    level_allows(pde, access)?;
     if pde & bits::PAGE_SIZE != 0 {
         return Err(UserAccessError::HugePage);
     }
 
     let pt = PhysAddr::new_const(pde & bits::ADDR_4K);
     let pte = read(pt, virt.leaf_index());
-    present_and_user(pte)?;
+    level_allows(pte, access)?;
 
     Ok(())
 }
@@ -466,5 +495,36 @@ mod tests {
         let all =
             leaf(bits::PRESENT | bits::WRITABLE | bits::USER | bits::PAGE_SIZE | bits::ADDR_4K);
         assert!(all.leaf_writable() && all.leaf_user_accessible());
+    }
+
+    /// **1 つの階層の確かめは、読むなら present と U、書くなら W も求める**（2026-10-01）。
+    /// **読み取り専用のユーザーページ（present・U=1・W=0）は、読むなら通り、書くなら断る。**
+    #[test]
+    fn a_level_allows_a_write_only_when_it_is_writable_as_well() {
+        let read_only = bits::PRESENT | bits::USER;
+        let writable = bits::PRESENT | bits::USER | bits::WRITABLE;
+        assert_eq!(level_allows(read_only, UserAccess::Read), Ok(()));
+        assert_eq!(
+            level_allows(read_only, UserAccess::Write),
+            Err(UserAccessError::ReadOnly)
+        );
+        assert_eq!(level_allows(writable, UserAccess::Read), Ok(()));
+        assert_eq!(level_allows(writable, UserAccess::Write), Ok(()));
+        // 不在は、ほかのビットが立っていても不在である。
+        for access in [UserAccess::Read, UserAccess::Write] {
+            assert_eq!(
+                level_allows(bits::USER | bits::WRITABLE, access),
+                Err(UserAccessError::NotPresent)
+            );
+            // カーネルだけのページは、書き込み可でも断る。**理由は「ユーザーから触れない」が先である。**
+            assert_eq!(
+                level_allows(bits::PRESENT | bits::WRITABLE, access),
+                Err(UserAccessError::SupervisorOnly)
+            );
+            assert_eq!(
+                level_allows(bits::PRESENT, access),
+                Err(UserAccessError::SupervisorOnly)
+            );
+        }
     }
 }

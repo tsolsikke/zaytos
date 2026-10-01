@@ -8524,6 +8524,19 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
     (65, "the end of the second new page was not writable"),
     (66, "a request past the limit was not refused with -ENOMEM"),
     (67, "brk could not shrink the heap back"),
+    // **68 は 2 つの検算が使っている**（`spawn` の `envp` と、共有メモリでない fd の `mmap`）。
+    (
+        68,
+        "spawn(path, argv, NULL) did not return -EFAULT, or mmap of a fd that is not shared memory did not return -EBADF",
+    ),
+    (
+        69,
+        "clock_gettime issued with the direction flag set did not return 0",
+    ),
+    (
+        70,
+        "read into a read-only page (.rodata) did not return -EFAULT",
+    ),
 ];
 
 /// `fault-test` が起こす #PF のエラーコード（S9-b-3-2a）。
@@ -8830,20 +8843,23 @@ fn load_embedded_user_program(logger: &mut Logger<Serial>) -> Result<(), UserLoa
 /// **あれらはローダーへ入らないので、`UserLoadError` の経路を 1 度も通らない。**
 /// **`Result` にした意味はここで初めて出る。**
 ///
-/// 3 つ用意する。**落ちる場所が違う。**
+/// 6 つ用意する。**落ちる場所が違う。**
 ///
 /// - 入口で落ちる（`Parse`）。ページは 1 枚もマップされていない
 /// - **途中で落ちる（`Mapping { NotPrivate }`）。** 1 本目の区画はマップし終わって
 ///   おり、**2 本目で拒まれる。そこまでにマップしたものの後始末が要る**
-/// - **途中で落ちる（`Mapping { AlreadyMapped }`、S9-b-3-2b）。** 区画が同じ
-///   4KiB ページを共有するイメージである。**以前はこれが拒まれず、上書きして
-///   1 枚漏らしていた**（`docs/verification-coverage.md` の「ELF の検査を
-///   3 つに分ける」）
+/// - **区画の並びの確かめで落ちる（`Layout`。2026-10-01）。** 写す前に断るので、ページは 1 枚も
+///   マップされていない。4 つある——2 本目が 1 本目の中身の内側から始まる（重なり）、2 本目が 1 本目の
+///   終わりより後ろの同じページから始まる（同じページに権限の違う区画）、2 本目が 1 本目より低い番地から
+///   始まる（番地の順でない）、2 本目が番地 0 で大きさ 0（最終ページの引き算が成り立たない）
 ///
-/// 途中で落ちるイメージは、**2 本目の `p_vaddr` を動かして作る。** パーサは `p_vaddr`
+/// **1 つ目の「重なり」は、以前は途中で落ちていた**（`Mapping { AlreadyMapped }`、S9-b-3-2b。
+/// `docs/verification-coverage.md` の「ELF の検査を 3 つに分ける」）。**後ろの 3 つは、並びの確かめを
+/// 入れる前は断られなかった**——2 つは読み込まれ、1 つは引き算のあふれでカーネルが止まった（実測）。
+///
+/// 壊したイメージは、**2 本目のプログラムヘッダの欄を書き換えて作る。** パーサは `p_vaddr`
 /// の範囲も区画の重なりも見ない（配置の方針を知らないため。`common::elf` の
-/// モジュール doc）ので、**パースは通り、マッピングで拒まれる。** 行き先は
-/// ユーザーサブツリーの外（`PML4[1]`）と、1 本目の区画のページの中である。
+/// モジュール doc）ので、**パースは通り、その後で拒まれる。**
 fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<Serial>) {
     /// 先頭のプログラムヘッダの位置（`hello` の `e_phoff` は 64）。
     const PHDR0: usize = 64;
@@ -8851,32 +8867,76 @@ fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<Serial>) {
     const PHDR_SIZE: usize = 56;
     /// `p_vaddr` のオフセット。
     const P_VADDR: usize = 16;
+    /// `p_filesz` のオフセット。
+    const P_FILESZ: usize = 32;
+    /// `p_memsz` のオフセット。
+    const P_MEMSZ: usize = 40;
+    /// 2 本目のプログラムヘッダの位置。
+    const PHDR1: usize = PHDR0 + PHDR_SIZE;
+
+    /// どこで断られるはずか。
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Refused {
+        /// `Elf::parse` が断る。ページは 1 枚も写していない。
+        Parse,
+        /// 区画の並びの確かめが断る。ページは 1 枚も写していない。
+        Layout,
+        /// 写す途中で断られる。そこまでに写したものの後始末が要る。
+        Mapping,
+    }
 
     let free_before = frame_count_now(logger);
     let mut quarantined_total = 0usize;
 
-    for (what, offset, value, expect_mapping) in [
-        ("magic byte 0 set to 0", 0usize, 0u64, false),
+    /// 書き換え 1 つ（位置・値・幅）。
+    type Patch = (usize, u64, usize);
+
+    // **書き換えは [`Patch`] の並びで表す。** 1 つの像で 2 つ以上の欄を書き換える形がある。
+    let cases: [(&str, &[Patch], Refused); 6] = [
+        ("magic byte 0 set to 0", &[(0, 0, 1)], Refused::Parse),
         (
             "p_vaddr of the second segment moved out of the user subtree",
-            PHDR0 + PHDR_SIZE + P_VADDR,
-            1u64 << 39,
-            true,
+            &[(PHDR1 + P_VADDR, 1u64 << 39, 8)],
+            Refused::Mapping,
         ),
+        // **ここから下の 4 つは、区画の並びの確かめが断る。** `hello` の 1 本目は `0x400000..0x400042` の
+        // 読みと実行、2 本目は読みだけである。
         (
             "p_vaddr of the second segment moved into the first segment's page",
-            PHDR0 + PHDR_SIZE + P_VADDR,
-            0x0040_0030u64,
-            true,
+            &[(PHDR1 + P_VADDR, 0x0040_0030, 8)],
+            Refused::Layout,
         ),
-    ] {
+        (
+            "p_vaddr of the second segment moved past the end of the first segment, in the same page",
+            &[(PHDR1 + P_VADDR, 0x0040_0050, 8)],
+            Refused::Layout,
+        ),
+        (
+            "p_vaddr of the second segment moved below the first segment",
+            &[(PHDR1 + P_VADDR, 0x003f_f000, 8)],
+            Refused::Layout,
+        ),
+        (
+            "the second segment emptied and moved to address 0",
+            &[
+                (PHDR1 + P_VADDR, 0, 8),
+                (PHDR1 + P_FILESZ, 0, 8),
+                (PHDR1 + P_MEMSZ, 0, 8),
+            ],
+            Refused::Layout,
+        ),
+    ];
+    let case_count = cases.len();
+
+    for (what, patches, expected) in cases {
         // SAFETY: 起動時の単一実行文脈で、この静的領域を触るのはここだけである。
         let image = unsafe {
             let buf = &mut *core::ptr::addr_of_mut!(CORRUPT_IMAGE);
             buf.copy_from_slice(HELLO_ELF);
-            let width = if offset == 0 { 1 } else { 8 };
-            for i in 0..width {
-                buf[offset + i] = ((value >> (i * 8)) & 0xFF) as u8;
+            for &(offset, value, width) in patches {
+                for i in 0..width {
+                    buf[offset + i] = ((value >> (i * 8)) & 0xFF) as u8;
+                }
             }
             &buf[..]
         };
@@ -8891,11 +8951,13 @@ fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<Serial>) {
             cpu::halt_forever();
         };
 
-        let matches = match error {
-            UserLoadError::Parse(_) => !expect_mapping,
-            UserLoadError::Mapping { .. } => expect_mapping,
-            _ => false,
+        let refused = match error {
+            UserLoadError::Parse(_) => Some(Refused::Parse),
+            UserLoadError::Layout(_) => Some(Refused::Layout),
+            UserLoadError::Mapping { .. } => Some(Refused::Mapping),
+            _ => None,
         };
+        let matches = refused == Some(expected);
         logger.info(format_args!(
             "user-load-corrupt: {what} -> {error:?} (the space was destroyed: quarantined={held} \
              leaked={leaked})"
@@ -8922,10 +8984,9 @@ fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<Serial>) {
     // **実測で踏んだ。差だけならコア数に依らない。**
     let consumed = (free_before - frame_count_now(logger)) as usize;
     logger.info(format_args!(
-        "user-load-corrupt: all 3 corrupted images were refused by the loader (one at the \
-         entrance, one after the first segment was already mapped, one whose segments share a \
-         page) and the kernel continued; {consumed} frame(s) left the allocator and \
-         {quarantined_total} reached quarantine (match={})",
+        "user-load-corrupt: all {case_count} corrupted images were refused by the loader and the \
+         kernel continued; {consumed} frame(s) left the allocator and {quarantined_total} reached \
+         quarantine (match={})",
         consumed == quarantined_total
     ));
     if consumed != quarantined_total {
@@ -11751,6 +11812,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "PT_LOAD を writable: true で張る",
     ),
     (
+        "user-load-skip-layout-check",
+        cfg!(feature = "user-load-skip-layout-check"),
+        "区画の並びの確かめを通さずに写す",
+    ),
+    (
         "user-run-wrong-entry",
         cfg!(feature = "user-run-wrong-entry"),
         "entry ではなく PT_LOAD の先頭へ飛ぶ",
@@ -12154,6 +12220,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "syscall-test-validate-skip-us",
         cfg!(feature = "syscall-test-validate-skip-us"),
         "ユーザーポインタ検証の U=1 判定を外す",
+    ),
+    (
+        "syscall-test-validate-skip-writable",
+        cfg!(feature = "syscall-test-validate-skip-writable"),
+        "書くためのユーザーポインタ検証が書き込み可を見ない",
     ),
     (
         "syscall-test-validate-skip-laststep",

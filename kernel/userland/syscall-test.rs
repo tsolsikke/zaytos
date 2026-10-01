@@ -112,6 +112,7 @@
 //! - `68` 共有メモリでない fd（stdin）の `mmap` が `-EBADF` を返さなかった（`ADR-0065`）
 //! - `69` 方向フラグを立てたまま打った `clock_gettime` が 0 を返さなかった（2026-09-24。
 //!   **判定の本体はカーネルの入口の監視である**——こちらは前提を作り、戻り値だけを見る）
+//! - `70` 読み込み先が読み取り専用のページ（このプログラムの `.rodata`）の `read` が `-EFAULT` を返さなかった
 //!
 //! # `argv` は `_start` の時点の `rsp` から読む
 //!
@@ -606,6 +607,27 @@ core::arch::global_asm!(
     "  int 0x80",
     "  test rax, rax",
     "  mov edi, 13",
+    "  jne 9f",
+    "  mov eax, {sys_close}",
+    "  mov rdi, r12",
+    "  int 0x80",
+
+    // --- 70. 読み込み先が読み取り専用のページ。**-EFAULT が返るはず** ---
+    // **読み込み先はこのプログラムの `.rodata` である**（書けない区画）。**カーネルが確かめずに書くと、
+    // 読み取り専用のページへ書くことになる。** 開き直すのは、読める中身が残っている状態で確かめるためである。
+    "  mov eax, {sys_open}",
+    "  lea rdi, [rip + MOTD_PATH]",
+    "  mov esi, {o_rdonly}",
+    "  xor edx, edx",
+    "  int 0x80",
+    "  mov r12, rax",
+    "  mov eax, {sys_read}",
+    "  mov rdi, r12",
+    "  lea rsi, [rip + MOTD_BYTES]",
+    "  mov edx, {motd_len}",
+    "  int 0x80",
+    "  cmp rax, {minus_efault}",
+    "  mov edi, 70",
     "  jne 9f",
     "  mov eax, {sys_close}",
     "  mov rdi, r12",

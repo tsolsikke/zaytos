@@ -56,8 +56,8 @@ use crate::abi::linux::{
 use crate::abi::linux::{
     E2BIG, EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, EBUSY, ECHILD, ECONNREFUSED, EEXIST,
     EFAULT, EINVAL, EIO, EISCONN, EISDIR, EMFILE, EMSGSIZE, ENAMETOOLONG, ENOBUFS, ENODEV, ENOENT,
-    ENOMEM, ENOSPC, ENOSYS, ENOTCONN, ENOTDIR, ENOTEMPTY, ENOTSOCK, ENOTTY, EPIPE, EPROTONOSUPPORT,
-    EROFS, ESPIPE,
+    ENOEXEC, ENOMEM, ENOSPC, ENOSYS, ENOTCONN, ENOTDIR, ENOTEMPTY, ENOTSOCK, ENOTTY, EPIPE,
+    EPROTONOSUPPORT, EROFS, ESPIPE,
 };
 use crate::abi::private::{
     zdiag_text_len, DETACHED_STDOUT_TO_PIPE, FBIOZPRESENT, PROBE_NUMBER, SPAWN_FOLDED_FLAG,
@@ -471,8 +471,42 @@ impl UserSlice {
     }
 }
 
-/// 指定した [buf, buf+len) が Ring 3 からアクセス可能かを、**カーネルが読み書きに
+/// 書き込み可まで確かめたユーザー範囲を表す証明トークン（2026-10-01）。
+///
+/// **[`UserSlice`] と同じ形で、作れるのは [`validate_user_range_for_write`] だけである。**
+/// [`copy_to_user`] がこの型を求めるので、**書き込み可を確かめていない範囲へは書けない**
+/// （読むための [`UserSlice`] を渡すとコンパイルが通らない）。
+///
+/// **読むためのトークンとしても使える**（[`UserSliceMut::as_readable`]）——読んでから書き戻す
+/// 入口（`poll` の `pollfd` の並び）のためである。書けるユーザーの範囲は読める。
+///
+/// 有効期間は [`UserSlice`] と同じである（同じシステムコールの中、同じアドレス空間）。
+pub struct UserSliceMut {
+    slice: UserSlice,
+}
+
+impl UserSliceMut {
+    /// 範囲の先頭アドレス（ユーザー VA）。
+    pub fn buf(&self) -> u64 {
+        self.slice.buf
+    }
+    /// 範囲の長さ（バイト）。
+    pub fn len(&self) -> u64 {
+        self.slice.len
+    }
+    /// 範囲が空（len==0）か。
+    pub fn is_empty(&self) -> bool {
+        self.slice.len == 0
+    }
+    /// 読むためのトークンとして見る。
+    pub fn as_readable(&self) -> &UserSlice {
+        &self.slice
+    }
+}
+
+/// 指定した [buf, buf+len) が Ring 3 からアクセス可能かを、**カーネルが読みに
 /// 踏み込む前に**判定し、可なら証明トークン [`UserSlice`] を返す（M5-f-2-1 / M5-f-2-2）。
+/// **カーネルが書く範囲は [`validate_user_range_for_write`] で確かめる**（2026-10-01）。
 ///
 /// **len==0 は常に受理する。** 0 バイトのアクセスは buf を問わず安全であり、この
 /// 契約はこの検証器を共有する全 syscall が継承する（呼び出し側で短絡しない）。
@@ -481,6 +515,7 @@ impl UserSlice {
 ///   (b) 範囲が**今 Ring 3 が使っている窓**に収まる（[`user_window`]）。
 ///   (c) 範囲を跨ぐ全 4KiB ページが present && 全階層 U=1
 ///       （[`crate::arch::x86_64::walk_page_table_user_accessible`]）。
+///       **書くための確かめは、全階層で書き込み可であることも求める。**
 ///
 /// (a)(b)(c-present) は多層防御として (c-U=1) に冗長で、単独では隔離した破壊テストでの確認が
 /// できない（詳細は verification-coverage）。それらは default battery の first-line
@@ -495,11 +530,74 @@ pub unsafe fn validate_user_range(
     buf: u64,
     len: u64,
 ) -> Option<UserSlice> {
+    // SAFETY: 呼び出し元契約による。
+    unsafe {
+        validated_range(
+            page_table_root,
+            direct_map,
+            buf,
+            len,
+            crate::arch::x86_64::UserAccess::Read,
+        )
+    }
+}
+
+/// 指定した [buf, buf+len) へ**カーネルが書いてよいか**を、書く前に判定し、可なら証明トークン
+/// [`UserSliceMut`] を返す（2026-10-01）。
+///
+/// [`validate_user_range`] の条件に加えて、**範囲を跨ぐ全ページが全階層で書き込み可であること**を求める。
+/// **読み取り専用のユーザーページ（プログラムの `.text` や `.rodata`）を書き込み先に渡されたら、
+/// 書かずに断る**（呼ぶ側は `-EFAULT` を返す）。確かめずに書くと、`CR0.WP` が立っているので Ring 0 の
+/// #PF になり、カーネルが止まる（直す前の形で実測した）。len==0 は、読む側と同じく常に受理する。
+///
+/// # 確かめた後、書くまでの間
+///
+/// **確かめてから待つ入口がある**（パイプ・ソケット・端末・入力の `read` は、確かめた後に BKL を解いて
+/// 待ち、起きてから書く）。**その間にこの範囲の写像が変わらないことは、プロセスの形が保証している**——
+/// プロセスは 1 本の流れで、自分の写像を変えるのは自分のシステムコール（`brk`・`mmap`）だけであり、
+/// 待っている間はほかのシステムコールへ入れない。空間の破棄はプロセスの終わりにしか起きない。
+/// **1 つの空間を 2 本以上の流れが使う形（スレッド）や、ほかの空間の写像を変える入口を足すときは、
+/// この前提を見直すこと。**
+///
+/// # Safety
+///
+/// [`validate_user_range`] と同じ契約。
+pub unsafe fn validate_user_range_for_write(
+    page_table_root: PhysAddr,
+    direct_map: DirectMap,
+    buf: u64,
+    len: u64,
+) -> Option<UserSliceMut> {
+    // SAFETY: 呼び出し元契約による。
+    unsafe {
+        validated_range(
+            page_table_root,
+            direct_map,
+            buf,
+            len,
+            crate::arch::x86_64::UserAccess::Write,
+        )
+    }
+    .map(|slice| UserSliceMut { slice })
+}
+
+/// [`validate_user_range`] と [`validate_user_range_for_write`] の本体。**違いは `access` だけである。**
+///
+/// # Safety
+///
+/// [`validate_user_range`] と同じ契約。
+unsafe fn validated_range(
+    page_table_root: PhysAddr,
+    direct_map: DirectMap,
+    buf: u64,
+    len: u64,
+    access: crate::arch::x86_64::UserAccess,
+) -> Option<UserSlice> {
     // 破壊テスト (M5-f-2-1, skip-all): 検証器を常に受理にする。検証器の全体機能停止を
     // battery が検出して halt する（多層防御の最後の砦の確認）。
     #[cfg(feature = "syscall-test-validate-skip-all")]
     {
-        let _ = (page_table_root, direct_map);
+        let _ = (page_table_root, direct_map, access);
         return Some(UserSlice { buf, len });
     }
     #[cfg(not(feature = "syscall-test-validate-skip-all"))]
@@ -537,6 +635,7 @@ pub unsafe fn validate_user_range(
                     page_table_root,
                     direct_map,
                     virt,
+                    access,
                 )
             }
             .is_err()
@@ -614,17 +713,16 @@ pub unsafe fn copy_from_user(dst: &mut [u8], slice: &UserSlice) -> usize {
 ///
 /// # Safety
 ///
-/// `slice` が [`validate_user_range`] を通った検証済みトークンであること。
-/// **その範囲は present かつ U=1 で、書き込み可能であること**——`read` が
-/// 書く先はユーザーのバッファで、[`crate::paging`] が `writable: true` で
-/// マップしたページである。
-pub unsafe fn copy_to_user(slice: &UserSlice, at: u64, src: &[u8]) -> usize {
+/// `slice` が [`validate_user_range_for_write`] を通った検証済みトークンであること
+/// （**書き込み可まで確かめてある**。型がそれを求める）。**確かめた後に、その範囲の写像が
+/// 変わっていないこと**（[`validate_user_range_for_write`] の「確かめた後、書くまでの間」）。
+pub unsafe fn copy_to_user(slice: &UserSliceMut, at: u64, src: &[u8]) -> usize {
     let Some(room) = slice.len().checked_sub(at) else {
         return 0;
     };
     let count = src.len().min(room as usize);
     for (i, byte) in src.iter().enumerate().take(count) {
-        // SAFETY: slice は検証済みで、buf+at+i は present・U=1 のユーザーページ。
+        // SAFETY: slice は書き込み可まで検証済みで、buf+at+i は present・U=1・W=1 のユーザーページ。
         // count が room を越えないので、トークンの範囲を出ない。SMAP 未有効。
         unsafe {
             core::ptr::write_volatile(
@@ -1017,7 +1115,8 @@ unsafe fn read_from_pipe(
     }
     let want = count.min(crate::pipe::PIPE_RING as u64);
     // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
-    let Some(slice) = (unsafe { validate_user_range(page_table_root, direct_map, buf, want) })
+    let Some(slice) =
+        (unsafe { validate_user_range_for_write(page_table_root, direct_map, buf, want) })
     else {
         return (-EFAULT) as u64;
     };
@@ -1237,7 +1336,7 @@ unsafe fn read_input_events(
     // **踏み込む前に検証する。**
     // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
     let Some(slice) =
-        (unsafe { validate_user_range(page_table_root, direct_map, buf, cap as u64) })
+        (unsafe { validate_user_range_for_write(page_table_root, direct_map, buf, cap as u64) })
     else {
         return (-EFAULT) as u64;
     };
@@ -1359,7 +1458,7 @@ unsafe fn screen_ioctl_from_ring3(
             let out = fb_var_screeninfo_bytes(&screen_var_info(surface.width, surface.height, bgr));
             // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
             let Some(slice) = (unsafe {
-                validate_user_range(page_table_root, direct_map, arg, out.len() as u64)
+                validate_user_range_for_write(page_table_root, direct_map, arg, out.len() as u64)
             }) else {
                 return Some((-EFAULT) as u64);
             };
@@ -1374,7 +1473,7 @@ unsafe fn screen_ioctl_from_ring3(
             ));
             // SAFETY: 同上。
             let Some(slice) = (unsafe {
-                validate_user_range(page_table_root, direct_map, arg, out.len() as u64)
+                validate_user_range_for_write(page_table_root, direct_map, arg, out.len() as u64)
             }) else {
                 return Some((-EFAULT) as u64);
             };
@@ -1598,13 +1697,14 @@ unsafe fn poll_from_ring3(
     let bytes = (count * POLLFD_LEN) as u64;
     // **踏み込む前に検証する。**
     // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
-    let Some(slice) = (unsafe { validate_user_range(page_table_root, direct_map, fds, bytes) })
+    let Some(slice) =
+        (unsafe { validate_user_range_for_write(page_table_root, direct_map, fds, bytes) })
     else {
         return (-EFAULT) as u64;
     };
     let mut raw = [0u8; MAX_POLL_FDS * POLLFD_LEN];
     // SAFETY: `slice` は検証済みで、長さはちょうど `bytes` である。
-    let read = unsafe { copy_from_user(&mut raw[..count * POLLFD_LEN], &slice) };
+    let read = unsafe { copy_from_user(&mut raw[..count * POLLFD_LEN], slice.as_readable()) };
     if read != count * POLLFD_LEN {
         return (-EFAULT) as u64;
     }
@@ -1882,7 +1982,8 @@ unsafe fn read_from_socket(
     }
     let want = count.min(crate::socket::SOCKET_RING as u64);
     // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
-    let Some(slice) = (unsafe { validate_user_range(page_table_root, direct_map, buf, want) })
+    let Some(slice) =
+        (unsafe { validate_user_range_for_write(page_table_root, direct_map, buf, want) })
     else {
         return (-EFAULT) as u64;
     };
@@ -2326,7 +2427,7 @@ unsafe fn recvmsg_from_ring3(
         });
         // SAFETY: 呼び出し元契約による。
         let Some(cslice) = (unsafe {
-            validate_user_range(
+            validate_user_range_for_write(
                 page_table_root,
                 direct_map,
                 parsed.control,
@@ -2340,7 +2441,7 @@ unsafe fn recvmsg_from_ring3(
         // **msg_controllen を 20 に書き戻す。**
         // SAFETY: 呼び出し元契約による。
         if let Some(mslice) = unsafe {
-            validate_user_range(
+            validate_user_range_for_write(
                 page_table_root,
                 direct_map,
                 msg + MSGHDR_CONTROLLEN as u64,
@@ -3140,7 +3241,7 @@ unsafe fn sys_read(
             let want = count.min(TERMINAL_READ_MAX as u64);
             // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
             let Some(slice) =
-                (unsafe { validate_user_range(page_table_root, direct_map, buf, want) })
+                (unsafe { validate_user_range_for_write(page_table_root, direct_map, buf, want) })
             else {
                 return (-EFAULT) as u64;
             };
@@ -3263,7 +3364,8 @@ unsafe fn sys_read(
     }
     // **踏み込む前に検証する。** コピーする長さは `want` で確定している。
     // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
-    let Some(slice) = (unsafe { validate_user_range(page_table_root, direct_map, buf, want) })
+    let Some(slice) =
+        (unsafe { validate_user_range_for_write(page_table_root, direct_map, buf, want) })
     else {
         return (-EFAULT) as u64;
     };
@@ -3916,7 +4018,8 @@ unsafe fn sys_getdents64(
 
     // **踏み込む前に検証する。** 書く量は `count` を越えない。
     // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
-    let Some(slice) = (unsafe { validate_user_range(page_table_root, direct_map, dirp, count) })
+    let Some(slice) =
+        (unsafe { validate_user_range_for_write(page_table_root, direct_map, dirp, count) })
     else {
         return (-EFAULT) as u64;
     };
@@ -4043,9 +4146,9 @@ unsafe fn sys_clock_gettime(
 
     // **踏み込む前に検証する。**
     // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
-    let Some(slice) =
-        (unsafe { validate_user_range(page_table_root, direct_map, out, TIMESPEC_LEN as u64) })
-    else {
+    let Some(slice) = (unsafe {
+        validate_user_range_for_write(page_table_root, direct_map, out, TIMESPEC_LEN as u64)
+    }) else {
         return (-EFAULT) as u64;
     };
     // SAFETY: slice は検証済みで、長さは TIMESPEC_LEN ちょうどである。
@@ -4212,9 +4315,9 @@ unsafe fn sys_stat(
 
     // **踏み込む前に検証する。**
     // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
-    let Some(slice) =
-        (unsafe { validate_user_range(page_table_root, direct_map, statbuf, STAT_LEN as u64) })
-    else {
+    let Some(slice) = (unsafe {
+        validate_user_range_for_write(page_table_root, direct_map, statbuf, STAT_LEN as u64)
+    }) else {
         return (-EFAULT) as u64;
     };
     // SAFETY: slice は検証済みで、長さは STAT_LEN ちょうどである。
@@ -4319,9 +4422,9 @@ unsafe fn sys_ioctl(
 
     // **踏み込む前に検証する。**
     // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
-    let Some(slice) =
-        (unsafe { validate_user_range(page_table_root, direct_map, arg, WINSIZE_LEN as u64) })
-    else {
+    let Some(slice) = (unsafe {
+        validate_user_range_for_write(page_table_root, direct_map, arg, WINSIZE_LEN as u64)
+    }) else {
         return (-EFAULT) as u64;
     };
     // SAFETY: slice は検証済みで、長さは WINSIZE_LEN ちょうどである。
@@ -4357,9 +4460,9 @@ unsafe fn ioctl_take_pending(arg: u64, page_table_root: PhysAddr, direct_map: Di
 
     // **踏み込む前に検証する。**
     // SAFETY: 呼び出し元契約により page_table_root / direct_map は有効。
-    let Some(slice) =
-        (unsafe { validate_user_range(page_table_root, direct_map, arg, ZDIAG_LEN as u64) })
-    else {
+    let Some(slice) = (unsafe {
+        validate_user_range_for_write(page_table_root, direct_map, arg, ZDIAG_LEN as u64)
+    }) else {
         return (-EFAULT) as u64;
     };
     // SAFETY: slice は検証済みで、長さは ZDIAG_LEN ちょうどである。
@@ -5007,16 +5110,16 @@ fn errno_for_ext2(error: common::ext2::Ext2Error) -> i64 {
 
 /// [`crate::userland::UserLoadError`] を errno へ変換する（S11-5）。
 ///
-/// # 全 16 種を明示する
+/// # 全 18 種を明示する
 ///
 /// **`_ =>` で捨てない**（[`errno_for_ext2`] と同じ理由）。
 ///
 /// # 大半は「カーネル側の不具合」である
 ///
-/// **`Parse` と `SegmentData` だけが、渡されたイメージに対する答えである**——
-/// 像が壊れているので `-ENOEXEC`……**ではなく `-EINVAL` を返す。**
-/// `ENOEXEC`（8）をまだ持っておらず、**1 つの用途のために errno を増やすより、
-/// 「引数が受け付けられない」に落とすほうが小さい。** 分ける必要が出たら足す。
+/// **`Parse`・`SegmentData`・`Layout` が、渡されたイメージに対する答えである。**
+/// **`Layout`（区画の並びを受け付けられない）は `-ENOEXEC` を返す**（2026-10-01。Linux と同じ値）。
+/// **`Parse` と `SegmentData`（像がバイト列として壊れている）は、以前から `-EINVAL` を返している**
+/// ——`ENOEXEC` を持つ前に決めた形で、ここでは変えていない。
 fn errno_for_user_load(error: crate::userland::UserLoadError) -> i64 {
     use crate::userland::UserLoadError as E;
     match error {
@@ -5025,6 +5128,7 @@ fn errno_for_user_load(error: crate::userland::UserLoadError) -> i64 {
         E::OutOfFrames => ENOMEM,
         // 渡されたものに対する答え。
         E::Parse(_) | E::SegmentData(_) => EINVAL,
+        E::Layout(_) => ENOEXEC,
         E::ArgumentsTooLong => ENAMETOOLONG,
         // ここから下はカーネル側の事情である。
         E::AddressSpace(_)
@@ -5367,6 +5471,39 @@ mod tests {
         assert_eq!(
             (info.kind, info.visual),
             (FB_TYPE_PACKED_PIXELS, FB_VISUAL_TRUECOLOR)
+        );
+    }
+
+    /// **区画の並びを受け付けられない像は `-ENOEXEC`（8）で断る**（2026-10-01）。像がバイト列として
+    /// 壊れているときの値（`-EINVAL`）は変えていない。
+    #[test]
+    fn a_refused_layout_is_reported_as_enoexec() {
+        use crate::userland::UserLoadError;
+        use common::elf::{ElfError, LayoutError};
+        assert_eq!(ENOEXEC, 8);
+        for layout in [
+            LayoutError::EmptySegment { index: 0 },
+            LayoutError::AddressOverflow { index: 0 },
+            LayoutError::OutOfOrder { index: 1 },
+            LayoutError::Overlap { index: 1 },
+            LayoutError::MixedPermissionsInPage {
+                index: 1,
+                page: 0x400000,
+            },
+            LayoutError::FileDataInSharedPage {
+                index: 1,
+                page: 0x402000,
+            },
+        ] {
+            assert_eq!(
+                errno_for_user_load(UserLoadError::Layout(layout)),
+                ENOEXEC,
+                "{layout:?}"
+            );
+        }
+        assert_eq!(
+            errno_for_user_load(UserLoadError::Parse(ElfError::BadMagic)),
+            EINVAL
         );
     }
 

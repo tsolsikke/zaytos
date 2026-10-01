@@ -21,6 +21,11 @@ pub const EINVAL: i64 = 22;
 /// `-ENOENT`（そのパスは無い）の errno（S10-b）。値は Linux と同じ 2 である。
 pub const ENOENT: i64 = 2;
 
+/// `-ENOEXEC`（実行できる形でない）の errno（2026-10-01）。値は Linux と同じ 8 である
+/// （`/usr/include/asm-generic/errno-base.h`）。**像の区画の並びを受け付けられないときに返す**
+/// （`crate::userland` の `UserLoadError::Layout`）。
+pub const ENOEXEC: i64 = 8;
+
 /// `-EBADF`（そのファイルディスクリプタは開いていない）の errno（S10-b）。
 pub const EBADF: i64 = 9;
 

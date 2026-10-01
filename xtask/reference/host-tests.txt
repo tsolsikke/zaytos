@@ -68,6 +68,12 @@ common::elf::tests::rejects_program_header_table_out_of_bounds
 common::elf::tests::rejects_too_short_input
 common::elf::tests::rejects_wrong_machine
 common::elf::tests::segment_data_rejects_a_header_that_the_parser_did_not_produce
+common::elf::tests::the_layout_check_accepts_the_shapes_the_toolchain_produces
+common::elf::tests::the_layout_check_on_an_image_looks_at_its_load_segments
+common::elf::tests::the_layout_check_rejects_file_data_in_a_shared_page
+common::elf::tests::the_layout_check_rejects_segments_out_of_order_or_overlapping
+common::elf::tests::the_layout_check_rejects_segments_with_different_permissions_in_one_page
+common::elf::tests::the_layout_check_rejects_values_whose_arithmetic_overflows
 common::elf::tests::walking_all_program_headers_of_an_accepted_image_does_not_panic
 common::env::table_tests::a_value_is_looked_up_by_the_whole_name
 common::env::table_tests::every_line_carries_a_trailing_nul
@@ -334,6 +340,7 @@ kernel::arch::x86_64::paging::entry::tests::the_parent_entry_does_not_inherit_th
 kernel::arch::x86_64::paging::entry::tests::the_parent_entry_inherits_the_user_bit
 kernel::arch::x86_64::paging::entry::tests::the_parent_entry_points_at_a_table_and_is_not_a_page
 kernel::arch::x86_64::paging::entry::tests::the_two_address_masks_differ_at_the_pat_bit
+kernel::arch::x86_64::paging::verify::tests::a_level_allows_a_write_only_when_it_is_writable_as_well
 kernel::arch::x86_64::paging::verify::tests::a_resolved_leaf_answers_writable_and_user_from_its_own_bits
 kernel::arch::x86_64::stack::tests::a_range_contains_its_own_bounds
 kernel::arch::x86_64::stack::tests::each_stack_sits_directly_above_its_guard
@@ -644,6 +651,7 @@ kernel::socket::tests::a_connection_starts_open_on_both_sides_and_is_not_accepte
 kernel::socket::tests::the_listener_name_is_the_recorded_length
 kernel::socket::tests::the_side_and_its_peer_index_the_two_rings
 kernel::syscall::tests::a_clip_rect_is_half_open_and_refuses_empty_ones
+kernel::syscall::tests::a_refused_layout_is_reported_as_enoexec
 kernel::syscall::tests::a_spawn_status_never_meets_the_interrupted_mark_nor_passes_the_limit
 kernel::syscall::tests::the_color_offsets_follow_the_pixel_order
 kernel::syscall::tests::the_screen_fix_info_does_not_give_out_the_physical_address

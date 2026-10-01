@@ -35,7 +35,9 @@ pub use idt::{
 pub use paging::active::{ActivePageTable, PageAttributes};
 pub use paging::address_space::{AddressSpace, AddressSpaceError};
 pub use paging::switch::{active_page_table_root, set_active_page_table_root};
-pub use paging::verify::{read_top_level_entry, walk_page_table, walk_page_table_user_accessible};
+pub use paging::verify::{
+    read_top_level_entry, walk_page_table, walk_page_table_user_accessible, UserAccess,
+};
 pub(crate) use ring3::current_excursion_slot;
 pub use ring3::{
     current_excursion_recovery, excursion_depth, excursion_fault_number, excursion_interrupted,

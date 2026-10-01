@@ -588,6 +588,10 @@ pub enum UserLoadError {
     ArgumentsTooLong,
     /// `Elf::parse` が拒んだ。**イメージがバイト列として壊れている。**
     Parse(common::elf::ElfError),
+    /// 区画の並びを受け付けられない（2026-10-01。`common::elf::check_load_layout`）。**番地の順でない、
+    /// 重なる、計算があふれる、同じページに権限の違う区画が載る、のどれかである。**
+    /// **写す前に断るので、ページは 1 枚も写していない。**
+    Layout(common::elf::LayoutError),
     /// `Elf::segment_data` が拒んだ。**区画のファイル内範囲がイメージの外にある。**
     ///
     /// **`parse` も同じことを見ているので、通常はここへ来ない。** 来るとしたら
@@ -1281,9 +1285,22 @@ fn forget_task_root_before_destroy(logger: &mut Logger<Serial>, process: &UserPr
 /// 止めない。**`docs/roadmap.md` の S9 が「いかなる入力に対しても fail-fast
 /// させない」と言っているのは、後者についてである。**
 ///
+/// # 区画の並びは、写す前に確かめる（2026-10-01）
+///
+/// **`Elf::parse` の後、1 枚も写す前に `Elf::check_load_layout` を通す。** 通らない並びは
+/// [`UserLoadError::Layout`] で断る——番地の順でない、重なる、計算があふれる（`p_memsz` が 0 の区画は
+/// 最終ページの引き算が成り立たない）、同じページに権限の違う区画が載る、共有するページに後ろの区画が
+/// ファイルの中身を持つ、のどれかである。**下のループの計算（最終ページ、ページを進める加算、区画の終わり）は、
+/// この確かめが通ったことを前提にしている。**
+///
+/// **以前は確かめていなかった。** 同じページに権限の違う区画が載る像は、前の区画の権限のまま読み込まれ、
+/// 後ろの区画の中身は写されなかった。番地の順が逆の像も読み込まれた。番地 0 で大きさ 0 の区画は、
+/// 最終ページの引き算があふれてカーネルが止まった（どれも起動の途中の検査で実測した）。
+///
 /// # 区画が同じページを共有しているとマップできない
 ///
-/// **後から来た区画が `Mapping { AlreadyMapped }` で拒まれる**（S9-b-3-2b）。
+/// **後から来た区画が `Mapping { AlreadyMapped }` で拒まれる**（S9-b-3-2b）。**並びの確かめが先に断るので、
+/// 像からこの経路へ来ることは無くなった。`map_user_4kib` の判定は 2 枚目の守りとして残る。**
 ///
 /// **一度は誤っていた。** ここには以前も「`AlreadyMapped` 相当で弾かれる」と
 /// 書いてあったが、**それを持っていたのは
@@ -1313,6 +1330,8 @@ fn load_user_program_into(
     use common::elf::Elf;
 
     const PAGE_SIZE: u64 = 4096;
+    // 並びの確かめが前提にするページの大きさと、ここで写すページの大きさは同じでなければならない。
+    const _: () = assert!(PAGE_SIZE == common::elf::LOAD_PAGE_SIZE);
 
     let direct_map = common::addr::direct_map();
 
@@ -1320,6 +1339,16 @@ fn load_user_program_into(
         Ok(elf) => elf,
         Err(e) => return Err(UserLoadError::Parse(e)),
     };
+    // **写す前に区画の並びを確かめる**（この関数の doc の「区画の並びは、写す前に確かめる」）。
+    //
+    // 破壊テスト (2026-10-01, user-load-skip-layout-check): 確かめの答えを捨てて写す。**起動の途中の
+    // 壊した像の検査が、並びの確かめで断られるはずの像を別の場所で断られるのを見て止まる。**
+    match elf.check_load_layout() {
+        Err(e) if !cfg!(feature = "user-load-skip-layout-check") => {
+            return Err(UserLoadError::Layout(e));
+        }
+        _ => {}
+    }
 
     // マップした VA と、期待する W を覚えておく（後で読み戻して照合する）。
     let mut mapped: [(u64, bool); 8] = [(0, false); 8];
@@ -1342,7 +1371,7 @@ fn load_user_program_into(
     let declared_segments = elf.load_segments().count();
 
     for ph in elf.load_segments() {
-        let writable = ph.p_flags & 0x2 != 0;
+        let writable = ph.p_flags & common::elf::PF_W != 0;
         let first_page = ph.p_vaddr & !(PAGE_SIZE - 1);
         // 破壊テスト (ADR-0039, user-load-filesz-only): `memsz` ではなく `filesz` で
         // 最終ページを出す。**`.bss` がマップされない**——`/bin/bss-test` が
@@ -1381,6 +1410,10 @@ fn load_user_program_into(
             // 既にゼロ埋めしてファイルの中身を重ねてあり、**新しい区画は
             // その中身の直後から始まる**ので、**残りは既にゼロである。**
             // **やり直すと直前の区画の中身を消す。**
+            //
+            // **このページの権限は直前の区画のもので、新しい区画の中身もここへは写さない。**
+            // **それでよいことは、並びの確かめが保証している**——共有するページでは 2 つの区画の
+            // 権限が同じで、後ろの区画はファイルの中身を持たない（`common::elf::check_load_layout`）。
             if previous_last_page == Some(page) && page == first_page && ph.p_vaddr >= previous_end
             {
                 shared_pages += 1;
@@ -1476,7 +1509,8 @@ fn load_user_program_into(
     //
     // **`previous_end` は最後の区画の末尾である**（上のループが毎回入れている）。
     // **区画はアドレスの順に並んでいる**ので、これがイメージの末尾になる
-    // （並びは `Elf::load_segments` が保証する。ADR-0039）。
+    // （並びは、上で通した `Elf::check_load_layout` が確かめている。`Elf::load_segments` は
+    // `PT_LOAD` を選り分けるだけである）。
     process.heap = Heap::from_image_end(previous_end);
 
     // **本数の対。** 落ちた区画があれば、この 1 行で分かる。

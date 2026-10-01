@@ -766,6 +766,10 @@ user-run-writable-text = []
 # entry ではなく最初の PT_LOAD の先頭へ飛ぶ。詰め物の ud2 で即座に #UD になり、
 # フォルト RIP が期待と食い違う。`--ring3-test user-wrong-entry`。
 user-run-wrong-entry = []
+# 区画の並びの確かめを通さずに写す（2026-10-01）。起動の途中の壊した像の検査が、並びの確かめで
+# 断られるはずの像を別の場所で断られる（または読み込まれる）のを見て止まる。
+# `--ring3-test user-skip-layout-check`。
+user-load-skip-layout-check = []
 # S9-b-3-1: プロセスの終了（exit）の破壊確認。いずれも既定ビルドには入らない。
 # exit を受けても終了させず Ring 3 へ返す。プロセスは exit の直後に置いた ud2 へ落ち、
 # ベクタ 6・既知の RIP で確定的に畳まれる。`--ring3-test user-exit-ignored`。
@@ -803,6 +807,10 @@ syscall-test-validate-skip-laststep = []
 # 検証器を常に受理にする。検証器の全体機能停止を battery が検出して halt する
 # （多層防御の最後の砦の確認）。`--syscall-test validate-skip-all`。
 syscall-test-validate-skip-all = []
+# 書くための確かめが、書き込み可（W）を見ない（2026-10-01）。syscall-test が読み込み先に自分の
+# .rodata を渡した read で、カーネルが読み取り専用のページへ書き、Ring 0 の #PF で止まる。
+# `--syscall-test validate-skip-writable`。
+syscall-test-validate-skip-writable = []
 # M5-f-2-2: copy_from_user の破壊確認。既定ビルドには入らない。
 # SYS_CHECKSUM が validate を経ずに UserSlice をモジュール内で直接構築して読む（型保証の
 # 境界を突く）。カーネルポインタで -EFAULT のはずが総和が返り、verify が検出して halt する。

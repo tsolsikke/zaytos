@@ -996,6 +996,26 @@ const RING3_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // **区画の並びの確かめを通さずに写す（2026-10-01）。** 起動の途中の壊した像の検査は、並びの確かめが
+    // 断るはずの 4 つの像のうち、最初の 1 つ（2 本目が 1 本目の中身の内側から始まる）が写す途中で断られるのを
+    // 見て、「違う場所で断られた」と止まる。**残りの 3 つは、この確かめが無いと読み込まれるか、引き算の
+    // あふれでカーネルが止まる**（直す前の形で実測した）。
+    //
+    // **写す途中で断るのは `map_user_4kib` の「既に写っている葉は上書きしない」の判定である。** 並びの確かめを
+    // 入れた後は、像からこの判定へ届く道がここだけになったので、**断った理由の行も求める**（2 枚目の守りが
+    // 効いていることの確かめを兼ねる）。
+    CriticalTest {
+        name: "user-skip-layout-check",
+        feature: "user-load-skip-layout-check",
+        expected_markers: &[
+            "moved into the first segment's page -> Mapping { virt: 4194304, error: AlreadyMapped }",
+            "moved into the first segment's page failed in the wrong place",
+            "halting",
+        ],
+        forbidden_markers: &["user-load-corrupt: all 6 corrupted images were refused"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     CriticalTest {
         name: "user-wrong-entry",
         feature: "user-run-wrong-entry",
@@ -1131,6 +1151,20 @@ const SYSCALL_TESTS: &[CriticalTest] = &[
             "halting",
         ],
         forbidden_markers: &["syscall: pointer validation battery verified"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // **書くための確かめが、書き込み可を見ない（2026-10-01）。** `syscall-test` が読み込み先に自分の
+    // `.rodata` を渡した `read` が断られず、カーネルが読み取り専用のページへ書いて、Ring 0 の #PF で止まる。
+    CriticalTest {
+        name: "validate-skip-writable",
+        feature: "syscall-test-validate-skip-writable",
+        expected_markers: &[
+            "exception: vector=14 (#PF page fault)",
+            "cause=protection violation access=write mode=supervisor",
+            "halting",
+        ],
+        forbidden_markers: &["user-load: syscall-test ran as a process"],
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
@@ -29626,7 +29660,7 @@ fn count_elements(text: &str) -> usize {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 60,
-    full: 429,
+    full: 431,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。
