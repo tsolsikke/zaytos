@@ -418,7 +418,7 @@ stableでは`--print target-spec-json`が使えないため、確認は生成コ
 **失敗したら、きれいなクローンで再現する。**
 
 ```
-git clone -q file:///path/to/zaytos /tmp/clean && cd /tmp/clean && cargo xtask check
+git clone -q file:///path/to/zeikos /tmp/clean && cd /tmp/clean && cargo xtask check
 ```
 
 **これで1回目の失敗が切り分けられた**（`docs/troubleshooting.md`の2026-09-06の項）。
@@ -1598,10 +1598,10 @@ VirtualBoxの計数でベクタ0x42が打鍵4バイトで+4、8259のベクタ0x
 | `target/x86_64-unknown-none/debug`（丸ごと） | よい | 作り直せる。次の`--full`で組ごとにビルドし直す |
 | `target/frame-sizes/wt` | よい（`git worktree remove`で外す） | `tools/frame-sizes.py`が基底の版をビルドする作業ツリー |
 | `target/tool-checks`・`target/stack-deepest` | よい | 手の道具の確かめと道具の一時の置き場 |
-| `target/full-check/wt`（2026-09-27より前の置き場） | よい（`git worktree remove`で外す。**全検査が走っていないときだけ**） | 以前の全検査の作業ツリー。残っていれば次の全検査が隣の`<名前>-full-check`へ移す（隣の置き場は`target/`の外なので、この表の対象の外） |
+| `target/full-check/wt`（2026-09-27より前の置き場） | よい（`git worktree remove`で外す。**全検査が走っていないときだけ**） | 以前の全検査の作業ツリー。**残っていても、全検査はもう移さない**（移す処理は2026-10-01に外した。いまの作業ツリーは隣の`<名前>-full-check`で、`target/`の外なので、この表の対象の外） |
 | `target/check-lock`・`target/check-vbox-path` | よい | 基本の検査の確かめの一時の置き場 |
 | `target/full-check/logs` | **消さない** | 全検査のログ（記録がパスを持つ） |
-| `target/full-check/records.tsv`・`target/full-check/selections.tsv`（2026-09-27より前の置き場） | **次の段階まで消さない** | 移す前の記録。pushの前の関門と`--status`が1段階だけ読む（記録はいまgitの共通の置き場の`zaytos/`に在る） |
+| `target/full-check/records.tsv`・`target/full-check/selections.tsv`（2026-09-27より前の置き場） | **消さない**（扱いは、OSの名前を変える段階の終わりに決める。`ADR-0073`） | 移す前の記録。**2026-10-01から、どの検査も読まない**（記録はいまgitの共通の置き場の`zeikos/`に在り、名前を変える段階の間は旧い置き場の`zaytos/`も読む） |
 | `target/stage`と、`target`の直下の記録（`.log`・`.txt`） | **消さない** | 実行の記録と判断の控え |
 | `target/aarch64-tools` | **消さない** | ARMの道具（展開したQEMUとAAVMF。`ADR-0070`） |
 | `target/amd` | **消さない** | AMDの資料（第三者の著作物なのでツリーに入れていない） |

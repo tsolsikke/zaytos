@@ -6813,36 +6813,25 @@ const BUILD_DIR_WARN_BYTES: u64 = 100 << 30;
 /// ビルドの置き場の大きさを出す（`--full` のまとめ。止めない）。
 ///
 /// **メインの作業ツリーと、全検査の作業ツリー（メインの作業ツリーの隣。[`full_check::worktree_path`]）を分けて出す**
-/// （運用者の回答 2。2026-09-25。2026-09-27 に作業ツリーを隣へ移した）——**以前の置き場（`target/full-check/wt`）に
-/// 作業ツリーが残っていれば、その分はメインの作業ツリーの `target/` から引く**（合わせて測ると 100 GiB の警告を毎回越える）。
-/// **警告はそれぞれに掛ける。**
+/// （運用者の回答 2。2026-09-25。2026-09-27 に作業ツリーを隣へ移した）。**警告はそれぞれに掛ける。**
+/// **以前の置き場（`target/full-check/wt`）の分をメインの作業ツリーの `target/` から引く処理は、2026-10-01 に外した**
+/// （全検査がそこから移す処理を外したとき）。
 fn report_build_directory_size(workspace_root: &Path) {
     let main =
         check_lock::main_tree(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
-    let legacy = full_check::legacy_worktree_path(&main);
-    let with_legacy = directory_bytes(&main.join("target"));
-    let legacy_bytes = if legacy.is_dir() {
-        directory_bytes(&legacy)
-    } else {
-        Some(0)
-    };
-    let main_bytes = with_legacy
-        .zip(legacy_bytes)
-        .map(|(all, part)| all.saturating_sub(part));
     report_one_build_directory(
-        "the main tree's target/ (without a full-check worktree left inside it)",
-        main_bytes,
+        "the main tree's target/",
+        directory_bytes(&main.join("target")),
     );
-    for worktree in [full_check::worktree_path(&main), legacy] {
-        if worktree.is_dir() {
-            report_one_build_directory(
-                &format!(
-                    "the full-check worktree {} (its target/ and sources)",
-                    worktree.display()
-                ),
-                directory_bytes(&worktree),
-            );
-        }
+    let worktree = full_check::worktree_path(&main);
+    if worktree.is_dir() {
+        report_one_build_directory(
+            &format!(
+                "the full-check worktree {} (its target/ and sources)",
+                worktree.display()
+            ),
+            directory_bytes(&worktree),
+        );
     }
 }
 
@@ -33780,18 +33769,18 @@ disk0: rd_bytes=2105856 wr_bytes=2097152 rd_operations=524
     #[test]
     fn an_xtask_built_for_another_tree_refuses_to_run() {
         assert_eq!(
-            built_elsewhere("/w/zaytos/xtask", Some("/w/zaytos/xtask")),
+            built_elsewhere("/w/zeikos/xtask", Some("/w/zeikos/xtask")),
             None
         );
-        assert_eq!(built_elsewhere("/w/zaytos/xtask", None), None);
+        assert_eq!(built_elsewhere("/w/zeikos/xtask", None), None);
         let moved = built_elsewhere(
-            "/w/zaytos/target/full-check/wt/xtask",
-            Some("/w/zaytos-full-check/xtask"),
+            "/w/zeikos/target/full-check/wt/xtask",
+            Some("/w/zeikos-full-check/xtask"),
         )
         .expect("a moved tree is refused");
         for part in [
-            "/w/zaytos/target/full-check/wt/xtask",
-            "/w/zaytos-full-check/xtask",
+            "/w/zeikos/target/full-check/wt/xtask",
+            "/w/zeikos-full-check/xtask",
             "cargo clean -p xtask",
         ] {
             assert!(moved.contains(part), "{moved}");

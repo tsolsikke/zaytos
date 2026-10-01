@@ -730,10 +730,10 @@ xtask::full_check::tests::a_record_from_before_the_added_columns_still_reads
 xtask::full_check::tests::a_record_from_before_the_start_state_still_reads
 xtask::full_check::tests::a_record_reads_back_as_written
 xtask::full_check::tests::a_torn_record_line_is_never_read_as_a_record
-xtask::full_check::tests::a_worktree_in_the_old_place_is_moved_next_to_the_main_tree
 xtask::full_check::tests::a_worktree_is_cold_when_it_is_not_where_the_last_full_check_ran
 xtask::full_check::tests::a_worktree_is_cold_when_the_kernel_sources_changed_since_its_last_checkout
 xtask::full_check::tests::a_worktree_is_cold_without_target_when_small_or_built_by_another_rustc
+xtask::full_check::tests::a_worktree_under_the_old_name_is_moved_next_to_the_renamed_main_tree
 xtask::full_check::tests::appends_survive_a_torn_tail_and_concurrent_writers
 xtask::full_check::tests::environment_differences_name_the_changed_tools
 xtask::full_check::tests::only_a_pass_at_the_needed_level_or_above_covers_a_commit

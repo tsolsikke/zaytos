@@ -13,7 +13,8 @@
 //! **作業ツリーはメインの作業ツリーの隣に置く**（2026-09-27。運用者の決定。**同じファイルシステムに限る**）。
 //! **以前は `target/full-check/wt` に置いていた**（運用者の回答 2）——**メインの作業ツリーの `cargo clean` が、作業ツリーの
 //! ビルドの控え（約 32 GiB）ごと消し、git の作業ツリーの登録だけが残るので、外へ出した。** **初回は冷えている**
-//! （組ごとの初回ビルド）。**以前の置き場に作業ツリーが在れば、始めるときに 1 度だけ `git worktree move` で移す。**
+//! （組ごとの初回ビルド）。**以前の置き場から移す処理は、2026-10-01 に外した。** **作業フォルダの名前を `zaytos` から
+//! 変えた後は、旧い名前のまま隣に残る作業ツリーを、始めるときに 1 度だけ `git worktree move` で移す**（[`old_worktree_path`]）。
 //!
 //! # 記録
 //!
@@ -300,16 +301,18 @@ fn old_records_path(root: &Path) -> Result<PathBuf> {
 /// ——**`target/` の外なので、メインの作業ツリーの `cargo clean` で消えない。**
 pub fn worktree_path(main: &Path) -> PathBuf {
     let name = main.file_name().map_or_else(
-        || "zaytos".to_string(),
+        || "zeikos".to_string(),
         |name| name.to_string_lossy().into_owned(),
     );
     main.with_file_name(format!("{name}-full-check"))
 }
 
-/// 以前の全検査の作業ツリーの置き場（メインの作業ツリーの `target/full-check/wt`）。**在れば、始めるときに
-/// 新しい置き場へ 1 度だけ移す**（2026-09-27。次の段階で外す）。
-pub fn legacy_worktree_path(main: &Path) -> PathBuf {
-    main.join("target").join("full-check").join("wt")
+/// 旧い名前のままの全検査の作業ツリーの置き場（メインの作業ツリーの隣の `zaytos-full-check`）。**作業フォルダの名前を
+/// `zaytos` から変えた後、在れば、始めるときに新しい置き場（[`worktree_path`]）へ 1 度だけ移す**（OS の名前を変える
+/// 段階の R5。`ADR-0073`）。**作業フォルダの名前が `zaytos` のままなら、新しい置き場と同じ道になり、移さない。**
+/// **R5 の最後の項目の後に外す。** **以前の置き場（`target/full-check/wt`）から移す処理は、2026-10-01 に外した。**
+pub fn old_worktree_path(main: &Path) -> PathBuf {
+    main.with_file_name("zaytos-full-check")
 }
 
 /// 記録を 1 行足す（メインの作業ツリーの記録へ）。
@@ -1518,8 +1521,9 @@ fn same_filesystem(main: &Path, worktree: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 作業ツリーを `commit` に合わせ、汚れていないことを確かめる。
-fn prepare_worktree(main: &Path, worktree: &Path, commit: &str) -> Result<()> {
+/// 作業ツリーを `commit` に合わせ、汚れていないことを確かめる。**旧い名前の作業ツリーを移したときは `true` を返す**——
+/// **呼ぶ側が、移した作業ツリーの xtask を作り直させる**（[`clean_moved_xtask`]）。
+fn prepare_worktree(main: &Path, worktree: &Path, commit: &str) -> Result<bool> {
     git_line(main, &["worktree", "prune"])?;
     let registered = |path: &Path| -> Result<bool> {
         let listed = git_line(main, &["worktree", "list", "--porcelain"])?;
@@ -1528,16 +1532,40 @@ fn prepare_worktree(main: &Path, worktree: &Path, commit: &str) -> Result<()> {
                 .is_some_and(|listed| Path::new(listed) == path)
         }))
     };
-    // **以前の置き場（`target/full-check/wt`）の作業ツリーを 1 度だけ移す**（2026-09-27。次の段階で外す）——
-    // **ビルドの控えを残したまま移すので、次の全検査も冷えない。**
-    let legacy = legacy_worktree_path(main);
-    if !worktree.exists() && registered(&legacy)? {
-        same_filesystem(main, worktree)?;
-        let from = legacy.to_string_lossy().into_owned();
+    // **旧い名前のまま隣に残る作業ツリー（`zaytos-full-check`）を 1 度だけ移す**（R5 の間だけ。[`old_worktree_path`]）——
+    // **ビルドの控えを残したまま移す。** **移すのは `git worktree move` で、移した直後に、登録の一覧が新しい道を指し、
+    // 旧い道を指していないことを確かめる。** **移せなければ、両方の道を挙げて落ちる。**
+    let old = old_worktree_path(main);
+    let moved = old != worktree && !worktree.exists() && old.exists();
+    if moved {
+        let from = old.to_string_lossy().into_owned();
         let to = worktree.to_string_lossy().into_owned();
-        git_line(main, &["worktree", "move", &from, &to])?;
+        if !registered(&old)? {
+            bail!(
+                "the full-check worktree under the old name {from} is not a registered worktree of \
+                 this repository, so it cannot be moved to {to} with git worktree move. If it belongs \
+                 to this repository, run `git worktree repair {from}` in the main tree; otherwise move \
+                 it out of the way by hand. Then start again"
+            );
+        }
+        same_filesystem(main, worktree)?;
+        git_line(main, &["worktree", "move", &from, &to]).with_context(|| {
+            format!(
+                "could not move the full-check worktree from {from} to {to} with git worktree move. \
+                 If the main tree was moved by hand, run `git worktree repair {from}` in the main \
+                 tree; then look at `git worktree list` and start again"
+            )
+        })?;
+        if !registered(worktree)? || registered(&old)? {
+            bail!(
+                "moved the full-check worktree from {from} to {to} with git worktree move, but `git \
+                 worktree list` does not show it at {to} alone; look at `git worktree list` and \
+                 .git/worktrees, then start again"
+            );
+        }
         println!(
-            "full: moved the worktree from {from} to {to} (once; the old place is no longer used)"
+            "full: moved the worktree from {from} to {to} with git worktree move; git worktree list \
+             shows it at the new place only (once; the old name is no longer used)"
         );
     }
     if registered(worktree)? {
@@ -1572,6 +1600,37 @@ fn prepare_worktree(main: &Path, worktree: &Path, commit: &str) -> Result<()> {
             listed.join("\n  ")
         );
     }
+    Ok(moved)
+}
+
+/// 移した作業ツリーの xtask を作り直させる（`cargo clean -p xtask`。R5 の間だけ。[`old_worktree_path`]）。**cargo は、
+/// 木を移しても xtask を作り直さない**——**実行ファイルが移す前の道を持ったままなので、子の全検査が入口で落ちる**
+/// （`main.rs` の `built_elsewhere`。2026-09-27）。**消すのは xtask の分だけで、ほかのビルドの控えは残す。**
+fn clean_moved_xtask(worktree: &Path) -> Result<()> {
+    let output = Command::new("cargo")
+        .args(["clean", "-p", "xtask"])
+        .current_dir(worktree)
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| {
+            format!(
+                "could not run cargo clean -p xtask in the moved worktree {}",
+                worktree.display()
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "cargo clean -p xtask failed in the moved worktree {} ({}): {}; run it there by hand, \
+             then start again",
+            worktree.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    println!(
+        "full: ran cargo clean -p xtask in the moved worktree (its xtask still pointed at the old \
+         place)"
+    );
     Ok(())
 }
 
@@ -1676,27 +1735,20 @@ fn run(target: &str) -> Result<()> {
         )),
     )?;
     let worktree = worktree_path(&main);
-    let legacy = legacy_worktree_path(&main);
+    let old = old_worktree_path(&main);
     refuse_if_a_previous_run_is_alive(&worktree)?;
-    refuse_if_a_previous_run_is_alive(&legacy)?;
+    refuse_if_a_previous_run_is_alive(&old)?;
     // **始める前に、見込みの書く量＋下限を、WSL の中と VHD の載ったドライブの両方で見る**（2026-09-25。
     // 運用者の足す1点）。**足りなければ検査装置の故障として断る。**
     let records = read_records(&main)?;
     // **作業ツリーが冷えているかで、見込みを選ぶ**（2026-09-26。運用者の足す1点）。**冷えているかは、これから使う
-    // 作業ツリーで見る**——**以前の置き場から移す前なら、以前の置き場のものである**（移してもビルドの控えは残る）。
-    // **以前の置き場はメインの作業ツリーの `target/` の下に在るので、残っていればメインの作業ツリーの大きさから引く。**
-    let current = if worktree.is_dir() || !legacy.is_dir() {
+    // 作業ツリーで見る**——**旧い名前の作業ツリーを移す前なら、その作業ツリーのものである**（移してもビルドの控えは残る）。
+    let current = if worktree.is_dir() || !old.is_dir() {
         worktree.clone()
     } else {
-        legacy.clone()
+        old.clone()
     };
-    let inside = legacy
-        .is_dir()
-        .then(|| crate::directory_bytes(&legacy))
-        .flatten()
-        .unwrap_or(0);
-    let main_target =
-        crate::directory_bytes(&main.join("target")).map(|bytes| bytes.saturating_sub(inside));
+    let main_target = crate::directory_bytes(&main.join("target"));
     let worktree_target = current
         .join("target")
         .is_dir()
@@ -1719,7 +1771,7 @@ fn run(target: &str) -> Result<()> {
                 .count();
             Some((from, count))
         });
-    // **置き場は、これから検査する作業ツリーの置き場で見る**（以前の置き場から移すなら、移した先）。
+    // **置き場は、これから検査する作業ツリーの置き場で見る**（旧い名前の作業ツリーを移すなら、移した先）。
     let state = start_state(
         main_target,
         worktree_target,
@@ -1766,7 +1818,9 @@ fn run(target: &str) -> Result<()> {
         return Err(anyhow::Error::new(HarnessFault(message)));
     }
     let disk_start = sectors_written(&main);
-    prepare_worktree(&main, &worktree, &commit)?;
+    if prepare_worktree(&main, &worktree, &commit)? {
+        clean_moved_xtask(&worktree)?;
+    }
     if let Some(dir) = log.parent() {
         fs::create_dir_all(dir).with_context(|| format!("could not create {}", dir.display()))?;
     }
@@ -2203,7 +2257,7 @@ mod tests {
             env: Some("rustc 1.97.1; qemu 8.2.2".to_string()),
             selected: Some("fs,apps".to_string()),
             score: Some("caught=yes".to_string()),
-            root: Some("/home/u/zaytos-full-check".to_string()),
+            root: Some("/home/u/zeikos-full-check".to_string()),
             ..record("full", "pass", "c1", "t1", 0)
         };
         let line = format_record(&written);
@@ -2215,7 +2269,7 @@ mod tests {
         assert_eq!(read.env.as_deref(), Some("rustc 1.97.1; qemu 8.2.2"));
         assert_eq!(read.selected.as_deref(), Some("fs,apps"));
         assert_eq!(read.score.as_deref(), Some("caught=yes"));
-        assert_eq!(read.root.as_deref(), Some("/home/u/zaytos-full-check"));
+        assert_eq!(read.root.as_deref(), Some("/home/u/zeikos-full-check"));
         assert_eq!(read.note, "a b c");
         // **第 2 版の行（置き場の欄が無い 22 欄）も読む。置き場は無いものとして読む。**
         let second =
@@ -2874,7 +2928,7 @@ mod tests {
     #[test]
     fn a_worktree_is_cold_when_it_is_not_where_the_last_full_check_ran() {
         let same = Some("5921603053813812323");
-        let here = Path::new("/home/u/zaytos-full-check");
+        let here = Path::new("/home/u/zeikos-full-check");
         let state = |last: Option<&Record>| {
             start_state(
                 Some(56 << 30),
@@ -2888,13 +2942,13 @@ mod tests {
         };
         let cold = |state: StartState| matches!(state, StartState::Cold(_));
         assert!(!cold(state(Some(&ran_at(Some(
-            "/home/u/zaytos-full-check"
+            "/home/u/zeikos-full-check"
         ))))));
-        let moved = state(Some(&ran_at(Some("/home/u/zaytos/target/full-check/wt"))));
+        let moved = state(Some(&ran_at(Some("/home/u/zeikos/target/full-check/wt"))));
         assert!(
             moved
                 .reason()
-                .contains("/home/u/zaytos/target/full-check/wt"),
+                .contains("/home/u/zeikos/target/full-check/wt"),
             "{moved:?}"
         );
         assert!(cold(moved));
@@ -2902,18 +2956,18 @@ mod tests {
         assert!(cold(state(None)));
         // **前回は作業ツリーで走った全検査の直近**——親が代わりに書いた行と、基本の検査の行は見ない。
         let records = vec![
-            ran_at(Some("/home/u/zaytos/target/full-check/wt")),
-            ran_at(Some("/home/u/zaytos-full-check")),
+            ran_at(Some("/home/u/zeikos/target/full-check/wt")),
+            ran_at(Some("/home/u/zeikos-full-check")),
             record("full", "cut", "c", "t", 0),
             Record {
-                root: Some("/home/u/zaytos".to_string()),
+                root: Some("/home/u/zeikos".to_string()),
                 ..record("base", "pass", "c", "t", 0)
             },
         ];
         let last = last_worktree_run(&records);
         assert_eq!(
             last.and_then(|record| record.root.as_deref()),
-            Some("/home/u/zaytos-full-check")
+            Some("/home/u/zeikos-full-check")
         );
         assert!(!cold(state(last)));
     }
@@ -2950,14 +3004,14 @@ mod tests {
     /// **作業ツリーの HEAD は、登録の一覧の同じ置き場の塊から読む**（形は実測。2026-09-27）。
     #[test]
     fn the_head_of_a_worktree_is_read_from_the_listing() {
-        let listing = "worktree /home/u/zaytos\nHEAD aeda6141\nbranch refs/heads/main\n\n\
-                       worktree /home/u/zaytos-full-check\nHEAD 4f1de846\ndetached\n";
+        let listing = "worktree /home/u/zeikos\nHEAD aeda6141\nbranch refs/heads/main\n\n\
+                       worktree /home/u/zeikos-full-check\nHEAD 4f1de846\ndetached\n";
         let head = |path: &str| worktree_head_in(listing, Path::new(path));
         assert_eq!(
-            head("/home/u/zaytos-full-check").as_deref(),
+            head("/home/u/zeikos-full-check").as_deref(),
             Some("4f1de846")
         );
-        assert_eq!(head("/home/u/zaytos").as_deref(), Some("aeda6141"));
+        assert_eq!(head("/home/u/zeikos").as_deref(), Some("aeda6141"));
         assert_eq!(head("/home/u/other"), None);
     }
 
@@ -3010,85 +3064,147 @@ mod tests {
     }
 
     /// **全検査の作業ツリーは、メインの作業ツリーの隣に `<名前>-full-check` として置く**（2026-09-27。運用者の決定）。
-    /// **`target/` の外である。**
+    /// **`target/` の外である。** **旧い名前の作業ツリーは隣の `zaytos-full-check` で、作業フォルダの名前が `zaytos` のままなら
+    /// 新しい置き場と同じ道になる**（R5 の間だけ）。
     #[test]
     fn the_full_check_worktree_sits_next_to_the_main_tree() {
-        let main = Path::new("/home/user/work/zaytos");
+        let main = Path::new("/home/user/work/zeikos");
         assert_eq!(
             worktree_path(main),
-            Path::new("/home/user/work/zaytos-full-check")
+            Path::new("/home/user/work/zeikos-full-check")
         );
         assert_eq!(worktree_path(main).parent(), main.parent());
         assert!(!worktree_path(main).starts_with(main));
+        let old = old_worktree_path(main);
+        assert_eq!(old.parent(), main.parent());
+        assert_ne!(old, worktree_path(main));
         assert_eq!(
-            legacy_worktree_path(main),
-            Path::new("/home/user/work/zaytos/target/full-check/wt")
+            old.file_name(),
+            Some(std::ffi::OsStr::new("zaytos-full-check"))
         );
+        let not_renamed = main.with_file_name("zaytos");
+        assert_eq!(old_worktree_path(&not_renamed), worktree_path(&not_renamed));
     }
 
-    /// **以前の置き場（`target/full-check/wt`）に登録された作業ツリーは、全検査を始めるときに隣へ移る**（2026-09-27）。
-    /// **移した後は新しい置き場で登録され、中に置いたビルドの控え（`target/` の下）も残る。** **作ったリポジトリで確かめる。**
+    /// **隣の旧い名前（`zaytos-full-check`）で登録された作業ツリーは、全検査を始めるときに `git worktree move` で
+    /// 新しい置き場へ移る**（R5 の間だけ）。**移した後は新しい置き場だけで登録され、中に置いたビルドの控え（`target/` の
+    /// 下）も残る。** **移せない形は、両方の道を挙げて落ちる**——旧い名前の置き場が登録されていない形と、旧い名前の作業ツリーが
+    /// メインの作業ツリーを指し返していない形（作業フォルダを移した後に `git worktree repair` を打たなかった形）。
+    /// **作ったリポジトリで確かめる**（xtask を作り直させるところは、呼ぶ側なので見ない）。
     #[test]
-    fn a_worktree_in_the_old_place_is_moved_next_to_the_main_tree() {
+    fn a_worktree_under_the_old_name_is_moved_next_to_the_renamed_main_tree() {
         let scratch =
             std::env::temp_dir().join(format!("zeikos-worktree-move-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&scratch);
-        let repo = scratch.join("repo");
-        fs::create_dir_all(&repo).unwrap();
-        let repo = fs::canonicalize(&repo).unwrap();
         let run = |dir: &Path, args: &[&str]| git_line(dir, args).unwrap();
-        run(&repo, &["-c", "init.defaultBranch=main", "init", "-q"]);
-        fs::write(repo.join("README"), "readme").unwrap();
-        // **本物と同じく `target/` を追跡しない**（作業ツリーの `target/` を汚れと数えないため）。
-        fs::write(repo.join(".gitignore"), "target/\n").unwrap();
-        run(&repo, &["add", "README", ".gitignore"]);
+        let repository = |name: &str| {
+            let repo = scratch.join(name).join("zeikos");
+            fs::create_dir_all(&repo).unwrap();
+            let repo = fs::canonicalize(&repo).unwrap();
+            run(&repo, &["-c", "init.defaultBranch=main", "init", "-q"]);
+            fs::write(repo.join("README"), "readme").unwrap();
+            // **本物と同じく `target/` を追跡しない**（作業ツリーの `target/` を汚れと数えないため）。
+            fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+            run(&repo, &["add", "README", ".gitignore"]);
+            run(
+                &repo,
+                &[
+                    "-c",
+                    "user.name=check",
+                    "-c",
+                    "user.email=check@localhost",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "first",
+                ],
+            );
+            let commit = run(&repo, &["rev-parse", "HEAD"]);
+            (repo, commit)
+        };
+        let listed = |repo: &Path| -> Vec<String> {
+            run(repo, &["worktree", "list", "--porcelain"])
+                .lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .map(str::to_string)
+                .collect()
+        };
+
+        let (repo, commit) = repository("moved");
+        let old = old_worktree_path(&repo);
+        let old_arg = old.to_string_lossy().into_owned();
         run(
             &repo,
-            &[
-                "-c",
-                "user.name=check",
-                "-c",
-                "user.email=check@localhost",
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "-q",
-                "-m",
-                "first",
-            ],
-        );
-        let commit = run(&repo, &["rev-parse", "HEAD"]);
-        let legacy = legacy_worktree_path(&repo);
-        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        let legacy_arg = legacy.to_string_lossy().into_owned();
-        run(
-            &repo,
-            &["worktree", "add", "-q", "--detach", &legacy_arg, &commit],
+            &["worktree", "add", "-q", "--detach", &old_arg, &commit],
         );
         // **ビルドの控えの代わりに、作業ツリーの `target/` に 1 つ置く**（移した後も残ることを見る）。
-        fs::create_dir_all(legacy.join("target")).unwrap();
-        fs::write(legacy.join("target").join("kept"), "cache").unwrap();
-
+        fs::create_dir_all(old.join("target")).unwrap();
+        fs::write(old.join("target").join("kept"), "cache").unwrap();
         let worktree = worktree_path(&repo);
-        prepare_worktree(&repo, &worktree, &commit).unwrap();
-        assert!(!legacy.exists(), "{} is still there", legacy.display());
+        assert!(prepare_worktree(&repo, &worktree, &commit).unwrap());
+        assert!(!old.exists(), "{} is still there", old.display());
         assert_eq!(
             fs::read_to_string(worktree.join("target").join("kept")).unwrap(),
             "cache"
         );
-        let listed = run(&repo, &["worktree", "list", "--porcelain"]);
-        let registered: Vec<&str> = listed
-            .lines()
-            .filter_map(|line| line.strip_prefix("worktree "))
-            .collect();
+        let registered = listed(&repo);
         assert!(
-            registered.contains(&worktree.to_string_lossy().as_ref()),
-            "{listed}"
+            registered.contains(&worktree.to_string_lossy().into_owned()),
+            "{registered:?}"
         );
-        assert!(!registered.contains(&legacy_arg.as_str()), "{listed}");
+        assert!(!registered.contains(&old_arg), "{registered:?}");
         // **2 回目は移さず、そのまま使う。**
-        prepare_worktree(&repo, &worktree, &commit).unwrap();
+        assert!(!prepare_worktree(&repo, &worktree, &commit).unwrap());
         assert_eq!(run(&worktree, &["rev-parse", "HEAD"]), commit);
+
+        // **旧い名前の置き場が登録されていなければ、移さずに落ちる**（中身にも触らない）。
+        let (repo, commit) = repository("unregistered");
+        let old = old_worktree_path(&repo);
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("kept"), "other").unwrap();
+        let worktree = worktree_path(&repo);
+        let error = format!(
+            "{:#}",
+            prepare_worktree(&repo, &worktree, &commit).unwrap_err()
+        );
+        assert!(
+            error.contains(&old.display().to_string())
+                && error.contains(&worktree.display().to_string())
+                && error.contains("git worktree repair"),
+            "{error}"
+        );
+        assert!(!worktree.exists());
+        assert_eq!(fs::read_to_string(old.join("kept")).unwrap(), "other");
+
+        // **旧い名前の作業ツリーがメインの作業ツリーを指し返していなければ、`git worktree move` が断り、両方の道を
+        // 挙げて落ちる。** 登録は残る。
+        let (repo, commit) = repository("not-repaired");
+        let old = old_worktree_path(&repo);
+        let old_arg = old.to_string_lossy().into_owned();
+        run(
+            &repo,
+            &["worktree", "add", "-q", "--detach", &old_arg, &commit],
+        );
+        fs::write(
+            old.join(".git"),
+            format!("gitdir: {}\n", scratch.join("gone").join("wt1").display()),
+        )
+        .unwrap();
+        let worktree = worktree_path(&repo);
+        let error = format!(
+            "{:#}",
+            prepare_worktree(&repo, &worktree, &commit).unwrap_err()
+        );
+        assert!(
+            error.contains("could not move")
+                && error.contains(&old_arg)
+                && error.contains(&worktree.display().to_string()),
+            "{error}"
+        );
+        assert!(!worktree.exists());
+        assert!(listed(&repo).contains(&old_arg));
         let _ = fs::remove_dir_all(&scratch);
     }
 
