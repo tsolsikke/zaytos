@@ -439,6 +439,11 @@ fn run_serial_stress_on_ap(serial: &mut Serial, slot: usize) {
         core::hint::spin_loop();
     }
     for index in 0..SERIAL_STRESS_LINES {
+        // **開き直す形の演習（`serial-stress-reopen-test`）**: 1 行ごとに、シリアルを直に開いてから書く
+        // （タスクのデモの出力や、端末へ書くシステムコールと同じ形）。**開くたびに UART の設定を書き直すと、
+        // BSP が書いている途中の文字が欠ける。**
+        #[cfg(feature = "serial-stress-reopen-test")]
+        let serial = &mut common::machine::pc::open_direct_serial();
         let _ = writeln!(
             serial,
             "[INFO] serial-stress: cpu{slot} {index:04} {SERIAL_STRESS_PADDING}"

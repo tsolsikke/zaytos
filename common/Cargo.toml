@@ -65,6 +65,9 @@ width-always-one = []
 # 破壊（シリアルの排他の段）: UART の錠を取らない。2 コアが同時に書くと
 # 行がバイト単位で混ざる。kernel 側は serial-no-lock-test。
 serial-no-lock = []
+# 破壊: シリアルのポートを開くたびに、UART の設定を書き直す（2026-10-01 より前の形）。ほかの CPU が
+# 書いている途中に重なると、文字が欠ける。kernel 側は serial-reinit-every-open-test。
+serial-reinit-every-open = []
 
 # **ユーザープログラムは `--cfg` で同じ破壊を受ける**（`kernel/build.rs` の
 # `USER_PROGRAM_CFGS`）。**`common` を cargo が建てるときは feature、

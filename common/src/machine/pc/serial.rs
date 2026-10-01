@@ -6,7 +6,7 @@
 //! （unsafe は最小範囲に限定する）。
 
 use core::fmt;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::port::{inb, outb};
 
@@ -204,6 +204,119 @@ pub fn serial_reentry_count() -> u64 {
     UART_LOCK.reentered.load(Ordering::Relaxed)
 }
 
+/// UART の設定（[`Serial::init`] が書く 7 つのレジスタ）を、起動の 1 回だけ書くための印（2026-10-01）。
+///
+/// # 何を直すのか
+///
+/// **以前は、ポートを作る所がどこも、作るたびに設定を書き直していた**（30 か所。端末へ書くシステムコールや
+/// プログラムの起動のような、ふつうの経路を含む。実測で、起動から `init` を起こす手前までに 69 回書いていた）。
+/// **設定は DLAB を立てて分周を書き、送信の FIFO を空にする。**
+/// **その間は最内側のロックを取らないので、ほかの CPU が書いている途中に重なると、文字が欠ける。**
+/// 実測で、片方の CPU が 1 行ごとに開き直す形にすると、2 つの CPU が同時に書いた 400 行のうち
+/// 無傷は 360〜398 行だった（QEMU の `-smp 2`。30 回）。設定を 1 回だけにすると 400 行とも無傷になる（10 回）。
+///
+/// # 印は 3 つの状態を持つ
+///
+/// **まだ → 設定中 → 済み** の順に 1 度だけ進む。**最初に呼んだ所が設定を書く**——どの入口から来ても同じである
+/// （`kernel_main` の入口の確かめや、早いパニックは、起動の初めの `init` より前に書きうる）。
+///
+/// **設定中に来た呼び出しは、済むまで少しだけ待つ**（[`SETUP_WAIT_SPINS`]）。**待たずに書くと、DLAB が立っている
+/// 間に書くことになり、直そうとしている形を自分で作る。** **上限に着いたら、待つのをやめて出力を書く**
+/// （設定は書かない）——設定中の CPU が止まっていても、パニックの報告は止めない（`ADR-0003`）。
+/// 待つのをやめた回数は数えて出す（[`serial_setup_gave_up_count`]）。
+///
+/// **今のカーネルでは、設定中に別の CPU が来る形は起きない**（AP を起こすのは、`kernel_main` の初めの `init` の
+/// 後である）。待つ側は、契約として正しい側に倒してある。
+///
+/// # 印は 1 つである
+///
+/// **作れるポートは COM1 だけなので、印もモジュールに 1 つ持つ。** ブートローダとカーネルは別のバイナリなので、
+/// 印もそれぞれが持つ（カーネルは、ブートローダが書いた設定に頼らず、自分で 1 回書く）。
+struct UartSetup {
+    /// [`SETUP_NOT_YET`]・[`SETUP_IN_PROGRESS`]・[`SETUP_DONE`] のどれか。
+    state: AtomicU8,
+    /// 設定を書いた回数。**1 が正常である。**
+    writes: AtomicU64,
+    /// 設定中のまま上限に着いて、待つのをやめた回数。**0 が正常である。**
+    gave_up: AtomicU64,
+}
+
+const SETUP_NOT_YET: u8 = 0;
+const SETUP_IN_PROGRESS: u8 = 1;
+const SETUP_DONE: u8 = 2;
+
+/// 設定中の間、済むのを待つ回数の上限。
+///
+/// **測って決めた**（2026-10-01。QEMU の TCG、`-smp 2`。TSC のサイクル）。
+///
+/// | 測ったもの | サイクル |
+/// |---|---|
+/// | 設定を書く（7 つのレジスタ。18 回測った） | 14,774 〜 96,650 |
+/// | 10 万回待つ（9 回測った） | 8.7 × 10^7 〜 1.2 × 10^8 |
+/// | 100 万回待つ（9 回測った） | 8.9 × 10^8 〜 1.04 × 10^9 |
+///
+/// **10 万回は、測った中でいちばん長い設定の 900 倍以上である。** 100 万回でも足りるが、設定中の CPU が
+/// 止まったときに、ポートを作る所がどこも毎回この上限だけ待つので、長くしすぎない
+/// （[`WAIT_TIMEOUT_CYCLES`] の「大きくしすぎない理由」と同じ）。**実機では測っていない。**
+const SETUP_WAIT_SPINS: u32 = 100_000;
+
+static UART_SETUP: UartSetup = UartSetup {
+    state: AtomicU8::new(SETUP_NOT_YET),
+    writes: AtomicU64::new(0),
+    gave_up: AtomicU64::new(0),
+};
+
+/// [`take_setup_turn`] の答え。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetupTurn {
+    /// 最初の呼び出しである。**設定を書き、書き終えたら印を「済み」にする。**
+    Write,
+    /// 設定は済んでいる（待っている間に済んだ場合を含む）。**何もしない。**
+    AlreadyDone,
+    /// 設定中のまま上限に着いた。**待つのをやめて返る**（設定は書かない。呼び出し元は、そのまま出力を書く）。
+    GaveUp,
+}
+
+/// 設定を書く番かを決める（純粋な論理。印を「まだ」から「設定中」へ進めるのは、1 つの呼び出しだけである）。
+fn take_setup_turn(state: &AtomicU8, wait_spins: u32) -> SetupTurn {
+    match state.compare_exchange(
+        SETUP_NOT_YET,
+        SETUP_IN_PROGRESS,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => SetupTurn::Write,
+        Err(SETUP_DONE) => SetupTurn::AlreadyDone,
+        Err(_) => {
+            for _ in 0..wait_spins {
+                if state.load(Ordering::Acquire) == SETUP_DONE {
+                    return SetupTurn::AlreadyDone;
+                }
+                core::hint::spin_loop();
+            }
+            SetupTurn::GaveUp
+        }
+    }
+}
+
+/// UART の設定を書いた回数（計測）。**1 が正常である**——起動の 1 回だけ書く。
+///
+/// # 契約（境界の関数。2026-10-01）
+///
+/// - [`Serial::init`] がレジスタへ設定を書いた回数を読むだけで、何も変えない。
+pub fn serial_setup_write_count() -> u64 {
+    UART_SETUP.writes.load(Ordering::Relaxed)
+}
+
+/// 設定中のまま上限に着いて、待つのをやめた回数（計測）。**0 が正常である。**
+///
+/// # 契約（境界の関数。2026-10-01）
+///
+/// - [`Serial::init`] が、ほかの呼び出しの設定が済むのを待ち切れなかった回数を読むだけで、何も変えない。
+pub fn serial_setup_gave_up_count() -> u64 {
+    UART_SETUP.gave_up.load(Ordering::Relaxed)
+}
+
 /// COM1 の I/O ポートベースアドレス。
 const COM1_BASE: u16 = 0x3F8;
 
@@ -242,8 +355,17 @@ const BAUD_DIVISOR: u16 = (UART_CLOCK_HZ / BAUD_RATE) as u16;
 /// # 契約（境界の型。2026-09-30）
 ///
 /// - 共通の側が作るのは [`Serial::primary`]（ログに使う 1 本目のシリアル）と
-///   [`open_direct_serial`]（初期化して返す）だけである（`new` は外へ出していない）。直に開ける所は、
+///   [`open_direct_serial`]（設定の済んだポートを返す）だけである（`new` は外へ出していない）。直に開ける所は、
 ///   xtask の許可の表で数える。
+/// - UART の設定を書くのは、起動の 1 回だけである（[`Self::init`] の契約）。**COM1 のレジスタを書くのは、
+///   この module だけである**——`kernel`・`common`・`bootloader` でポートへ書く所を検索して確かめた
+///   （2026-10-01。読んだ範囲である）。ポートへ直に書く所は xtask の許可の表（`DIRECT_PORT_IO_ALLOWLIST`）が
+///   数えていて、ほかに書くのは、キーボードのコントローラ・PIC・PIT・PCI の設定の決まった番地と、PCI の装置が
+///   持つ I/O の範囲（番地は装置が決める）である。ユーザーのプログラムにポートへ書かせる入口は無い。
+///   そのため、パニックと例外の経路でも設定を書き直さない。
+///   **PCI の装置の I/O の範囲が COM1 の番地（`0x3F8` から 8 つ）と重なる割り当てになっていないことは、
+///   確かめていない**（ファームウェアが割り当てた番地を、そのまま使っている）。上の「この module だけ」は、
+///   重なっていないことを前提にしている。
 /// - 行を書く間の排他は `write_fmt` の中のロックが持つ（最内側。取れなければ、混ざるのを承知で
 ///   書く）。割り込みは止めない。
 /// - 割り込みの処理からは書かない（規約。モジュールの doc の「UART を書いている間の排他」）。
@@ -258,16 +380,48 @@ impl Serial {
         Self { base }
     }
 
-    /// ログに使う 1 本目のシリアル（PC では COM1）。**初期化はしない**——起動の初めに 1 度だけ [`Self::init`] する
-    /// （[`open_direct_serial`] は初期化して返す）。**書く前に初期化が済んでいること。**
+    /// ログに使う 1 本目のシリアル（PC では COM1）。**設定は書かない**——書く前に [`Self::init`] を呼ぶこと
+    /// （[`open_direct_serial`] は呼んでから返す）。**設定を実際に書くのは、最初の `init` だけである。**
     #[inline(always)]
     pub const fn primary() -> Self {
         Self::new(COM1_BASE)
     }
 
-    /// 16550 UART の標準的な初期化手順（割り込み無効化 → ボーレート設定
-    /// → 通信フォーマット設定 → FIFO 有効化 → モデム制御設定）を実行する。
+    /// UART の設定が済んでいるようにする。**設定を書くのは初めの 1 回だけで、2 回目からは何もしない。**
+    ///
+    /// # 契約（境界の関数。2026-10-01）
+    ///
+    /// - 初めの呼び出しが、16550 の設定（[`Self::write_setup`]）を書く。2 回目からの呼び出しは、レジスタに
+    ///   触らない。**名前は「初期化」のままだが、呼ぶたびに初期化し直すものではない**（呼び出し元は、ポートを
+    ///   作るたびに呼んでよい）。
+    /// - ほかの呼び出しが設定を書いている途中なら、済むまで少しだけ待つ。上限に着いたら、待つのをやめて返る
+    ///   （理由は [`UartSetup`]、上限は [`SETUP_WAIT_SPINS`]）。**上限は QEMU で測って決めた。実機では
+    ///   測っていない。**
+    /// - 設定を書く間は、最内側のロックを取らない（ほかの CPU がまだ動いていない、起動の初めに済む）。
     pub fn init(&mut self) {
+        // **破壊テスト（`serial-reinit-every-open`）**: 以前の形に戻す。**呼ばれるたびに設定を書き直す。**
+        // ほかの CPU が書いている途中に重なると、文字が欠ける。
+        if cfg!(feature = "serial-reinit-every-open") {
+            self.write_setup();
+            UART_SETUP.writes.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        match take_setup_turn(&UART_SETUP.state, SETUP_WAIT_SPINS) {
+            SetupTurn::Write => {
+                self.write_setup();
+                UART_SETUP.writes.fetch_add(1, Ordering::Relaxed);
+                UART_SETUP.state.store(SETUP_DONE, Ordering::Release);
+            }
+            SetupTurn::AlreadyDone => {}
+            SetupTurn::GaveUp => {
+                UART_SETUP.gave_up.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// 16550 UART の標準的な初期化手順（割り込み無効化 → ボーレート設定
+    /// → 通信フォーマット設定 → FIFO 有効化 → モデム制御設定）を実行する。**[`Self::init`] だけが呼ぶ。**
+    fn write_setup(&mut self) {
         // SAFETY: 触れるのは `self.base` を起点とする 16550 の既知のレジスタ
         // だけで、オフセットはいずれもこのモジュール内の定数である。ZeikOS は
         // COM1（0x3F8）を自分のログ出力にのみ使い、他の誰もこのポートを
@@ -346,7 +500,7 @@ impl fmt::Write for Serial {
 
 /// **ロガーも BKL も `Locked<T>` も通さずに、シリアルへ直に書くための入口**（2026-09-28。境界の段階の手順 2）。
 ///
-/// 初期化したポートを返す。**共通の側は返り値の型の名前を書かず、`write!` / `writeln!` で書くだけにする。**
+/// 設定の済んだポートを返す。**共通の側は返り値の型の名前を書かず、`write!` / `writeln!` で書くだけにする。**
 /// **PC では COM1（16550 互換の UART）を返す。** **ARM の機械では、同じ役目を別の UART（PL011 など）が担い、
 /// その機械の置き場が同じ名前の入口を持つ。**
 ///
@@ -363,10 +517,75 @@ impl fmt::Write for Serial {
 ///
 /// # 契約（境界の関数。2026-09-30）
 ///
-/// - 呼ぶたびに UART を初期化し直して返す（送信の FIFO も空にする）。初期化の間は、最内側のロックを取らない。
+/// - 設定の済んだポートを返す。**呼ぶたびに設定を書き直すことはしない**——設定を書くのは起動の 1 回だけで
+///   （[`Serial::init`] の契約）、ほかの CPU が書いている途中に開いても、その出力を壊さない。
+/// - 設定がまだなら、この呼び出しが書く（起動の初めの `init` より前に呼ばれた場合。[`UartSetup`]）。
 /// - 呼んでよい所と、書く間に取るロックは、上の 2 つの節のとおりである。
 pub fn open_direct_serial() -> Serial {
     let mut serial = Serial::new(COM1_BASE);
     serial.init();
     serial
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **最初の呼び出しだけが設定を書く番を取る。** 印は「設定中」へ進む。
+    #[test]
+    fn the_first_call_takes_the_turn_to_write_the_setup() {
+        let state = AtomicU8::new(SETUP_NOT_YET);
+        assert_eq!(take_setup_turn(&state, 8), SetupTurn::Write);
+        assert_eq!(state.load(Ordering::Acquire), SETUP_IN_PROGRESS);
+    }
+
+    /// **済んだ後の呼び出しは、何もしない。** 印も動かない。
+    #[test]
+    fn a_call_after_the_setup_is_done_does_nothing() {
+        let state = AtomicU8::new(SETUP_DONE);
+        assert_eq!(take_setup_turn(&state, 8), SetupTurn::AlreadyDone);
+        assert_eq!(take_setup_turn(&state, 0), SetupTurn::AlreadyDone);
+        assert_eq!(state.load(Ordering::Acquire), SETUP_DONE);
+    }
+
+    /// **設定中のまま上限に着いたら、待つのをやめる。** 番は取らず、印も動かさない
+    /// （設定を書いている側が、後で「済み」にする）。
+    #[test]
+    fn a_call_during_the_setup_gives_up_at_the_limit() {
+        let state = AtomicU8::new(SETUP_IN_PROGRESS);
+        assert_eq!(take_setup_turn(&state, 8), SetupTurn::GaveUp);
+        assert_eq!(take_setup_turn(&state, 0), SetupTurn::GaveUp);
+        assert_eq!(state.load(Ordering::Acquire), SETUP_IN_PROGRESS);
+    }
+
+    /// **設定中に来た呼び出しは、済むのを待ってから返る。** 別のスレッドが「済み」にするまで待ち、
+    /// 設定を書く番は取らない。
+    #[test]
+    fn a_call_during_the_setup_waits_until_it_is_done() {
+        let state = AtomicU8::new(SETUP_NOT_YET);
+        assert_eq!(take_setup_turn(&state, 0), SetupTurn::Write);
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| take_setup_turn(&state, u32::MAX));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            state.store(SETUP_DONE, Ordering::Release);
+            assert_eq!(waiter.join().unwrap(), SetupTurn::AlreadyDone);
+        });
+    }
+
+    /// **番を取れるのは、同時に呼んでも 1 つだけである。**
+    #[test]
+    fn only_one_of_many_callers_takes_the_turn() {
+        let state = AtomicU8::new(SETUP_NOT_YET);
+        let writers = std::thread::scope(|scope| {
+            let callers: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| take_setup_turn(&state, 0)))
+                .collect();
+            callers
+                .into_iter()
+                .map(|caller| caller.join().unwrap())
+                .filter(|turn| *turn == SetupTurn::Write)
+                .count()
+        });
+        assert_eq!(writers, 1);
+    }
 }

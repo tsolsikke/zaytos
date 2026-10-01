@@ -707,6 +707,12 @@ ttf-test = []
 serial-stress-test = []
 # 破壊（シリアルの排他の段）: UART の錠を取らない。上の演習で行が混ざる。
 serial-no-lock-test = ["serial-stress-test", "common/serial-no-lock"]
+# 上の演習の、AP の側が 1 行ごとにシリアルを直に開く形（2026-10-01）。開くたびに UART の設定を
+# 書き直していないことを見る。破壊ではない。
+serial-stress-reopen-test = ["serial-stress-test"]
+# 破壊: シリアルのポートを開くたびに、UART の設定を書き直す（以前の形）。上の開き直す形の演習で、
+# BSP の行の文字が欠ける。
+serial-reinit-every-open-test = ["serial-stress-reopen-test", "common/serial-reinit-every-open"]
 # 協調的スイッチで、次タスクの保存コンテキストの rbx を壊す。復帰した
 # タスクが GPR 照合で検出する。`cargo xtask run --task-test drop-reg`。
 task-switch-drop-reg = []

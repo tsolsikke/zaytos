@@ -2028,6 +2028,26 @@ extern "sysv64" fn kernel_main() -> ! {
         "interrupts: closed handler registration before init (sources with a handler: {registered})"
     ));
 
+    // **UART の設定を書いた回数を出す**（2026-10-01）。**起動の 1 回だけである**——ポートを作る所は、どこも
+    // `init` を呼ぶが、設定を書くのは最初の 1 回だけである（`common::machine::pc::Serial::init` の契約）。
+    // **起動時のプログラムを走らせ、AP を起こした後の、この時点で数える。**
+    {
+        let writes = common::machine::pc::serial_setup_write_count();
+        let gave_up = common::machine::pc::serial_setup_gave_up_count();
+        let level = if writes == 1 && gave_up == 0 {
+            LogLevel::Info
+        } else {
+            LogLevel::Error
+        };
+        logger.log(
+            level,
+            format_args!(
+                "serial: uart setup writes since the kernel started = {writes} (expected 1), \
+                 calls that gave up waiting for the setup = {gave_up} (expected 0)"
+            ),
+        );
+    }
+
     // 破壊テスト (2026-09-27, kernel-top-write-after-boot-test): **起動の後に、カーネル側の PML4 の空いた添字
     // （260）へマップしに行く。** **書く側の守りが、項目を作る前に名前つきで止めることを確かめる。**
     // **`kernel-top-write-unguarded-test` は、書く側の守りを外して同じ書き込みをする**——**次の
@@ -11244,6 +11264,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "serial-no-lock-test",
         cfg!(feature = "serial-no-lock-test"),
         "UART の錠を取らない。上の演習で行が混ざる",
+    ),
+    (
+        "serial-stress-reopen-test",
+        cfg!(feature = "serial-stress-reopen-test"),
+        "上の演習で、AP の側が 1 行ごとにシリアルを直に開く（破壊ではない）",
+    ),
+    (
+        "serial-reinit-every-open-test",
+        cfg!(feature = "serial-reinit-every-open-test"),
+        "シリアルのポートを開くたびに UART の設定を書き直す。開き直す形の演習で文字が欠ける",
     ),
     (
         "shell-complete-no-common-prefix-test",

@@ -163,6 +163,11 @@ common::log::tests::lines_dropped_by_the_level_filter_are_not_counted
 common::log::tests::messages_at_or_above_min_level_are_kept
 common::log::tests::messages_below_min_level_are_dropped
 common::log::tests::one_log_line_is_written_with_a_single_write_fmt_call
+common::machine::pc::serial::tests::a_call_after_the_setup_is_done_does_nothing
+common::machine::pc::serial::tests::a_call_during_the_setup_gives_up_at_the_limit
+common::machine::pc::serial::tests::a_call_during_the_setup_waits_until_it_is_done
+common::machine::pc::serial::tests::only_one_of_many_callers_takes_the_turn
+common::machine::pc::serial::tests::the_first_call_takes_the_turn_to_write_the_setup
 common::screen::line_shift_tests::a_count_past_the_bottom_clears_the_rest
 common::screen::line_shift_tests::a_row_past_the_bottom_does_nothing
 common::screen::line_shift_tests::deleting_a_line_pulls_the_rest_up_and_blanks_the_bottom

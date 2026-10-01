@@ -1752,7 +1752,7 @@ fn main() -> Result<()> {
        cargo xtask run --keymap-test [--sabotage]
        cargo xtask run --fp-test [--sabotage FEATURE]
        cargo xtask run --ttf-test [--sabotage FEATURE]
-       cargo xtask run --serial-test [--sabotage FEATURE]
+       cargo xtask run --serial-test [--reopen] [--sabotage FEATURE]
        cargo xtask run --machine-variant NAME [--sabotage FEATURE | --config FEATURE]   (ADR-0068。NAME は xtask/machine-variants.txt の名前)
        cargo xtask check [--update-reference]   (ホストテストの名前の集合を取り直す)
        cargo xtask run --boot-log-diff [--update-reference [--allow-shrink] [--only-masked]]\n       cargo xtask run --tool-checks
@@ -2060,7 +2060,13 @@ fn main() -> Result<()> {
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
                 let expect_pass = sabotage.is_empty();
-                return cmd_serial_test(&sabotage, expect_pass);
+                // **`--reopen` は、AP の側が 1 行ごとにシリアルを直に開く形で演習を回す**（2026-10-01）。
+                let mut features: Vec<&str> = Vec::new();
+                if rest.iter().any(|a| a == "--reopen") {
+                    features.push(SERIAL_REOPEN_FEATURE);
+                }
+                features.extend_from_slice(&sabotage);
+                return cmd_serial_test(&features, expect_pass);
             }
             // **Tab の補完の判定（TAB-1）。**
             if rest.iter().any(|a| a == "--complete-test") {
@@ -4467,6 +4473,20 @@ const TTF_TEST_SABOTAGES: &[&str] = &["fp-clobber-on-kernel-entry-test"];
 /// 222 / 160 / 191 本で、いちども 400 に届かない**）。
 const SERIAL_TEST_SABOTAGES: &[&str] = &["serial-no-lock-test"];
 
+/// `serial-test` の演習を、AP の側が 1 行ごとにシリアルを直に開く形で回す feature（2026-10-01）。
+///
+/// **開くたびに UART の設定を書き直していないことを見る。** 既定の演習は、ポートを CPU ごとに 1 度だけ作るので、
+/// 開き直す形を通らない。
+const SERIAL_REOPEN_FEATURE: &str = "serial-stress-reopen-test";
+
+/// 開き直す形の演習を「通らないこと」で実行する破壊テスト（2026-10-01）。
+///
+/// **1 つである。** **開くたびに UART の設定を書き直すと、BSP が書いている途中の文字が欠ける。**
+/// **30 回続けて落ちることを確かめた**（実測。2026-10-01。400 本のうち無傷は 360〜398 本で、いちども 400 に
+/// 届かない。398 本の回が 1 回在り、ほかは 394 本以下だった）。直した形は、10 回とも 400 本が無傷だった。
+/// （feature が [`SERIAL_REOPEN_FEATURE`] を含むので、破壊テストの名前だけを渡せばよい。）
+const SERIAL_REOPEN_SABOTAGES: &[&str] = &["serial-reinit-every-open-test"];
+
 /// 判定 1 の倍率（W2-c-2。`ADR-0061`）。
 ///
 /// **`read(0)` が空回りしていないことを、届いたバイト数との関係で見る。** **回数そのものは
@@ -6614,6 +6634,13 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
     NamedJudgement {
         check: "serial test",
         key: "serial-no-lock-test",
+        signs: &["every line the two cores wrote at the same time is intact = false"],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "serial test",
+        key: "serial-reinit-every-open-test",
         signs: &["every line the two cores wrote at the same time is intact = false"],
         note: "",
         reached: true,
@@ -20312,6 +20339,12 @@ const DIRECT_SERIAL_PORT_ALLOWLIST: &[DirectSerialPortSite] = &[
         item: "ap_after_switch",
         reason: "AP がスタックを切り替えた直後。BKL を取る区間は書き込みだけに絞ってある",
     },
+    DirectSerialPortSite {
+        file: "kernel/src/smp.rs",
+        item: "run_serial_stress_on_ap",
+        reason: "シリアルの排他の演習の、開き直す形（serial-stress-reopen-test）。1 行ごとに直に開くことが\
+                 演習の中身である",
+    },
     // (e) 同時進入の報告。**BKL の外にいることを報せる行なので、取れない。**
     DirectSerialPortSite {
         file: "kernel/src/arch/x86_64/idt/mod.rs",
@@ -20515,8 +20548,9 @@ const DIRECT_PORT_IO_ALLOWLIST: &[DirectPortIoSite] = &[
     // シリアル（COM1 だけ）。
     DirectPortIoSite {
         file: "common/src/machine/pc/serial.rs",
-        item: "init",
-        reason: "16550 の初期化の手順（COM1 の決まった番地。`Serial::new` は外へ出していない）",
+        item: "write_setup",
+        reason: "16550 の設定を書く手順（COM1 の決まった番地。`Serial::new` は外へ出していない。\
+                 呼ぶのは `Serial::init` だけで、書くのは起動の 1 回だけである）",
     },
     DirectPortIoSite {
         file: "common/src/machine/pc/serial.rs",
@@ -27624,6 +27658,40 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
         batch.run(&mut failed);
 
+        // **開き直す形の演習**（2026-10-01）。**AP の側が 1 行ごとにシリアルを直に開いても、BSP の行が
+        // 1 本も欠けないことを見る**——開くたびに UART の設定を書き直していないこと。
+        total += 1;
+        begin_item(
+            Family::Smp,
+            "a core that opens the serial port for every line does not tear the other core's lines",
+        );
+        match cmd_serial_test(&[SERIAL_REOPEN_FEATURE], true) {
+            Ok(()) => println!("--- serial test (reopen): OK"),
+            Err(error) => {
+                println!("--- serial test (reopen): FAILED ({error})");
+                failed.push("serial test (reopen)".to_string());
+            }
+        }
+        let mut batch = Batch::new("SERIAL_REOPEN_SABOTAGES");
+        for sabotage in SERIAL_REOPEN_SABOTAGES {
+            total += 1;
+            batch.add(sabotage, move |failed, _retries| {
+                let label = format!("serial-test {sabotage}");
+                begin_item(Family::Smp, &label);
+                match cmd_serial_test(&[sabotage], false) {
+                    Ok(()) => report_inverted_judgement("serial test", sabotage, &label, failed),
+                    Err(error) => {
+                        println!(
+                            "--- {label}: FAILED [{}] ({error})",
+                            failure_category(&error)
+                        );
+                        failed.push(label.to_string());
+                    }
+                }
+            });
+        }
+        batch.run(&mut failed);
+
         total += 1;
         begin_item(
             Family::Shell,
@@ -29543,6 +29611,7 @@ const ITEM_TABLES: &[(&str, usize)] = &[
     ("CONCURRENT_TEST_SABOTAGES", CONCURRENT_TEST_SABOTAGES.len()),
     ("TTF_TEST_SABOTAGES", TTF_TEST_SABOTAGES.len()),
     ("SERIAL_TEST_SABOTAGES", SERIAL_TEST_SABOTAGES.len()),
+    ("SERIAL_REOPEN_SABOTAGES", SERIAL_REOPEN_SABOTAGES.len()),
     ("FS_CREATE_SABOTAGES", FS_CREATE_SABOTAGES.len()),
     ("FS_MKDIR_SABOTAGES", FS_MKDIR_SABOTAGES.len()),
     ("FS_TRUNCATE_SABOTAGES", FS_TRUNCATE_SABOTAGES.len()),
@@ -29884,7 +29953,7 @@ fn count_elements(text: &str) -> usize {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 60,
-    full: 434,
+    full: 436,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -31380,6 +31449,7 @@ fn batched_table_rows(table: &str) -> Option<Vec<String>> {
         "CONCURRENT_TEST_SABOTAGES" => names(CONCURRENT_TEST_SABOTAGES),
         "TTF_TEST_SABOTAGES" => names(TTF_TEST_SABOTAGES),
         "SERIAL_TEST_SABOTAGES" => names(SERIAL_TEST_SABOTAGES),
+        "SERIAL_REOPEN_SABOTAGES" => names(SERIAL_REOPEN_SABOTAGES),
         "FS_CREATE_SABOTAGES" => cases(FS_CREATE_SABOTAGES, |(label, _)| label),
         "FS_MKDIR_SABOTAGES" => cases(FS_MKDIR_SABOTAGES, |(label, _)| label),
         "FS_TRUNCATE_SABOTAGES" => cases(FS_TRUNCATE_SABOTAGES, |(label, _)| label),
