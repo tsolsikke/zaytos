@@ -1,6 +1,6 @@
 # ZeikOS
 
-[![check](https://github.com/tsolsikke/zaytos/actions/workflows/check.yml/badge.svg)](https://github.com/tsolsikke/zaytos/actions/workflows/check.yml)
+[![check](https://github.com/tsolsikke/zeikos/actions/workflows/check.yml/badge.svg)](https://github.com/tsolsikke/zeikos/actions/workflows/check.yml)
 
 ZeikOS is an educational x86_64 operating system written in Rust, featuring a
 custom UEFI bootloader, SMP, Ring 3 user space, persistent ext2 storage, a shell,
