@@ -10,9 +10,25 @@
 //! 1 行に、`cargo xtask` に渡す引数を 1 つ分書く（例: `run --smp-ap-test ap-timer`）。空の行と `#` で始まる行は
 //! 読まない。引数は空白で分ける（引用符は読まない）。
 //!
-//! **行の頭に `!` を書いた行は、落ちるのが正しい行である**（破壊テストなど。例: `!run --virtio-irq-test --sabotage
-//! virtio-skip-eoi-test`）。落ちたら通過と数え、**通ったら落ちと数える**——落ちるはずの行が通ったのは、破壊テストが
-//! 働いていないことだからである（2026-09-29。運用者の決定）。
+//! **行の頭に `!` を書いた行は、落ちるのが正しい行である**（破壊テストなど）。**`!` のすぐ後に、子の記録に出るはずの
+//! 文言を `"` で囲んで書く**（2026-10-02）。例:
+//!
+//! ```text
+//! !"application processor stacks | 4K: cache 0 -> 2" run --page-permissions --sabotage ap-stacks-uncached-test
+//! ```
+//!
+//! **通過と数えるのは、子が落ち、しかも狙いの文言が子の記録に在るときだけである。** 次の形は、どれも落ちと数え、
+//! 理由を結果の行に出す。
+//!
+//! - 子が通った（落ちるはずの行が通ったのは、破壊テストが働いていないことである。2026-09-29。運用者の決定）。
+//! - 検査装置の故障で落ちた（ビルドの失敗、QEMU を起動できない、など）。
+//! - 実行が失敗の期限に着いた、またはログの上限で切られた（途中までの出力で落ちたのであって、狙いの判定で
+//!   落ちたのではない）。
+//! - 検査の錠が断った（全検査の間に走らせた）。
+//! - 落ちたが、狙いの文言が記録に無い（別の理由で落ちた）。
+//!
+//! **文言の無い `!` の行は、一覧を読む所で断る。** 以前は、子の終了の値が 0 でなければ何で落ちても通過と数えていた
+//! ——ビルドが落ちた行も、期限に着いた行も通過になり、破壊テストが働いていなくても「通った」と出た。
 //!
 //! # 出力
 //!
@@ -38,6 +54,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
+use crate::check_lock::REFUSED_EXIT_CODE;
+use crate::launch::{HARNESS_FAULT_MARK, REACHED_DEADLINE_MARK, RUN_WAS_CUT_MARK};
 use crate::run_dir::RunDir;
 
 /// 1 本の試験の上限（越えたら子を止める。上限の無い待ちを書かない）。
@@ -52,43 +70,111 @@ pub struct Entry {
     /// 一覧に書いたとおりの行（結果の行に出す）。
     pub line: String,
     pub args: Vec<String>,
-    /// 落ちるのが正しい行か（行の頭の `!`）。
-    pub expect_failure: bool,
+    /// 落ちるのが正しい行（行の頭の `!`）なら、子の記録に出るはずの文言。
+    pub must_fail_with: Option<String>,
 }
 
-/// 一覧を読む（純粋な論理）。
-pub fn parse_list(text: &str) -> Vec<Entry> {
+/// 一覧を読む（純粋な論理）。**`!` の行に文言が無ければ、その行を挙げて断る。**
+pub fn parse_list(text: &str) -> Result<Vec<Entry>, String> {
     text.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(|line| {
-            let (expect_failure, command) = match line.strip_prefix('!') {
-                Some(rest) => (true, rest),
-                None => (false, line),
+            let (must_fail_with, command) = match line.strip_prefix('!') {
+                Some(rest) => {
+                    let (phrase, command) = expected_phrase(rest).ok_or_else(|| {
+                        format!(
+                            "a row marked with ! must name what its log will say, as \
+                             !\"expected words\" <arguments>: {line}"
+                        )
+                    })?;
+                    (Some(phrase.to_string()), command)
+                }
+                None => (None, line),
             };
-            Entry {
-                line: line.to_string(),
-                args: command.split_whitespace().map(str::to_string).collect(),
-                expect_failure,
+            let args: Vec<String> = command.split_whitespace().map(str::to_string).collect();
+            if args.is_empty() {
+                return Err(format!("a row with no arguments: {line}"));
             }
+            Ok(Entry {
+                line: line.to_string(),
+                args,
+                must_fail_with,
+            })
         })
         .collect()
 }
 
-/// 1 本の判定（純粋な論理）。**落ちるのが正しい行は、落ちたら通過、通ったら落ちである。** シグナルで終わった行と、
-/// 上限を越えて止めた行は、どちらの行でも落ちとする（終わった理由が試験の判定ではない）。
-fn verdict(outcome: &Outcome, expect_failure: bool) -> (bool, String) {
-    match (outcome, expect_failure) {
-        (Outcome::Exited(0), false) => (true, "PASS".to_string()),
-        (Outcome::Exited(code), false) => (false, format!("FAIL (exit {code})")),
-        (Outcome::Exited(0), true) => (false, "FAIL (exit 0, but it must fail)".to_string()),
-        (Outcome::Exited(code), true) => (true, format!("PASS (failed as it must, exit {code})")),
+/// `!` の後ろを、`"` で囲んだ文言と、残りの引数に分ける（純粋な論理）。**文言が無い・閉じていない・空なら `None`。**
+fn expected_phrase(after_mark: &str) -> Option<(&str, &str)> {
+    let rest = after_mark.trim_start().strip_prefix('"')?;
+    let (phrase, command) = rest.split_once('"')?;
+    if phrase.trim().is_empty() {
+        return None;
+    }
+    Some((phrase, command))
+}
+
+/// 1 本の判定（純粋な論理）。`log` は子の記録（標準出力と標準エラー）。
+///
+/// **落ちるのが正しい行は、子が落ち、狙いの文言が記録に在るときだけ通過である。** 通った行、検査装置の故障・期限・
+/// ログの上限・検査の錠の断りで落ちた行、狙いの文言が無い行は、理由つきで落ちとする（モジュールの doc の
+/// 「一覧の形」）。シグナルで終わった行と、上限を越えて止めた行は、どちらの行でも落ちとする（終わった理由が
+/// 試験の判定ではない）。
+fn verdict(outcome: &Outcome, must_fail_with: Option<&str>, log: &str) -> (bool, String) {
+    match (outcome, must_fail_with) {
         (Outcome::Signalled, _) => (false, "FAIL (killed by a signal)".to_string()),
         (Outcome::TimedOut, _) => (
             false,
             format!("FAIL (over {} s; stopped)", PER_TEST_LIMIT.as_secs()),
         ),
+        (Outcome::Exited(0), None) => (true, "PASS".to_string()),
+        (Outcome::Exited(code), None) => (false, format!("FAIL (exit {code})")),
+        (Outcome::Exited(0), Some(_)) => (false, "FAIL (exit 0, but it must fail)".to_string()),
+        (Outcome::Exited(code), Some(phrase)) => {
+            if let Some(reason) = failed_on_the_run_side(*code, log) {
+                (
+                    false,
+                    format!("FAIL ({reason}; not the failure it must show)"),
+                )
+            } else if log.contains(phrase) {
+                (
+                    true,
+                    format!("PASS (failed as it must, exit {code}; the log says {phrase:?})"),
+                )
+            } else {
+                (
+                    false,
+                    format!("FAIL (failed with exit {code}, but the log does not say {phrase:?})"),
+                )
+            }
+        }
     }
+}
+
+/// 落ちた子が、試験の判定ではなく、実行の側の理由で落ちていたか（純粋な論理）。**理由を返す。**
+///
+/// 全検査が破壊テストに使う分け方と同じである（`sabotage_run_problem`）——検査装置の故障、ログの上限で切った実行、
+/// 失敗の期限に着いた実行。`run-set` は子の記録を読むので、行の目印で見分ける（書く側と同じ定数）。
+fn failed_on_the_run_side(code: i32, log: &str) -> Option<String> {
+    if code == REFUSED_EXIT_CODE {
+        return Some(format!("the check lock refused the run, exit {code}"));
+    }
+    let line_with = |mark: &str| {
+        log.lines()
+            .find(|line| line.contains(mark))
+            .map(|line| line.trim().chars().take(160).collect::<String>())
+    };
+    if let Some(line) = line_with(HARNESS_FAULT_MARK) {
+        return Some(format!("the harness failed: {line}"));
+    }
+    if let Some(line) = line_with(RUN_WAS_CUT_MARK) {
+        return Some(format!("a run was cut at the log limit: {line}"));
+    }
+    if let Some(line) = line_with(REACHED_DEADLINE_MARK) {
+        return Some(format!("a run reached its deadline: {line}"));
+    }
+    None
 }
 
 /// 1 本の結果。
@@ -147,7 +233,8 @@ pub fn cmd_run_set(workspace_root: &Path, args: &[String]) -> Result<()> {
         list.context("run-set needs a list file (one `cargo xtask` argument list per line)")?;
     let text =
         fs::read_to_string(&list).with_context(|| format!("could not read {}", list.display()))?;
-    let entries = parse_list(&text);
+    let entries =
+        parse_list(&text).map_err(|problem| anyhow::anyhow!("{}: {problem}", list.display()))?;
     if entries.is_empty() {
         bail!("{} lists no test", list.display());
     }
@@ -211,7 +298,11 @@ pub fn cmd_run_set(workspace_root: &Path, args: &[String]) -> Result<()> {
             continue;
         };
         sum += result.took;
-        let (passed, verdict) = verdict(&result.outcome, entry.expect_failure);
+        // 子の記録を読む（落ちるのが正しい行の判定に使う。読めなければ空として扱い、文言は見つからない）。
+        let log = fs::read(&result.log)
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        let (passed, verdict) = verdict(&result.outcome, entry.must_fail_with.as_deref(), &log);
         if !passed {
             failed += 1;
         }
@@ -335,19 +426,26 @@ mod tests {
     #[test]
     fn a_list_is_read_one_test_per_line() {
         let entries =
-            parse_list("# 9f の確かめ\n\nrun --acpi-smp-test\n  run --smp-ap-test ap-timer  \n");
+            parse_list("# 9f の確かめ\n\nrun --acpi-smp-test\n  run --smp-ap-test ap-timer  \n")
+                .unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].args, vec!["run", "--acpi-smp-test"]);
         assert_eq!(entries[1].line, "run --smp-ap-test ap-timer");
         assert_eq!(entries[1].args, vec!["run", "--smp-ap-test", "ap-timer"]);
-        assert!(!entries[1].expect_failure);
+        assert_eq!(entries[1].must_fail_with, None);
     }
 
-    /// **行の頭の `!` は、落ちるのが正しい行である。** **落ちたら通過、通ったら落ち。** シグナルと上限は、どちらでも落ち。
+    /// **行の頭の `!` は、落ちるのが正しい行で、すぐ後に狙いの文言を `"` で囲んで書く。** 文言の中の空白は保つ。
     #[test]
-    fn a_row_marked_to_fail_passes_only_when_it_fails() {
-        let entries = parse_list("!run --pipe-test --sabotage pipe-reader-not-reserved\n");
-        assert!(entries[0].expect_failure);
+    fn a_row_marked_to_fail_names_what_its_log_will_say() {
+        let entries = parse_list(
+            "!\"is intact = false\" run --pipe-test --sabotage pipe-reader-not-reserved\n",
+        )
+        .unwrap();
+        assert_eq!(
+            entries[0].must_fail_with.as_deref(),
+            Some("is intact = false")
+        );
         assert_eq!(
             entries[0].args,
             vec![
@@ -359,14 +457,93 @@ mod tests {
         );
         assert_eq!(
             entries[0].line,
-            "!run --pipe-test --sabotage pipe-reader-not-reserved"
+            "!\"is intact = false\" run --pipe-test --sabotage pipe-reader-not-reserved"
         );
-        assert!(verdict(&Outcome::Exited(1), true).0);
-        assert!(!verdict(&Outcome::Exited(0), true).0);
-        assert!(verdict(&Outcome::Exited(0), false).0);
-        assert!(!verdict(&Outcome::Exited(1), false).0);
-        assert!(!verdict(&Outcome::Signalled, true).0);
-        assert!(!verdict(&Outcome::TimedOut, true).0);
+        // `!` と文言の間の空白は読み飛ばす。
+        let spaced = parse_list("!  \"w 0 -> 1\"   run --page-permissions\n").unwrap();
+        assert_eq!(spaced[0].must_fail_with.as_deref(), Some("w 0 -> 1"));
+        assert_eq!(spaced[0].args, vec!["run", "--page-permissions"]);
+    }
+
+    /// **文言の無い `!` の行は断る**（以前の形。何で落ちても通過と数えていた）。閉じていない文言・空の文言・
+    /// 引数の無い行も断る。断りは、その行を挙げる。
+    #[test]
+    fn a_row_marked_to_fail_without_the_expected_words_is_refused() {
+        for list in [
+            "!run --pipe-test --sabotage pipe-reader-not-reserved\n",
+            "!\"never closed run --pipe-test\n",
+            "!\"\" run --pipe-test\n",
+            "!\"   \" run --pipe-test\n",
+            "!\"words\"\n",
+        ] {
+            let problem = parse_list(list).unwrap_err();
+            assert!(problem.contains(list.trim()), "{problem}");
+        }
+        // ほかの行が正しくても、1 行でも断る行が在れば一覧ごと断る。
+        assert!(parse_list("run --acpi-smp-test\n!run --pipe-test\n").is_err());
+    }
+
+    /// **ふつうの行は、終了の値だけで決まる。** 記録の中身は見ない。
+    #[test]
+    fn a_plain_row_is_judged_by_its_exit_code() {
+        assert!(verdict(&Outcome::Exited(0), None, "harness fault: x").0);
+        assert!(!verdict(&Outcome::Exited(1), None, "").0);
+        assert!(!verdict(&Outcome::Signalled, None, "").0);
+        assert!(!verdict(&Outcome::TimedOut, None, "").0);
+    }
+
+    /// **落ちるのが正しい行は、子が落ち、狙いの文言が記録に在るときだけ通過である。**
+    #[test]
+    fn a_row_marked_to_fail_passes_only_when_the_log_says_the_expected_words() {
+        let log = "page permissions: user program hello | segment 0 | 4K: w 0 -> 1\n\
+                   Error: page permissions: 1 difference(s) from the reference\n";
+        let (passed, text) = verdict(&Outcome::Exited(1), Some("segment 0 | 4K: w 0 -> 1"), log);
+        assert!(passed, "{text}");
+        assert!(text.starts_with("PASS (failed as it must"), "{text}");
+        // 通った行は落ち。
+        let (passed, text) = verdict(&Outcome::Exited(0), Some("segment 0 | 4K: w 0 -> 1"), log);
+        assert!(!passed);
+        assert!(text.contains("it must fail"), "{text}");
+        // 落ちたが、狙いの文言が無い行は落ち。理由に文言を出す。
+        let (passed, text) = verdict(&Outcome::Exited(1), Some("cache 0 -> 2"), log);
+        assert!(!passed);
+        assert!(text.contains("does not say \"cache 0 -> 2\""), "{text}");
+        // シグナルと上限は、文言が在っても落ち。
+        assert!(!verdict(&Outcome::Signalled, Some("w 0 -> 1"), log).0);
+        assert!(!verdict(&Outcome::TimedOut, Some("w 0 -> 1"), log).0);
+    }
+
+    /// **実行の側の理由で落ちた行は、狙いの文言が記録に在っても落ちである**——検査装置の故障（ビルドの失敗など）、
+    /// 失敗の期限に着いた実行、ログの上限で切った実行、検査の錠の断り。理由を名前つきで出す。
+    #[test]
+    fn a_row_that_failed_on_the_run_side_is_not_counted_as_the_expected_failure() {
+        let words = "w 0 -> 1";
+        let build = format!(
+            "{words}\nError: {HARNESS_FAULT_MARK}building the kernel: kernel build failed\n"
+        );
+        let (passed, text) = verdict(&Outcome::Exited(1), Some(words), &build);
+        assert!(!passed);
+        assert!(text.contains("the harness failed"), "{text}");
+
+        let deadline =
+            format!("page-permissions: (info) {REACHED_DEADLINE_MARK} (90.1s)\n{words}\n");
+        let (passed, text) = verdict(&Outcome::Exited(1), Some(words), &deadline);
+        assert!(!passed);
+        assert!(text.contains("a run reached its deadline"), "{text}");
+
+        let cut = format!(
+            "serial-test: (warn) {RUN_WAS_CUT_MARK}: serial.log grew past the limit\n{words}\n"
+        );
+        let (passed, text) = verdict(&Outcome::Exited(1), Some(words), &cut);
+        assert!(!passed);
+        assert!(text.contains("a run was cut"), "{text}");
+
+        let (passed, text) = verdict(&Outcome::Exited(REFUSED_EXIT_CODE), Some(words), words);
+        assert!(!passed);
+        assert!(text.contains("the check lock refused"), "{text}");
+
+        // 目印が無ければ、実行の側の理由ではない。
+        assert_eq!(failed_on_the_run_side(1, words), None);
     }
 
     /// **親の pid は名前の括弧の後から読む。** **子孫は深い方から並び、自分の組で走る QEMU も入る。**

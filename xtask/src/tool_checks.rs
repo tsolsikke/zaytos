@@ -55,14 +55,98 @@ fn succeeded(script: &str, output: &Output) -> Result<String> {
 
 /// `cargo xtask run-set`——**通る行と、`!` を付けた落ちるのが正しい行の 2 行を 2 本ずつで回し、2 行とも通過と数えて
 /// まとめの行を出すこと**（2026-09-29。運用者の決定）。**QEMU を起動しない行だけで組む**——通る行は
-/// `full --status`（読むだけ）、落ちる行は知らない命令である（知らない引数は、`run` が既定の起動に読み替える）。
+/// `full --status`（読むだけ）、落ちる行は知らない命令である（狙いの文言は、知らない命令を断る行）。
+///
+/// **落ちるのが正しい行が、何で落ちても通過になる形でないことも見る**（2026-10-02）——同じ命令に、記録に出ない
+/// 文言を書いた一覧は、落ちと数えて 0 でない値で終わる。文言の無い `!` の行は、一覧を読む所で断る。
 pub(super) fn run_set(root: &Path) -> Result<String> {
-    let list = scratch_dir(root)?.join("run-set-list.txt");
-    fs::write(
-        &list,
-        "# 手で使う道具の軽い確かめ（run-set）\nfull --status\n!not-a-command-for-the-tool-check\n",
-    )
-    .with_context(|| format!("failed to write {}", list.display()))?;
+    let passing = run_set_once(
+        root,
+        "run-set-list.txt",
+        "# 手で使う道具の軽い確かめ（run-set）\nfull --status\n\
+         !\"unknown xtask subcommand\" not-a-command-for-the-tool-check\n",
+    )?;
+    if !passing.succeeded {
+        bail!(
+            "cargo xtask run-set failed on the list of two passing rows: {}",
+            passing.summary()
+        );
+    }
+    if !passing
+        .stdout
+        .lines()
+        .any(|line| line.starts_with("PASS (failed as it must"))
+    {
+        bail!(
+            "the row marked with ! was not counted as a pass: {}",
+            passing.stdout
+        );
+    }
+    let summary = passing
+        .stdout
+        .lines()
+        .find(|line| line.starts_with("run-set: 2 test(s), 2 passed, 0 failed"))
+        .with_context(|| format!("no summary line of 2 passed rows: {}", passing.stdout))?
+        .to_string();
+
+    // **狙いの文言が記録に無ければ、落ちても通過にしない。**
+    let wrong_words = run_set_once(
+        root,
+        "run-set-list-wrong-words.txt",
+        "!\"words the log will not carry\" not-a-command-for-the-tool-check\n",
+    )?;
+    if wrong_words.succeeded
+        || !wrong_words
+            .stdout
+            .lines()
+            .any(|line| line.starts_with("FAIL (failed with exit") && line.contains("does not say"))
+    {
+        bail!(
+            "a row marked with ! that failed without the expected words was not counted as a \
+             failure: {}",
+            wrong_words.summary()
+        );
+    }
+
+    // **文言の無い `!` の行は、走らせる前に断る。**
+    let no_words = run_set_once(
+        root,
+        "run-set-list-no-words.txt",
+        "!not-a-command-for-the-tool-check\n",
+    )?;
+    if no_words.succeeded || !no_words.stderr.contains("must name what its log will say") {
+        bail!(
+            "a row marked with ! without the expected words was not refused: {}",
+            no_words.summary()
+        );
+    }
+    Ok(format!(
+        "{summary}; a ! row with the wrong words fails, and one without words is refused"
+    ))
+}
+
+/// [`run_set`] の 1 回の実行の結果。
+struct RunSetOutput {
+    succeeded: bool,
+    stdout: String,
+    stderr: String,
+}
+
+impl RunSetOutput {
+    /// 失敗の文に出す、短くした出力。
+    fn summary(&self) -> String {
+        format!(
+            "{}{}",
+            self.stdout.chars().take(600).collect::<String>(),
+            self.stderr.chars().take(400).collect::<String>()
+        )
+    }
+}
+
+/// 一覧を書いて、`cargo xtask run-set --jobs 2` を 1 回実行する。
+fn run_set_once(root: &Path, name: &str, list_text: &str) -> Result<RunSetOutput> {
+    let list = scratch_dir(root)?.join(name);
+    fs::write(&list, list_text).with_context(|| format!("failed to write {}", list.display()))?;
     let program = std::env::current_exe().context("could not find the xtask binary")?;
     let mut command = std::process::Command::new(program);
     command
@@ -73,29 +157,11 @@ pub(super) fn run_set(root: &Path) -> Result<String> {
     let output = command
         .output()
         .context("failed to run cargo xtask run-set")?;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    if !output.status.success() {
-        bail!(
-            "cargo xtask run-set exited with {}: {}{}",
-            output.status,
-            stdout.chars().take(600).collect::<String>(),
-            String::from_utf8_lossy(&output.stderr)
-                .chars()
-                .take(400)
-                .collect::<String>()
-        );
-    }
-    if !stdout
-        .lines()
-        .any(|line| line.starts_with("PASS (failed as it must"))
-    {
-        bail!("the row marked with ! was not counted as a pass: {stdout}");
-    }
-    let summary = stdout
-        .lines()
-        .find(|line| line.starts_with("run-set: 2 test(s), 2 passed, 0 failed"))
-        .with_context(|| format!("no summary line of 2 passed rows: {stdout}"))?;
-    Ok(summary.to_string())
+    Ok(RunSetOutput {
+        succeeded: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
 }
 
 /// `tools/boot-log-compare.py`——**参照をそれ自身と比べて 0 行、1 行だけ変えたコピーと比べて 1 行。**

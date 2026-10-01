@@ -170,6 +170,16 @@ impl fmt::Display for Cut {
     }
 }
 
+/// 検査装置の故障の行の目印（[`HarnessFault`] の表示の頭）。**`run-set` が、子の記録からこの行を探す**
+/// （`crate::run_set`。書く側と読む側で、同じ定数を使う）。
+pub const HARNESS_FAULT_MARK: &str = "harness fault: ";
+
+/// 実行が失敗の期限に着いたことを出す行の目印（[`Child::finish`] が出す）。**`run-set` が、子の記録から探す。**
+pub const REACHED_DEADLINE_MARK: &str = "the run reached its failure deadline";
+
+/// 実行をログの上限で切ったことを出す行の目印（同上）。**`run-set` が、子の記録から探す。**
+pub const RUN_WAS_CUT_MARK: &str = "the run was cut";
+
 /// 検査装置の故障（[`classify`] で `harness` に分ける）。**QEMU を起動できない、準備やビルドの失敗、
 /// 空きが足りない。**
 #[derive(Debug)]
@@ -177,7 +187,7 @@ pub struct HarnessFault(pub String);
 
 impl fmt::Display for HarnessFault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "harness fault: {}", self.0)
+        write!(f, "{HARNESS_FAULT_MARK}{}", self.0)
     }
 }
 
@@ -970,13 +980,13 @@ impl QemuRun {
             largest_output: self.watch.largest.load(Ordering::SeqCst),
         };
         if let Some(cut) = &record.cut {
-            println!("{}: (warn) the run was cut: {cut}", self.what);
+            println!("{}: (warn) {RUN_WAS_CUT_MARK}: {cut}", self.what);
         }
         // **失敗の期限に着いた実行を出す**（2026-09-26。計器の外の破壊を絞る段の B）——**破壊テストの実行の判定が
         // 読むのは記録の側だが、ログから期限の終わりを見分けられなかった。**
         if record.reached_deadline {
             println!(
-                "{}: (info) the run reached its failure deadline ({:.1}s)",
+                "{}: (info) {REACHED_DEADLINE_MARK} ({:.1}s)",
                 self.what,
                 elapsed.as_secs_f64()
             );
