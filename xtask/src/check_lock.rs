@@ -1520,10 +1520,10 @@ mod tests {
         let vms = Refusal {
             holders: Vec::new(),
             content: String::new(),
-            vms: vec!["zaytos-hw-e".to_string()],
+            vms: vec!["zeikos-hw-e".to_string()],
         };
         let text = refusal_message("cargo xtask check --full", path, &vms);
-        assert!(text.contains("zaytos-hw-e"), "{text}");
+        assert!(text.contains("zeikos-hw-e"), "{text}");
         assert!(text.contains("tools/vbox-vm.py stop --name"), "{text}");
         assert!(text.contains("exit 75"), "{text}");
     }

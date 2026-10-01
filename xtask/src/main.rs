@@ -26378,7 +26378,7 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
     total += 1;
     begin_item(
         Family::Base,
-        "the VirtualBox tool refuses names without the zaytos- prefix",
+        "the VirtualBox tool refuses names without the zeikos- prefix",
     );
     match check_vbox_tool(&workspace_root) {
         Ok(message) => println!("--- VirtualBox tool: OK ({message})"),

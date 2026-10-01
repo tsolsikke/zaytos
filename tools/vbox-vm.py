@@ -5,7 +5,8 @@
 
 # 接頭辞の無い名前は、`VBoxManage` を 1 度も呼ばずに拒む
 
-**名前は `zaytos-` で始まり、小文字と数字と `-` だけであること**（[`NAME`]）。
+**名前は `zeikos-` で始まり、小文字と数字と `-` だけであること**（[`NAME`]）。**接頭辞は 2026-10-01 に
+`zaytos-` から変えた。旧い接頭辞の名前も拒む**（[`REFUSED_NAMES`]。2 つを同時に受ける時期は作らない）。
 **合わない名前は、どのコマンドでも、外の道具を呼ぶ前に拒む**（運用者の決定。2026-09-22）。
 **`selftest` がそれを確かめる**——**`VBoxManage` を呼んだら失敗する走り手に差し替えて、
 拒む名前を全部のコマンドへ渡す。** **`cargo xtask check` が毎回回す。**
@@ -41,14 +42,14 @@
 # 使い方
 
     python3 tools/vbox-vm.py selftest
-    python3 tools/vbox-vm.py create --name zaytos-hw-e --image target/media/zeikos.img
-    python3 tools/vbox-vm.py run    --name zaytos-hw-e
-    cargo xtask judge-vbox target/vbox/zaytos-hw-e/<時刻>
-    python3 tools/vbox-vm.py start  --name zaytos-hw-e --gui
-    python3 tools/vbox-vm.py log    --name zaytos-hw-e
-    python3 tools/vbox-vm.py screenshot --name zaytos-hw-e
-    python3 tools/vbox-vm.py stop   --name zaytos-hw-e
-    python3 tools/vbox-vm.py delete --name zaytos-hw-e
+    python3 tools/vbox-vm.py create --name zeikos-hw-e --image target/media/zeikos.img
+    python3 tools/vbox-vm.py run    --name zeikos-hw-e
+    cargo xtask judge-vbox target/vbox/zeikos-hw-e/<時刻>
+    python3 tools/vbox-vm.py start  --name zeikos-hw-e --gui
+    python3 tools/vbox-vm.py log    --name zeikos-hw-e
+    python3 tools/vbox-vm.py screenshot --name zeikos-hw-e
+    python3 tools/vbox-vm.py stop   --name zeikos-hw-e
+    python3 tools/vbox-vm.py delete --name zeikos-hw-e
 
 # 全検査の間は VM を起こさない（2026-09-25。検査の体系の改善の ③）
 
@@ -94,11 +95,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # **全検査の間は VM を起動しない**（`tools/check_lock.py`。2026-09-25。検査の体系の改善の ③）。
 import check_lock  # noqa: E402
 
-#: 名前の形。**`zaytos-` で始まり、続きは小文字・数字・`-` で 1〜24 文字。**
+#: 名前の形。**`zeikos-` で始まり、続きは小文字・数字・`-` で 1〜24 文字。**
 #:
 #: **大文字を許さない**——**Windows のパスは大文字小文字を区別しないので、
-#: `Zaytos-x` が既存の `zaytos-x` と同じフォルダを指しうる。**
-NAME = re.compile(r"zaytos-[a-z0-9][a-z0-9-]{0,23}")
+#: `Zeikos-x` が既存の `zeikos-x` と同じフォルダを指しうる。**
+NAME = re.compile(r"zeikos-[a-z0-9][a-z0-9-]{0,23}")
 
 #: VDI と `.vbox` の置き場（運用者の決定。2026-09-22）。
 DEFAULT_BASEFOLDER = r"D:\Users\User\VirtualBox VMs"
@@ -182,8 +183,8 @@ class Vm:
         self.basefolder_windows = basefolder
         self.basefolder = wsl_path(basefolder)
         self.folder = os.path.join(self.basefolder, self.name)
-        self.vdi = os.path.join(self.folder, "zaytos.vdi")
-        self.raw = os.path.join(self.folder, "zaytos-raw.img")
+        self.vdi = os.path.join(self.folder, "zeikos.vdi")
+        self.raw = os.path.join(self.folder, "zeikos-raw.img")
         self.serial = os.path.join(self.folder, "serial.log")
         self.vbox_log = os.path.join(self.folder, "Logs", "VBox.log")
 
@@ -502,27 +503,30 @@ def log(vm, lines):
         print(f"（{vm.serial} が無い）")
 
 
-#: `selftest` が拒まれることを確かめる名前。**接頭辞の無いものと、形の崩れたもの。**
+#: `selftest` が拒まれることを確かめる名前。**接頭辞の無いものと、形の崩れたものと、旧い接頭辞のもの。**
 REFUSED_NAMES = [
     "",
-    "zaytos",
-    "zaytos-",
-    "Zaytos-hw-e",
-    "zaytos-HW",
-    "zaytos-hw_e",
-    "zaytos-hw e",
-    "zaytos-hw-e/",
-    "zaytos-hw-e/..",
-    "../zaytos-hw-e",
-    "/zaytos-hw-e",
+    "zeikos",
+    "zeikos-",
+    "Zeikos-hw-e",
+    "zeikos-HW",
+    "zeikos-hw_e",
+    "zeikos-hw e",
+    "zeikos-hw-e/",
+    "zeikos-hw-e/..",
+    "../zeikos-hw-e",
+    "/zeikos-hw-e",
     "other-vm",
     "dev-machine",
-    "zaytos-" + "a" * 40,
+    "zeikos-" + "a" * 40,
+    # **旧い接頭辞**（2026-10-01 に変えた）。**旧い名前の VM を、名前を変えた後の道具が扱わないこと。**
+    "zaytos-hw-e",
+    "zaytos-probe-usb",
     None,
 ]
 
 #: 受ける名前。
-ACCEPTED_NAMES = ["zaytos-hw-e", "zaytos-a", "zaytos-media-only", "zaytos-1"]
+ACCEPTED_NAMES = ["zeikos-hw-e", "zeikos-a", "zeikos-media-only", "zeikos-1"]
 
 
 def selftest():
@@ -597,7 +601,7 @@ def lock_refusals():
     通っていた）。**名前だけを持つ VM を組んで渡す**——**錠を見る前に道を使わないことも、これで分かる。**
     """
     vm = Vm.__new__(Vm)
-    vm.name = guard("zaytos-selftest")
+    vm.name = guard("zeikos-selftest")
     calls = (("start", lambda: start(vm, False)), ("run", lambda: run(vm, "/dev/null", 1)))
     with tempfile.TemporaryDirectory(prefix="zeikos-vbox-selftest-") as directory:
         holder = subprocess.Popen(
@@ -621,10 +625,10 @@ def lock_refusals():
                         count += 1
                         continue
                 raise AssertionError(f"{command} が錠を別のプロセスが持つ間に断らなかった")
-            check_lock.mark_vbox_running("zaytos-selftest")
-            marker = os.path.join(check_lock.vbox_marker_dir(), "zaytos-selftest")
+            check_lock.mark_vbox_running("zeikos-selftest")
+            marker = os.path.join(check_lock.vbox_marker_dir(), "zeikos-selftest")
             assert os.path.isfile(marker), "「起こしたまま」の印が書けなかった"
-            check_lock.clear_vbox_running("zaytos-selftest")
+            check_lock.clear_vbox_running("zeikos-selftest")
             assert not os.path.exists(marker), "「起こしたまま」の印が消えなかった"
             return count
         finally:
@@ -635,7 +639,7 @@ def lock_refusals():
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="ZeikOS の起動媒体で VirtualBox の VM を扱う（zaytos- で始まる名前だけ）",
+        description="ZeikOS の起動媒体で VirtualBox の VM を扱う（zeikos- で始まる名前だけ）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -643,7 +647,7 @@ def main(argv=None):
         "command",
         choices=["create", "start", "stop", "delete", "log", "screenshot", "run", "selftest"],
     )
-    parser.add_argument("--name", help="VM の名前（zaytos- で始まること）")
+    parser.add_argument("--name", help="VM の名前（zeikos- で始まること）")
     parser.add_argument("--image", default="target/media/zeikos.img", help="起動媒体の像")
     parser.add_argument("--basefolder", default=DEFAULT_BASEFOLDER, help="VDI と .vbox の置き場")
     parser.add_argument("--memory", type=int, default=2048, help="メモリ（MiB）")
