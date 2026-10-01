@@ -46,6 +46,7 @@ pub mod interrupts;
 pub mod keyboard;
 pub mod machine;
 pub mod memory_map;
+pub mod page_survey;
 pub mod paging;
 pub mod pipe;
 pub mod quarantine;

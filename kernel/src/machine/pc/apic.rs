@@ -283,6 +283,14 @@ fn map_mmio_page<const CAP: usize>(
         return None;
     }
     let virt = direct_map.phys_to_virt(phys);
+    // **写すページを、ページの権限の一覧（`crate::page_survey`）に登録する。** 直接写像の窓の中で、ここだけ
+    // キャッシュ無効で写す。
+    crate::page_survey::register(
+        "interrupt controller registers",
+        virt.as_u64(),
+        virt.as_u64() + FRAME_SIZE,
+        true,
+    );
 
     // SAFETY: 呼び出し位置の契約（`map_and_probe` の doc）により、CR3 は自前の
     // ページテーブルを指し、登録 direct map ウィンドウは高位で稼働している。

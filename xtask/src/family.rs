@@ -159,6 +159,8 @@ pub const PATH_RULES: &[PathRule] = &[
             "kernel/src/bkl.rs",
             "kernel/src/frame_allocator.rs",
             "kernel/src/memory_map.rs",
+            // **ページの権限の一覧**——**既定の起動が時点ごとに要約を出し、どのユーザーのプログラムの終わりでも出す。**
+            "kernel/src/page_survey.rs",
             "kernel/src/paging/**",
             "kernel/src/heap/**",
             // **割り込みの配送とタスクの切り替え**——**タイマの割り込みとスケジューラは、どのグループの項目も
@@ -333,6 +335,14 @@ pub const PATH_RULES: &[PathRule] = &[
     PathRule {
         patterns: &["xtask/src/tool_checks.rs", "tools/**"],
         reach: Reach::Families(&[Family::Harness]),
+    },
+    // **ページの権限の一覧を読んで比べる側と、その参照**——**一覧の道具の項目（メモリの組）だけが通る。**
+    PathRule {
+        patterns: &[
+            "xtask/src/page_permissions.rs",
+            "xtask/reference/page-permissions.txt",
+        ],
+        reach: Reach::Families(&[Family::Memory]),
     },
     // ── 基底だけ（ホストのテストと基本の検査の確かめが覆う） ──
     PathRule {

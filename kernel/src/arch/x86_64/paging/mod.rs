@@ -5,6 +5,7 @@ pub mod active;
 pub mod address_space;
 pub mod entry;
 pub mod remove;
+pub mod survey;
 pub mod switch;
 pub mod table;
 pub mod verify;

@@ -34,6 +34,7 @@ pub use idt::{
 };
 pub use paging::active::{ActivePageTable, PageAttributes};
 pub use paging::address_space::{AddressSpace, AddressSpaceError};
+pub use paging::survey::{for_each_mapped_range, MappedRange, MappingPermissions, MappingSize};
 pub use paging::switch::{active_page_table_root, set_active_page_table_root};
 pub use paging::verify::{
     read_top_level_entry, walk_page_table, walk_page_table_user_accessible, UserAccess,

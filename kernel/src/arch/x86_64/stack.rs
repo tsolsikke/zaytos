@@ -105,6 +105,9 @@ pub const IST_STACK_SIZE: usize = 16 * 1024;
 /// アロケータ状態、TSS 等）への被害を防ぐ。全域をカナリアで埋める。
 pub const GUARD_SIZE: usize = 4096;
 
+/// 見張りのページを、ページの権限の一覧（`crate::page_survey`）に登録するときの名前。
+pub const GUARD_PAGES_REGION: &str = "guard pages below the stacks";
+
 /// カナリアのパターン。ヒープの毒値（`0xDE`）とは別の値にして、ログに
 /// 出たときにどちらの領域の話か区別できるようにする。
 pub const CANARY_BYTE: u8 = 0xC5;
@@ -609,6 +612,13 @@ pub unsafe fn install_guard_page(
                 ));
                 common::arch::x86_64::cpu::halt_forever();
             }
+            // **外したページを、何も写っていてはならない領域として登録する**（ページの権限の一覧。
+            // `crate::page_survey`）。以後の一覧で、ここに何か写っていれば行に印が付く。
+            crate::page_survey::register_absent(
+                GUARD_PAGES_REGION,
+                guard_virt.as_u64(),
+                guard_virt.as_u64() + GUARD_SIZE as u64,
+            );
         }
         Err(e) => {
             log(format_args!(

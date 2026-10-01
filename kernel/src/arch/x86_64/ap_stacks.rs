@@ -154,8 +154,22 @@ pub unsafe fn map_ap_stacks<const CAP: usize>(
     let mut cursor = base;
     let mut tops = [0u64; 3];
     let free_before = allocator.free_frame_count();
+    // **この CPU の分の範囲を、ページの権限の一覧（`crate::page_survey`）に登録する。** ページ数は CPU の数で
+    // 変わるので、要約の値には入れない。
+    crate::page_survey::register(
+        "application processor stacks",
+        base,
+        base + AP_STACK_STRIDE,
+        false,
+    );
     for (index, size) in layout.iter().enumerate() {
-        // ガードぶんを空けたまま進める（マップしないので穴になる）。
+        // ガードぶんを空けたまま進める（マップしないので穴になる）。**穴は、何も写っていてはならない領域として
+        // 登録する。**
+        crate::page_survey::register_absent(
+            crate::arch::x86_64::stack::GUARD_PAGES_REGION,
+            cursor,
+            cursor + crate::arch::x86_64::stack::GUARD_SIZE as u64,
+        );
         cursor += crate::arch::x86_64::stack::GUARD_SIZE as u64;
         let bottom = cursor;
         let mut offset = 0;
@@ -168,10 +182,13 @@ pub unsafe fn map_ap_stacks<const CAP: usize>(
             };
             let virt = VirtAddr::new(bottom + offset)?;
             // user=false, writable=true, cacheable=true（通常のカーネルメモリ）。
+            //
+            // 破壊テスト (2026-10-01, ap-stacks-uncached-test): キャッシュ無効で写す。**起動は通る**（遅くなるだけ）。
+            // ページの権限の一覧の道具が、この領域のキャッシュの属性の違いを名前つきで示す。
             let attributes = PageAttributes {
                 user: false,
                 writable: true,
-                cacheable: true,
+                cacheable: !cfg!(feature = "ap-stacks-uncached-test"),
                 shared: false,
             };
             // SAFETY: 稼働中のテーブルへ、まだ誰も使っていない VA をマップする。

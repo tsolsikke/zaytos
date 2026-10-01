@@ -2077,7 +2077,7 @@ unsafe fn write_to_socket(
 
 /// `mmap` がマップする基点（プロセスごと）。**イメージ・ヒープ・スタックは `0x400000..0x800000` に
 /// 収まっているので、その上（PML4[0] の空き）へ順にマップする**（`ADR-0065`。ウィンドウの拡張は要らない）。
-const MMAP_BASE: u64 = 0x1000_0000;
+pub(crate) const MMAP_BASE: u64 = 0x1000_0000;
 
 /// 次に `mmap` でマップするアドレス（スロットごと。`MMAP_BASE` から上へ）。
 static MMAP_NEXT: [core::sync::atomic::AtomicU64; crate::arch::x86_64::USER_TASK_SLOTS] =

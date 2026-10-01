@@ -766,6 +766,13 @@ user-run-writable-text = []
 # entry ではなく最初の PT_LOAD の先頭へ飛ぶ。詰め物の ud2 で即座に #UD になり、
 # フォルト RIP が期待と食い違う。`--ring3-test user-wrong-entry`。
 user-run-wrong-entry = []
+# ページの権限の一覧の全部の行を出す（2026-10-01。`kernel/src/page_survey.rs`）。既定のビルドは時点ごとに
+# 要約の 1 行だけを出す。振る舞いは変えず、出す行が増えるだけである。`cargo xtask run --page-permissions`。
+page-permissions-dump = []
+# CPU ごとのスタックをキャッシュ無効で写す（2026-10-01）。起動は通る。ページの権限の一覧の道具が、
+# 「application processor stacks」の行のキャッシュの属性の違いを名前つきで示す。
+# `cargo xtask run --page-permissions --sabotage ap-stacks-uncached-test`。
+ap-stacks-uncached-test = []
 # 区画の並びの確かめを通さずに写す（2026-10-01）。起動の途中の壊した像の検査が、並びの確かめで
 # 断られるはずの像を別の場所で断られる（または読み込まれる）のを見て止まる。
 # `--ring3-test user-skip-layout-check`。

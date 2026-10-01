@@ -42,6 +42,10 @@ use kernel::heap::ALLOCATOR;
 extern "C" {
     static __kernel_start: u8;
     static __kernel_end: u8;
+    // 区画の境（ページの権限の一覧が、範囲に区画の名前を付けるために使う。2026-10-01）。
+    static __rodata_start: u8;
+    static __data_start: u8;
+    static __bss_start: u8;
 }
 
 // === higher-half のトランポリンと静的初期ページテーブルとブートスタック ===
@@ -586,6 +590,11 @@ extern "sysv64" fn kernel_main() -> ! {
         cpu::halt_forever();
     }
 
+    // **起動の表の、ページの権限の一覧**（`kernel::page_survey`。`ADR-0071` の手順 3 の道具）。**まだ静的な
+    // 起動の表が載っている。** 窓を登録した直後なので、表を恒等で読める。
+    register_image_regions();
+    survey_mappings(&mut logger, "the boot table");
+
     if let Err(e) = boot_info.validate() {
         logger.error(format_args!("BootInfo validation failed: {e}"));
         logger.error(format_args!(
@@ -1078,6 +1087,12 @@ extern "sysv64" fn kernel_main() -> ! {
     // おけば、後から入れる操作の結果をそれを行ったコードとは独立に確かめられる。
     verify_page_tables(&mut logger, &mapped_ranges);
 
+    // **自前の最初の表の、ページの権限の一覧。** フレームバッファは恒等の中でキャッシュ無効で写っている。
+    if fb_start != 0 {
+        kernel::page_survey::register("framebuffer (identity)", fb_start, fb_end, true);
+    }
+    survey_mappings(&mut logger, "the first table of its own");
+
     let mut post_switch_ok = true;
 
     // (a) kernel イメージの読み取り検証。
@@ -1173,6 +1188,29 @@ extern "sysv64" fn kernel_main() -> ! {
     // 明示的に高位 base へ載せ替える。
     activate_direct_map_window(&mut logger);
     rehome_framebuffer_to_window(&mut logger, &mut framebuffer, boot_info);
+
+    // **直接写像の窓を持つ表の、ページの権限の一覧。** 窓と、窓の中のフレームバッファを登録する。
+    {
+        let window = common::addr::direct_map();
+        let base = window
+            .phys_to_virt(common::addr::PhysAddr::new_const(0))
+            .as_u64();
+        kernel::page_survey::register(
+            "direct map",
+            base,
+            base + common::addr::DirectMap::IDENTITY_MAX_LENGTH,
+            false,
+        );
+        if fb_start != 0 {
+            kernel::page_survey::register(
+                "framebuffer (direct map)",
+                base + fb_start,
+                base + fb_end,
+                true,
+            );
+        }
+    }
+    survey_mappings(&mut logger, "the table with the direct map");
     // boot_info の最終利用はここ（rehome）で、以降は触らない。低位 VA
     // （handoff.boot_info、恒等前提）なので恒等除去（B-2b-4）後は無効になる。有用な
     // データは抽出済み（memory_map はフレームアロケータへ、framebuffer は高位ウィンドウへ）。
@@ -1628,6 +1666,10 @@ extern "sysv64" fn kernel_main() -> ! {
         unsafe {
             remove_identity(&mut logger, direct_map, high_mapped);
         }
+        // **恒等は外した。** 以後のページの権限の一覧では、低い番地に何か写っていれば行に印が付く
+        // （起動時の Ring 3 の試しのページは別の領域として登録してある）。
+        kernel::page_survey::retire("identity");
+        kernel::page_survey::retire("framebuffer (identity)");
     }
 
     // **本番のカーネルの PML4 を控える（W1-c-2）。** **切り替えは、欄が 0 のタスクへ移るときに
@@ -2303,6 +2345,9 @@ fn run_init(logger: &mut Logger<Serial>, console: Option<&mut Console>) -> ! {
         // **起動シーケンスの検算より後である**（`kernel::input::arm_input_script`）。
         // **セッションの開始のティックを控える（W2-d+）。** **終わった後との差を計測に出す。**
         let clock_at_start = kernel::arch::x86_64::idt::monotonic_ticks();
+        // **起動時のプログラムはここまでである。** 以後、既定のビルドはユーザーのプログラムのページの権限の一覧を
+        // 出さない（`kernel::page_survey`。シェルから走らせるたびに 1 行増えるのを避ける）。
+        kernel::page_survey::boot_programs_are_done();
         kernel::input::arm_input_script();
         let outcome = {
             let _foreground = console
@@ -4997,6 +5042,10 @@ fn start_timer(
         ));
         cpu::halt_forever();
     }
+
+    // **割り込みを許す直前の、ページの権限の一覧**（`kernel::page_survey`）。恒等を外し、見張りのページを外し、
+    // 割り込みコントローラのレジスタを写し、起動時のユーザープログラムを走らせ終えた後の表である。
+    survey_mappings(logger, "before interrupts are enabled");
 
     // --- 6. sti してループへ入る ---
     // SAFETY: 7 項目を検証し、PIT を設定し、IRQ0 のマスクを外した。
@@ -11817,6 +11866,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "区画の並びの確かめを通さずに写す",
     ),
     (
+        "ap-stacks-uncached-test",
+        cfg!(feature = "ap-stacks-uncached-test"),
+        "CPU ごとのスタックをキャッシュ無効で写す",
+    ),
+    (
         "user-run-wrong-entry",
         cfg!(feature = "user-run-wrong-entry"),
         "entry ではなく PT_LOAD の先頭へ飛ぶ",
@@ -13152,6 +13206,56 @@ fn rehome_framebuffer_to_window(
 ///
 /// **分岐は登録のとおりに書いた**——2MiB なら `split_huge_page` を通してから `unmap_4kib`
 /// する。**機構は M5-a から在ったので、配線するだけである。**
+/// 稼働中の表を歩いて、ページの権限の一覧を出す（`kernel::page_survey`。`ADR-0071` の手順 3 の道具）。
+/// **起動の途中の 1 本の流れから呼ぶ。**
+fn survey_mappings(logger: &mut Logger<Serial>, moment: &str) {
+    // SAFETY: 根は稼働中の表で、窓は登録済みの直接写像である（切り替える前は恒等、後は高い番地の窓）。
+    // どちらの窓でも、表のフレームは全部読める。読み取りのみ。起動の途中の 1 本の流れなので、歩いている間に
+    // 表は変わらない。
+    unsafe {
+        kernel::page_survey::report_kernel(
+            logger,
+            &moment,
+            paging::switch::active_page_table_root(),
+            common::addr::direct_map(),
+        )
+    };
+}
+
+/// カーネルの像の区画と、最初から決まっている範囲を、ページの権限の一覧の領域として登録する。
+///
+/// **区画の境は `kernel/link.ld` の記号から取る。** 像の外の範囲（起動の表が写す 1GiB の窓、恒等、起動時の
+/// Ring 3 の試しのページ）も、名前を持たせておく——名前の無い範囲が一覧に出たら、登録が足りないか、
+/// 写すべきでない所に写っている。
+fn register_image_regions() {
+    use core::ptr::addr_of;
+    use kernel::page_survey::register;
+
+    let text = addr_of!(__kernel_start) as u64;
+    let rodata = addr_of!(__rodata_start) as u64;
+    let data = addr_of!(__data_start) as u64;
+    let bss = addr_of!(__bss_start) as u64;
+    let end = addr_of!(__kernel_end) as u64;
+    // 像の区画のページ数はコードの量で動くので、要約の値には入れない（権限だけを比べる）。
+    register("kernel text", text, rodata, false);
+    register("kernel rodata", rodata, data, false);
+    register("kernel data", data, bss, false);
+    register("kernel bss", bss, end, false);
+    // 起動の表は、像の外も含めて 1GiB を高い番地に写す。自前の表は像だけを写す。
+    let window = kernel::link_symbols::KERNEL_VIRT_BASE;
+    register(
+        "kernel window outside the image",
+        window,
+        window + (1 << 30),
+        false,
+    );
+    // 恒等（低い番地の半分のうち、最初の 512GiB）。外した後は、在ってはならない領域に変える。
+    register("identity", 0, 1 << 39, false);
+    // 起動時の Ring 3 の試しのページ（次の 512GiB）。
+    let trial = kernel::arch::x86_64::ring3::USER_CODE_VIRT;
+    register("ring 3 trial pages", trial, trial + (1 << 39), true);
+}
+
 fn install_kernel_stack_guard_page(
     logger: &mut Logger<Serial>,
     allocator: &mut kernel::frame_allocator::FrameAllocator,

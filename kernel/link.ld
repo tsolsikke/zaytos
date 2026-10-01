@@ -105,6 +105,14 @@ SECTIONS
 
     __kernel_end = .;
 
+    /* 区画の境（2026-10-01）。ページの権限の一覧（kernel/src/page_survey.rs）が、範囲に区画の名前を付けるために
+     * 使う。区画はどれも 4KiB の境から始まるので、境はページの境である。記号を置くだけで、配置は変えない。
+     *   読みと実行: __kernel_start（.text.trampoline の先頭）から __rodata_start まで
+     *   読みだけ:   __rodata_start（.rodata.aptramp の先頭）から __data_start まで
+     *   読み書き:   __data_start（.data.bootpt の先頭）から __bss_start まで、__bss_start から __kernel_end まで */
+    __rodata_start = ADDR(.rodata.aptramp);
+    __data_start = ADDR(.data.bootpt);
+
     /* イメージ全体（物理）が静的初期テーブルの覆う範囲（恒等・高位とも
      * [0, 1GiB)）に収まること。収まらないと、トランポリンが高位 _start へ
      * 飛んだ瞬間、または恒等で低位ポインタを触った瞬間に未マップでフォルトする。

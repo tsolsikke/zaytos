@@ -1103,6 +1103,8 @@ pub fn load_user_program(
     // 載せた時点の分だけなので、これを足さないと `collected > taken` になる。**
     let taken = process.space.frames_taken()
         + take_post_load_frames(crate::arch::x86_64::current_excursion_slot());
+    // **破棄する前に、この空間のページの権限の一覧を出す**（`crate::page_survey`。`ADR-0071` の手順 3 の道具）。
+    report_user_mappings(logger, image, &process, direct_map);
     let keep_space = cfg!(feature = "user-exit-keep-space") && run;
     let (held, leaked) = if keep_space {
         (0, 0)
@@ -1138,6 +1140,84 @@ pub fn load_user_program(
         ));
     }
     (outcome, held, leaked, taken)
+}
+
+/// 破棄する前の空間のページの権限の一覧を出す（`crate::page_survey`）。
+///
+/// **領域は、像の区画（`PT_LOAD`）・スタック・ヒープ・`mmap` の範囲である。** 区画の範囲は像を読み直して得る
+/// （読み込みが通った像だけを見る。区画の並びを受け付けられない像は、何も写していないので出さない）。
+/// **歩くのはユーザーの側の添字だけである**（カーネルと共有している側は、カーネルの表の一覧が見る）。
+fn report_user_mappings(
+    logger: &mut Logger<Serial>,
+    image: &[u8],
+    process: &UserProcess,
+    direct_map: common::addr::DirectMap,
+) {
+    use crate::page_survey::Region;
+
+    /// 区画の名前。**9 本目から先は名前を付けない**（一覧では名前の無い行として出る）。
+    const SEGMENT_NAMES: [&str; 8] = [
+        "segment 0",
+        "segment 1",
+        "segment 2",
+        "segment 3",
+        "segment 4",
+        "segment 5",
+        "segment 6",
+        "segment 7",
+    ];
+    const PAGE_SIZE: u64 = 4096;
+
+    let Ok(elf) = common::elf::Elf::parse(image) else {
+        return;
+    };
+    if elf.check_load_layout().is_err() {
+        return;
+    }
+    let mut regions = [Region::mapped("", 0, 0, false); SEGMENT_NAMES.len() + 3];
+    let mut count = 0;
+    for (name, ph) in SEGMENT_NAMES.iter().zip(elf.load_segments()) {
+        // 並びの確かめが通っているので、終わりの番地はあふれない。
+        regions[count] = Region::mapped(name, ph.p_vaddr, ph.p_vaddr + ph.p_memsz, true);
+        count += 1;
+    }
+    let stack = USER_PROGRAM_STACK_TOP - PAGE_SIZE;
+    regions[count] = Region::mapped("stack", stack, USER_PROGRAM_STACK_TOP, true);
+    count += 1;
+    // ヒープは像の末尾の次のページから、スタックの手前までを範囲にする（`brk` が伸ばした分だけが写っている）。
+    let heap = process.heap.start();
+    if heap != 0 && heap < stack {
+        regions[count] = Region::mapped("heap", heap, stack, true);
+        count += 1;
+    }
+    regions[count] = Region::mapped(
+        "mapped by request",
+        crate::syscall::MMAP_BASE,
+        1 << 47,
+        true,
+    );
+    count += 1;
+
+    /// 時点の名前。
+    struct Moment(&'static str);
+    impl core::fmt::Display for Moment {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "user program {}", self.0)
+        }
+    }
+
+    // SAFETY: この空間の根は有効で、直接写像が配下の表を覆っている。読み取りのみ。この空間はいま稼働して
+    // おらず、破棄もこの後なので、歩いている間に表は変わらない。
+    unsafe {
+        crate::page_survey::report_user(
+            logger,
+            &Moment(process.name),
+            process.space.root(),
+            direct_map,
+            USER_PROGRAM_SUBTREE_INDEX..USER_PROGRAM_SUBTREE_INDEX + 1,
+            &regions[..count],
+        )
+    };
 }
 
 /// 空間ごとの会計が合わなかった回数（`ADR-0063` の (b1)）。**本番では 0 である。**

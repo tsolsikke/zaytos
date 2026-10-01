@@ -816,6 +816,18 @@ pub unsafe fn run_timer_loop(
             // Addendum 9 の監視。**棚卸しの結論は全 CPU についてである**）。
             crate::arch::x86_64::check_aps_match_bsp(logger, report.started);
 
+            // **AP を起こした後の、ページの権限の一覧**（`crate::page_survey`。`ADR-0071` の手順 3 の道具）。
+            // SAFETY: 稼働中のカーネルの表の根と、登録済みの直接写像を渡す。読み取りのみ。表を変えるのは
+            // ユーザーのプログラムのシステムコールと `spawn` だけで、この時点ではどれも走っていない。
+            unsafe {
+                crate::page_survey::report_kernel(
+                    logger,
+                    &"after the application processors started",
+                    crate::arch::x86_64::active_page_table_root(),
+                    common::addr::direct_map(),
+                )
+            };
+
             // **シリアルの排他の演習（BSP 側）。** **合図を立ててから、AP と
             // 同時に既知の行を書く。** **`kernel/src/smp.rs` の
             // `run_serial_stress_on_ap` が相手である。**
