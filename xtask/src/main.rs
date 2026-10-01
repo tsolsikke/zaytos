@@ -5027,10 +5027,14 @@ fn cmd_page_permissions(sabotage: &[&str], update_reference: bool) -> Result<()>
         launch::Deadline::Failure,
     ))?;
     // **シェルのプロンプトが出るか、カーネルが止まったら取り終える。** 上限は付ける。
+    // **止まった合図は [`stop_sign_in`] で見る**——起動の中の検査が止めると `…; halting` の形で止まり、
+    // パニックの形（`halting (cli + hlt loop)`）にはならない。パニックの形だけを見ていたときは、
+    // `user-run-writable-text` の実行が上限の 90 秒まで待って、全検査で時間切れになった（2026-10-01）。
     let deadline = Instant::now() + BOOT_READY_TIMEOUT;
+    let mut stop = StopWatch::default();
     while Instant::now() < deadline && !child.was_cut() {
         let text = read_lossy(&serial_log);
-        if shell_prompt_follows_ready(&text) || text.contains(PANIC_MARKER_HALT) {
+        if shell_prompt_follows_ready(&text) || stop.settled(stop_sign_in(&text, "")).is_some() {
             break;
         }
         metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
