@@ -1601,7 +1601,7 @@ VirtualBoxの計数でベクタ0x42が打鍵4バイトで+4、8259のベクタ0x
 | `target/full-check/wt`（2026-09-27より前の置き場） | よい（`git worktree remove`で外す。**全検査が走っていないときだけ**） | 以前の全検査の作業ツリー。**残っていても、全検査はもう移さない**（移す処理は2026-10-01に外した。いまの作業ツリーは隣の`<名前>-full-check`で、`target/`の外なので、この表の対象の外） |
 | `target/check-lock`・`target/check-vbox-path` | よい | 基本の検査の確かめの一時の置き場 |
 | `target/full-check/logs` | **消さない** | 全検査のログ（記録がパスを持つ） |
-| `target/full-check/records.tsv`・`target/full-check/selections.tsv`（2026-09-27より前の置き場） | **消さない**（扱いは、OSの名前を変える段階の終わりに決める。`ADR-0073`） | 移す前の記録。**2026-10-01から、どの検査も読まない**（記録はいまgitの共通の置き場の`zeikos/`に在り、名前を変える段階の間は旧い置き場の`zaytos/`も読む） |
+| `target/full-check/records.tsv`・`target/full-check/selections.tsv`（2026-09-27より前の置き場） | **残す**（どの検査も読まない記録） | 移す前の記録。**2026-10-01から、どの検査も読まない**（記録はいまgitの共通の置き場の`zeikos/`に在る） |
 | `target/stage`と、`target`の直下の記録（`.log`・`.txt`） | **消さない** | 実行の記録と判断の控え |
 | `target/aarch64-tools` | **消さない** | ARMの道具（展開したQEMUとAAVMF。`ADR-0070`） |
 | `target/amd` | **消さない** | AMDの資料（第三者の著作物なのでツリーに入れていない） |
