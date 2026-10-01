@@ -6,16 +6,14 @@
 
 # 道は `xtask` と同じ決め方にする
 
-**`<git rev-parse --git-common-dir>/zeikos/check.lock`。** **置き場の名前は 2026-10-01 に `zaytos/` から変え、
-OS の名前を変える段階の R5 の間は、旧い置き場の錠も取る**（[`old_lock_dir`]。R5 の最後に外す）。**根はこのファイルの在り処から決め、git は
+**`<git rev-parse --git-common-dir>/zeikos/check.lock`。** **根はこのファイルの在り処から決め、git は
 `GIT_*` を外して呼ぶ**——**環境変数で道が変わると、錠が 2 つになって排他が黙って外れる**（運用者の
 回答 3）。**同じ道になることは、基底の確かめが本の木・作業木・環境を減らした子で見る。**
 
 # 全検査の中から呼ばれたときは取らない
 
 **`ZEIKOS_CHECK_LOCK_OWNER` の pid が自分の祖先で、`/proc/locks` でこの錠を持っているときだけ**
-取らずに進む（`xtask` と同じ規則）。**旧い名前 `ZAYTOS_CHECK_LOCK_OWNER` も、OS の名前を変える段階の
-R5 の間だけ読む**（[`OLD_OWNER_ENV`]。R5 の最後に外す）。
+取らずに進む（`xtask` と同じ規則）。
 
 # VirtualBox の VM を起こしたまま残すとき
 
@@ -26,7 +24,7 @@ R5 の間だけ読む**（[`OLD_OWNER_ENV`]。R5 の最後に外す）。
 # 使い方（確かめ用）
 
     python3 tools/check_lock.py path [--root DIR]
-    python3 tools/check_lock.py try FILE [--old FILE]    # 一時の錠を共有で取ってみる（取れれば 0、断られれば 75。--old なら 2 つとも）
+    python3 tools/check_lock.py try FILE    # 一時の錠を共有で取ってみる（取れれば 0、断られれば 75）
 """
 import fcntl
 import os
@@ -35,8 +33,6 @@ import sys
 import time
 
 OWNER_ENV = "ZEIKOS_CHECK_LOCK_OWNER"
-#: 旧い名前（R5 の間だけ読む。`xtask/src/old_env_names.rs` と同じときに外す）。
-OLD_OWNER_ENV = "ZAYTOS_CHECK_LOCK_OWNER"
 REFUSED_EXIT_CODE = 75
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -69,19 +65,6 @@ def lock_dir(root=ROOT):
 
 def lock_path(root=ROOT):
     return os.path.join(lock_dir(root), "check.lock")
-
-
-def old_lock_dir(root=ROOT):
-    """旧い置き場（R5 の間だけ。`xtask` の `old_lock_dir_in` と同じ）。**確かめで置き場を差し替えている間は無い**
-    （本の旧い錠に触れない）。"""
-    if DIR_FOR_TESTS is not None:
-        return None
-    return os.path.join(git_common_dir(root), "zaytos")
-
-
-def old_lock_path(root=ROOT):
-    directory = old_lock_dir(root)
-    return None if directory is None else os.path.join(directory, "check.lock")
 
 
 def device_numbers(dev):
@@ -215,24 +198,11 @@ def log_run(what, outcome, root=ROOT):
         pass
 
 
-def named_owner():
-    """持ち主を名乗る値。**新しい名前を先に読み、無ければ旧い名前を読んで、そのことを 1 行出す。**"""
-    value = os.environ.get(OWNER_ENV)
-    if value is None and os.environ.get(OLD_OWNER_ENV) is not None:
-        value = os.environ[OLD_OWNER_ENV]
-        print(
-            f"(info) read the old name {OLD_OWNER_ENV}; the new name is {OWNER_ENV} "
-            "(the old name is read only until the end of the rename stage R5)",
-            file=sys.stderr,
-        )
-    return value
-
-
 def attempt_shared(path):
     """共有で取ってみる。**(取れたか, 持ち主の下か, 断りの中身)** を返す。**取れたら持ち続ける。**"""
     probe(os.path.dirname(path))
     handle = open(path, "a+")
-    owner = covering_owner(named_owner(), ancestors(), holders_of(handle))
+    owner = covering_owner(os.environ.get(OWNER_ENV), ancestors(), holders_of(handle))
     if owner is not None:
         handle.close()
         return True, owner, None
@@ -248,29 +218,14 @@ def attempt_shared(path):
     return True, None, None
 
 
-def attempt_shared_both(path, old):
-    """新しい錠を先に、旧い錠を後に共有で取る（R5 の間だけ。`xtask` の `attempt_both` と同じ）。**旧い錠で断られたら、
-    先に取った新しい錠を放して断る。** **(取れたか, 持ち主の下か, 断りの中身, 決めた方の錠の道)** を返す。"""
-    before = len(_HELD)
-    taken, owner, refused = attempt_shared(path)
-    if not taken or old is None:
-        return taken, owner, refused, path
-    taken_old, owner_old, refused_old = attempt_shared(old)
-    if taken_old:
-        return True, owner if owner is not None else owner_old, None, path
-    for handle in _HELD[before:]:
-        handle.close()
-    del _HELD[before:]
-    return False, None, refused_old, old
-
-
 def hold_shared_or_exit(what, root=ROOT):
     """道具が QEMU か VirtualBox を起こす前に呼ぶ。**取れなければ断りを出して 75 で終える。**
 
     **置き場が flock を扱えなければ、検査装置の故障として止める**（`xtask` と同じ。運用者の回答 3）。
     """
     try:
-        taken, _, refused, path = attempt_shared_both(lock_path(root), old_lock_path(root))
+        path = lock_path(root)
+        taken, _, refused = attempt_shared(path)
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"harness fault: the check lock could not be used ({error})", file=sys.stderr)
         sys.exit(1)
@@ -294,16 +249,10 @@ def mark_vbox_running(name, root=ROOT):
 
 
 def clear_vbox_running(name, root=ROOT):
-    """**R5 の間は旧い置き場の印も消す**（旧い版の道具が旧い置き場へ書いた印）。"""
-    directories = [vbox_marker_dir(root)]
-    old = old_lock_dir(root)
-    if old is not None:
-        directories.append(os.path.join(old, "vbox-running"))
-    for directory in directories:
-        try:
-            os.unlink(os.path.join(directory, name))
-        except FileNotFoundError:
-            pass
+    try:
+        os.unlink(os.path.join(vbox_marker_dir(root), name))
+    except FileNotFoundError:
+        pass
 
 
 def main(argv):
@@ -311,18 +260,17 @@ def main(argv):
         root = argv[argv.index("--root") + 1] if "--root" in argv else ROOT
         print(lock_path(root))
         return 0
-    if argv[:1] == ["try"] and (len(argv) == 2 or (len(argv) == 4 and argv[2] == "--old")):
-        old = argv[3] if len(argv) == 4 else None
-        taken, owner, refused, decided = attempt_shared_both(argv[1], old)
+    if len(argv) == 2 and argv[0] == "try":
+        taken, owner, refused = attempt_shared(argv[1])
         if owner is not None:
             print(f"covered by {owner}")
             return 0
         if taken:
             print("taken")
             return 0
-        print(refusal_message("check_lock.py try", decided, *refused), file=sys.stderr)
+        print(refusal_message("check_lock.py try", argv[1], *refused), file=sys.stderr)
         return REFUSED_EXIT_CODE
-    print("usage: check_lock.py path [--root DIR] | try FILE [--old FILE]", file=sys.stderr)
+    print("usage: check_lock.py path [--root DIR] | try FILE", file=sys.stderr)
     return 2
 
 

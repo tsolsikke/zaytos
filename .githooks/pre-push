@@ -6,8 +6,7 @@
 # 別の枝・複数の ref・タグ・削除を 1 行ずつ扱う。長い検査は起こさない——既存の合格の記録を照合する。
 #
 # 例外は ZEIKOS_PUSH_UNCHECKED='<理由>' git push である。その push だけに効き、理由と対象のコミットが
-# 記録に残る。検査の合格としては数えない。旧い名前 ZAYTOS_PUSH_UNCHECKED も、OS の名前を変える段階の
-# R5 の間だけ受ける（xtask/src/old_env_names.rs）。
+# 記録に残る。検査の合格としては数えない。
 #
 # git push --no-verify は、この hook ごと迂回できる。すべての迂回を記録できるとは言わない——通常の操作の
 # 誤りを防ぐ仕組みである。CI が各 push で基底と --commit を回す。

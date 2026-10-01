@@ -701,7 +701,6 @@ xtask::check_lock::tests::device_numbers_split_as_glibc_does
 xtask::check_lock::tests::flock_lines_are_read_from_proc_locks
 xtask::check_lock::tests::only_a_descendant_of_a_holder_goes_ahead_without_the_lock
 xtask::check_lock::tests::other_runs_are_counted_from_the_start_of_the_full_check
-xtask::check_lock::tests::taking_both_locks_releases_the_new_one_when_the_old_one_is_refused
 xtask::check_lock::tests::the_lock_is_not_inherited_by_a_child
 xtask::check_lock::tests::the_parent_pid_is_read_after_the_last_parenthesis
 xtask::family::tests::a_path_takes_the_union_of_every_row_it_matches
@@ -733,12 +732,11 @@ xtask::full_check::tests::a_torn_record_line_is_never_read_as_a_record
 xtask::full_check::tests::a_worktree_is_cold_when_it_is_not_where_the_last_full_check_ran
 xtask::full_check::tests::a_worktree_is_cold_when_the_kernel_sources_changed_since_its_last_checkout
 xtask::full_check::tests::a_worktree_is_cold_without_target_when_small_or_built_by_another_rustc
-xtask::full_check::tests::a_worktree_under_the_old_name_is_moved_next_to_the_renamed_main_tree
 xtask::full_check::tests::appends_survive_a_torn_tail_and_concurrent_writers
 xtask::full_check::tests::environment_differences_name_the_changed_tools
 xtask::full_check::tests::only_a_pass_at_the_needed_level_or_above_covers_a_commit
 xtask::full_check::tests::pre_push_lines_are_read_and_bad_ones_are_refused
-xtask::full_check::tests::records_are_written_to_the_git_dir_and_the_old_place_is_still_read
+xtask::full_check::tests::records_and_selections_are_written_to_the_git_dir
 xtask::full_check::tests::score_summary_counts_narrow_selections_apart
 xtask::full_check::tests::the_estimate_is_chosen_by_whether_the_worktree_is_cold
 xtask::full_check::tests::the_full_check_needs_the_estimate_plus_the_floor_on_both_places
@@ -784,12 +782,6 @@ xtask::media::tests::the_media_reads_back_what_was_written
 xtask::media::tests::the_same_path_twice_is_refused
 xtask::media::tests::the_sixty_four_mib_partition_has_the_geometry_we_recorded
 xtask::metrics::tests::the_line_names_every_kind_even_at_zero
-xtask::old_env_names::tests::a_name_without_an_old_name_reads_only_itself
-xtask::old_env_names::tests::an_empty_value_is_read_under_either_name
-xtask::old_env_names::tests::env_passes_the_value_under_both_names
-xtask::old_env_names::tests::env_remove_removes_both_names
-xtask::old_env_names::tests::every_renamed_variable_has_its_old_name
-xtask::old_env_names::tests::reads_the_new_name_first_and_the_old_name_only_when_the_new_one_is_absent
 xtask::run_dir::tests::the_names_in_a_run_directory_come_from_the_run
 xtask::run_dir::tests::the_newest_runs_are_kept_whole_and_the_oldest_are_removed
 xtask::run_set::tests::a_list_is_read_one_test_per_line
