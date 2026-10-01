@@ -14,7 +14,7 @@ Hello, ZeikOS!
 [INFO] cpu-state: the kernel set the CR0 bits it needs on the BSP (WP and NE set, CD and NW clear): CR0 0x80010033 -> 0x80010033 [read back]
 [INFO] fp: SSE is enabled on the bootstrap processor: CR0=0x80010033 (MP=true, EM=false),              CR4=0x668 (OSFXSR=true, OSXMMEXCPT=true), as intended = true [read back from the registers]
 [INFO] boot stack: 688 of 16384 bytes used (high-water; 15696 bytes poison intact)
-[INFO] higher-half: arrived at high VA. RIP=0xffffffff801f8278 in [0xffffffff80100000, 0xffffffff804d09b0)=true, RSP=0xffffffff804ba030 high=true, CR3=0x26f000 == bootstrap PML4 0x26f000 = true, identity alive (phys 0x100000 read via low==high) = true
+[INFO] higher-half: arrived at high VA. RIP=0xffffffff801f8408 in [0xffffffff80100000, 0xffffffff804d09b0)=true, RSP=0xffffffff804ba030 high=true, CR3=0x26f000 == bootstrap PML4 0x26f000 = true, identity alive (phys 0x100000 read via low==high) = true
 [INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff8043c150 first slot=0xffffffff8043c150 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
 [INFO] interrupts: RFLAGS.IF before cli = false (raw RFLAGS=0x2)
 [INFO] interrupts: RFLAGS.IF after cli = false (raw RFLAGS=0x2)
@@ -77,7 +77,7 @@ Hello, ZeikOS!
 [INFO] paging: required range [framebuffer] 0x80000000..0x803e8000: OK
 [INFO] paging: required range [new page tables (PML4)] 0x3000..0x4000: OK
 [INFO] paging: required range [current RSP] 0x4ba290..0x4ba291: OK
-[INFO] paging: required range [current RIP] 0x1f8278..0x1f8279: OK
+[INFO] paging: required range [current RIP] 0x1f8408..0x1f8409: OK
 [INFO] paging: all required ranges mapped. proceeding to CR3 switch (d-2).
 [INFO] paging: current CR3 = 0x26f000
 [INFO] paging: CR3 switch instruction executed
@@ -113,7 +113,7 @@ Hello, ZeikOS!
 [INFO] console: 108 log line(s) were emitted before the console existed (serial only)
 [INFO] heap: arena 0x4d1000..0x5d1000 (256 frames, 1 MiB), mapped=true
 [INFO] heap: initialized (1048576 bytes free, 1 block(s))
-[INFO] granularity: executing code (RIP) 0xffffffff801f8278 -> phys 0x1f8278, mapped by a 4KiB page at 0xffffffff801f8000 (entry=0x1f8023)
+[INFO] granularity: executing code (RIP) 0xffffffff801f8408 -> phys 0x1f8408, mapped by a 4KiB page at 0xffffffff801f8000 (entry=0x1f8023)
 [INFO] granularity: kernel stack (RSP) 0xffffffff804b9d10 -> phys 0x4b9d10, mapped by a 4KiB page at 0xffffffff804b9000 (entry=0x4b9063)
 [INFO] granularity: heap arena 0x4d1000 -> phys 0x4d1000, mapped by a 2MiB page at 0x400000 (entry=0x400083)
 [INFO] granularity: framebuffer 0x80000000 -> phys 0x80000000, mapped by a 2MiB page at 0x80000000 (entry=0x800000b3)
@@ -261,7 +261,7 @@ Hello, ZeikOS!
 [INFO] percpu: 2 usable CPU(s) enumerated, 2 per-CPU slot(s) available, every CPU has a slot=true (a CPU without a slot is not started, so no slot is indexed out of range)
 [INFO] identity-removal: begin. live PML4=0xf000, saved PML4[0]=0x10023
 [INFO] identity-removal: PML4[0] subtree table frames = 7 (28 KiB) become unreachable; intentional leak. subtree frames [256]=10 [511]=4. disjoint(0,256)=true disjoint(0,511)=true disjoint(256,511)=true
-[INFO] identity-removal: required [RIP] 0xffffffff801f8278 -> phys 0x1f8278 (huge=false): OK
+[INFO] identity-removal: required [RIP] 0xffffffff801f8408 -> phys 0x1f8408 (huge=false): OK
 [INFO] identity-removal: required [RSP] 0xffffffff804b9b60 -> phys 0x4b9b60 (huge=false): OK
 [INFO] identity-removal: required [direct map window] 0xffff80000000f000 -> phys 0xf000 (huge=false): OK
 [INFO] identity-removal: required [kernel image] 0xffffffff80100000 -> phys 0x100000 (huge=false): OK
