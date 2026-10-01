@@ -5117,9 +5117,9 @@ fn errno_for_ext2(error: common::ext2::Ext2Error) -> i64 {
 /// # 大半は「カーネル側の不具合」である
 ///
 /// **`Parse`・`SegmentData`・`Layout` が、渡されたイメージに対する答えである。**
-/// **`Layout`（区画の並びを受け付けられない）は `-ENOEXEC` を返す**（2026-10-01。Linux と同じ値）。
-/// **`Parse` と `SegmentData`（像がバイト列として壊れている）は、以前から `-EINVAL` を返している**
-/// ——`ENOEXEC` を持つ前に決めた形で、ここでは変えていない。
+/// **どれも `-ENOEXEC` を返す**（2026-10-01。Linux の `execve` と同じ）——像がバイト列として壊れている
+/// （`Parse`・`SegmentData`）ときも、区画の並びを受け付けられない（`Layout`）ときも、「実行できる形でない」である。
+/// **`Parse` と `SegmentData` は、`ENOEXEC` を持つ前は `-EINVAL` を返していた。**
 fn errno_for_user_load(error: crate::userland::UserLoadError) -> i64 {
     use crate::userland::UserLoadError as E;
     match error {
@@ -5127,8 +5127,7 @@ fn errno_for_user_load(error: crate::userland::UserLoadError) -> i64 {
         E::AllocatorUnavailable => EAGAIN,
         E::OutOfFrames => ENOMEM,
         // 渡されたものに対する答え。
-        E::Parse(_) | E::SegmentData(_) => EINVAL,
-        E::Layout(_) => ENOEXEC,
+        E::Parse(_) | E::SegmentData(_) | E::Layout(_) => ENOEXEC,
         E::ArgumentsTooLong => ENAMETOOLONG,
         // ここから下はカーネル側の事情である。
         E::AddressSpace(_)
@@ -5474,10 +5473,10 @@ mod tests {
         );
     }
 
-    /// **区画の並びを受け付けられない像は `-ENOEXEC`（8）で断る**（2026-10-01）。像がバイト列として
-    /// 壊れているときの値（`-EINVAL`）は変えていない。
+    /// **実行できる形でない像は `-ENOEXEC`（8）で断る**（2026-10-01）——区画の並びを受け付けられない像も、
+    /// バイト列として壊れている像も同じである。
     #[test]
-    fn a_refused_layout_is_reported_as_enoexec() {
+    fn an_image_that_cannot_be_executed_is_reported_as_enoexec() {
         use crate::userland::UserLoadError;
         use common::elf::{ElfError, LayoutError};
         assert_eq!(ENOEXEC, 8);
@@ -5501,10 +5500,13 @@ mod tests {
                 "{layout:?}"
             );
         }
-        assert_eq!(
-            errno_for_user_load(UserLoadError::Parse(ElfError::BadMagic)),
-            EINVAL
-        );
+        for broken in [
+            UserLoadError::Parse(ElfError::BadMagic),
+            UserLoadError::Parse(ElfError::SegmentAddressOverflow),
+            UserLoadError::SegmentData(ElfError::SegmentFileRangeOutOfBounds),
+        ] {
+            assert_eq!(errno_for_user_load(broken), ENOEXEC, "{broken:?}");
+        }
     }
 
     /// `struct drm_clip_rect` は半開区間である。**空の矩形は断る。**

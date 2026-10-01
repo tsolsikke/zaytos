@@ -22,8 +22,9 @@ pub const EINVAL: i64 = 22;
 pub const ENOENT: i64 = 2;
 
 /// `-ENOEXEC`（実行できる形でない）の errno（2026-10-01）。値は Linux と同じ 8 である
-/// （`/usr/include/asm-generic/errno-base.h`）。**像の区画の並びを受け付けられないときに返す**
-/// （`crate::userland` の `UserLoadError::Layout`）。
+/// （`/usr/include/asm-generic/errno-base.h`）。**像が実行できる形でないときに返す**——バイト列として
+/// 壊れている、または区画の並びを受け付けられない（`crate::userland` の `UserLoadError` の `Parse`・
+/// `SegmentData`・`Layout`）。
 pub const ENOEXEC: i64 = 8;
 
 /// `-EBADF`（そのファイルディスクリプタは開いていない）の errno（S10-b）。
