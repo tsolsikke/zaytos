@@ -25,8 +25,8 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::arch::x86_64::paging::active::PageAttributes;
 use crate::frame_allocator::FrameAllocator;
+use crate::paging::permissions::PagePermissions;
 use common::addr::{DirectMap, PhysAddr};
 
 /// PML4 のエントリ数。
@@ -78,6 +78,11 @@ pub enum AddressSpaceError {
     /// **前提（起動の後は、カーネル側の PML4 の項目を誰も変えない）が崩れている。** **コピーした上位が
     /// 稼働中の表と食い違っているかもしれないので、この空間を作らない。**
     KernelTopChanged,
+    /// ユーザーから届かない権限で、ユーザーの側へマップしようとした（2026-10-02）。
+    ///
+    /// **[`AddressSpace::map_user_4kib`] は、ユーザーのページをマップするためだけに在る。** 以前は、渡された
+    /// 属性に関わらず U を立てていた。権限の型を 1 つにしてからは、ユーザーから届かない権限を断る。
+    NotForUser,
 }
 
 /// 起動の終わり（`run_init` の前）に採った、カーネル側の PML4 の項目（添字 256〜511）の指紋
@@ -366,9 +371,9 @@ impl AddressSpace {
     ///
     /// # 属性（S9-b-1）
     ///
-    /// `user` は常に真なので取らない。**この関数はユーザーページをマップするためだけに
-    /// ある。** 取るのは [`PageAttributes::writable`] と
-    /// [`PageAttributes::cacheable`] である。
+    /// **この関数はユーザーページをマップするためだけにある。** 権限は [`PagePermissions`] の、ユーザーの側の
+    /// 名前（`user_program`・`user_data`・`user_shared`）で受ける。ユーザーから届かない権限は
+    /// [`AddressSpaceError::NotForUser`] で断る。ビットへ直すのは `entry` の変換である（2026-10-02）。
     ///
     /// **W は葉だけに効く。中間へは伝播しない**（[`crate::arch::x86_64::paging::active::ActivePageTable::map_4kib`] と
     /// 同じ理由。中間を W=0 にすると配下の葉が 1 枚残らず読み取り専用になる）。
@@ -404,7 +409,7 @@ impl AddressSpace {
         direct_map: DirectMap,
         virt: common::addr::VirtAddr,
         frame: PhysAddr,
-        attributes: PageAttributes,
+        permissions: PagePermissions,
     ) -> Result<(), AddressSpaceError> {
         use crate::arch::x86_64::paging::entry;
 
@@ -413,6 +418,11 @@ impl AddressSpace {
         // （U=1 はこの空間のユーザーサブツリーの外に存在しない）が破れる。**
         if entry::pml4_index(virt) != self.user_pml4_index {
             return Err(AddressSpaceError::NotPrivate);
+        }
+        // **ユーザーから届かない権限は断る。** 途中の項目の U は葉の権限から決まるので、届かない権限を通すと、
+        // ユーザーの枝の中に、ユーザーから届かない項目ができる。
+        if !permissions.user() {
+            return Err(AddressSpaceError::NotForUser);
         }
         if !direct_map.covers(frame) {
             return Err(AddressSpaceError::Unreachable);
@@ -447,12 +457,13 @@ impl AddressSpace {
                 unsafe { zero_table(direct_map, fresh) };
                 // SAFETY: 中間テーブルなので U ビットを立てる。立てないと、葉で
                 // 立てても CPU は全階層の AND を見るのでユーザーから触れない。
+                // （権限がユーザーから届くことは、上で確かめた。U を立てるのは `entry::table_entry` である。）
                 unsafe {
                     write_entry(
                         direct_map,
                         table,
                         index,
-                        fresh.as_u64() | entry::PTE_PRESENT | entry::PTE_WRITABLE | entry::PTE_USER,
+                        entry::table_entry(fresh, permissions),
                     )
                 };
                 fresh
@@ -478,16 +489,9 @@ impl AddressSpace {
             return Err(AddressSpaceError::AlreadyMapped);
         }
 
-        let mut leaf = frame.as_u64() | entry::PTE_PRESENT | entry::PTE_USER;
-        // 破壊テスト (S9-a, map-force-writable): 書き込み可否の引数を無視して常に W=1 に
-        // する。**もう一方の経路（`ActivePageTable::map_4kib`）と同じ破壊テストで両方が
-        // 落ちる。** 経路が 2 つあることを、破壊テストの側でも 1 本にまとめてある。
-        if attributes.writable || cfg!(feature = "map-force-writable") {
-            leaf |= entry::PTE_WRITABLE;
-        }
-        if !attributes.cacheable {
-            leaf |= entry::PTE_PCD;
-        }
+        // **葉のビットは `entry::leaf_entry` が決める**（もう一方の経路の `ActivePageTable::map_4kib` と同じ変換）。
+        // 破壊テスト `map-force-writable` は変換の中に在り、両方の経路に効く。
+        let leaf = entry::leaf_entry(frame, permissions, entry::LeafSize::Small);
         // SAFETY: 葉。ユーザーから到達できる 4KiB ページ。
         unsafe { write_entry(direct_map, table, leaf_index, leaf) };
         // **葉もこの空間のものである**（`ADR-0063` の (b1)）。**マップした後で数える**

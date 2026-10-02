@@ -1532,7 +1532,8 @@ pub fn screen_pages_mapped() -> u64 {
 /// `direct_map` が有効であること（遠征の中で呼ぶ）。
 #[inline(never)]
 unsafe fn mmap_screen_from_ring3(len: u64, prot: u64, direct_map: DirectMap) -> u64 {
-    use crate::arch::x86_64::{ActivePageTable, PageAttributes};
+    use crate::arch::x86_64::ActivePageTable;
+    use crate::paging::permissions::PagePermissions;
 
     let Some(surface) = crate::console::graphics_surface() else {
         return (-ENODEV) as u64;
@@ -1545,14 +1546,9 @@ unsafe fn mmap_screen_from_ring3(len: u64, prot: u64, direct_map: DirectMap) -> 
     let pages = len.div_ceil(PAGE);
     let slot = crate::arch::x86_64::current_excursion_slot();
     let base = MMAP_NEXT[slot].fetch_add(pages * PAGE, Ordering::SeqCst);
-    let attributes = PageAttributes {
-        user: true,
-        writable: prot & PROT_WRITE != 0,
-        // **裏バッファは普通の RAM である**（MMIO ではない。`BackBuffer` の doc）。
-        cacheable: true,
-        // **目印を立てる**——**`destroy` が集めない**（この関数の doc）。
-        shared: true,
-    };
+    // **裏バッファは普通の RAM である**（MMIO ではない。`BackBuffer` の doc）ので、キャッシュしてよい。
+    // **共有の印が付く**——**`destroy` が集めない**（この関数の doc）。
+    let attributes = PagePermissions::user_shared(prot & PROT_WRITE != 0);
     // SAFETY: 遠征の中なので CR3 はこのプロセスの表である。
     let mut table = unsafe { ActivePageTable::current(direct_map) };
     let Some(allocator) = crate::frame_allocator::take() else {
@@ -2140,7 +2136,8 @@ fn ftruncate_from_ring3(fd: u64, size: u64) -> u64 {
 /// 呼び出し元契約により `direct_map` は有効で、遠征の中なので CR3 はこのプロセスのもの。
 #[inline(never)]
 unsafe fn mmap_from_ring3(len: u64, prot: u64, fd: u64, offset: u64, direct_map: DirectMap) -> u64 {
-    use crate::arch::x86_64::{ActivePageTable, PageAttributes};
+    use crate::arch::x86_64::ActivePageTable;
+    use crate::paging::permissions::PagePermissions;
 
     if offset != 0 {
         return (-EINVAL) as u64;
@@ -2172,14 +2169,9 @@ unsafe fn mmap_from_ring3(len: u64, prot: u64, fd: u64, offset: u64, direct_map:
         (want_pages * crate::shm::PAGE_SIZE) as u64,
         core::sync::atomic::Ordering::SeqCst,
     );
-    let attributes = PageAttributes {
-        user: true,
-        writable: prot & PROT_WRITE != 0,
-        cacheable: true,
-        // **共有メモリの葉に目印を立てる（`ADR-0065`）。** **`destroy` が集めず、`crate::shm` が
-        // 参照数で返す。**
-        shared: true,
-    };
+    // **共有メモリの葉に目印を立てる（`ADR-0065`）。** **`destroy` が集めず、`crate::shm` が
+    // 参照数で返す。**
+    let attributes = PagePermissions::user_shared(prot & PROT_WRITE != 0);
     // SAFETY: 遠征の中なので CR3 はこのプロセスの表である。
     let mut table = unsafe { ActivePageTable::current(direct_map) };
     let Some(allocator) = crate::frame_allocator::take() else {
@@ -3559,7 +3551,8 @@ fn errno_for_alloc(error: common::ext2::AllocError) -> i64 {
 ///
 /// `direct_map` が有効で、遠征の中（CR3 がユーザーの表）から呼ばれること。
 unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
-    use crate::arch::x86_64::{ActivePageTable, PageAttributes};
+    use crate::arch::x86_64::ActivePageTable;
+    use crate::paging::permissions::PagePermissions;
 
     let (mapped, current, start) = crate::userland::with_current_heap(|heap| {
         (heap.is_mapped(), heap.break_at(), heap.start())
@@ -3591,12 +3584,7 @@ unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
     };
     // SAFETY: 遠征の中なので CR3 はこのプロセスの表である。
     let mut table = unsafe { ActivePageTable::current(direct_map) };
-    let attributes = PageAttributes {
-        user: true,
-        writable: true,
-        cacheable: true,
-        shared: false,
-    };
+    let attributes = PagePermissions::user_data();
 
     let mut outcome = requested;
     if want > have {

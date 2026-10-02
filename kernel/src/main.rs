@@ -2088,7 +2088,8 @@ extern "sysv64" fn kernel_main() -> ! {
     feature = "kernel-top-write-unguarded-test"
 ))]
 fn write_a_kernel_half_entry_after_boot(logger: &mut Logger<Serial>) {
-    use kernel::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
+    use kernel::arch::x86_64::paging::active::ActivePageTable;
+    use kernel::paging::permissions::PagePermissions;
     let Some(allocator) = frame_allocator::take() else {
         logger.error(format_args!(
             "sabotage: the frame allocator is not available"
@@ -2106,12 +2107,7 @@ fn write_a_kernel_half_entry_after_boot(logger: &mut Logger<Serial>) {
     logger.info(format_args!(
         "sabotage: mapping a page into the empty kernel-half PML4 slot 260 after boot"
     ));
-    let attributes = PageAttributes {
-        user: false,
-        writable: true,
-        cacheable: true,
-        shared: false,
-    };
+    let attributes = PagePermissions::kernel_data();
     // SAFETY: 破壊テスト。稼働中の表を direct map 越しに辿り、空いたカーネル側の添字へ、いま取ったフレームを
     // 1 ページだけマップしに行く。**書く側の守りが、項目を作る前に止める**（守りを外した形では項目が作られ、
     // 次の `AddressSpace::new` の突き合わせが見つける。どちらの形でも、この後にシェルは起動しない）。
@@ -4755,10 +4751,10 @@ fn demo_two_address_spaces(
     production: common::addr::PhysAddr,
     mut space_a: kernel::arch::x86_64::paging::address_space::AddressSpace,
 ) {
-    use kernel::arch::x86_64::paging::active::PageAttributes;
     use kernel::arch::x86_64::paging::address_space::{
         is_shared_kernel_index, AddressSpace, PML4_ENTRY_COUNT,
     };
+    use kernel::paging::permissions::PagePermissions;
 
     // 下位の、どのデモとも重ならない VA。
     //
@@ -4805,14 +4801,52 @@ fn demo_two_address_spaces(
         unsafe { ptr.write_volatile(value) };
     }
 
+    // **ユーザーから届かない権限は、項目を書く前に断る**（2026-10-02）。**途中の項目の表を取る前である**——
+    // この空間は、まだ PML4 の 1 枚しか持っていないので、断るのが遅ければ、空きのフレームと、この空間の
+    // フレームの数が動く。
+    {
+        let free_before = allocator.free_frame_count();
+        let taken_before = space_a.frames_taken();
+        // SAFETY: 稼働していない空間。断られるので、何も書かれない。
+        let refused = unsafe {
+            space_a.map_user_4kib(
+                allocator,
+                direct_map,
+                virt,
+                frame_a,
+                PagePermissions::kernel_data(),
+            )
+        };
+        let was_refused = matches!(
+            refused,
+            Err(kernel::arch::x86_64::paging::address_space::AddressSpaceError::NotForUser)
+        );
+        let nothing_taken =
+            allocator.free_frame_count() == free_before && space_a.frames_taken() == taken_before;
+        let level = if was_refused && nothing_taken {
+            LogLevel::Info
+        } else {
+            LogLevel::Error
+        };
+        logger.log(
+            level,
+            format_args!(
+                "address-space: a mapping that user mode could not reach was refused = {was_refused} \
+                 (expected true, got {refused:?}), and no frame was taken for it = {nothing_taken} \
+                 (expected true)"
+            ),
+        );
+        if !(was_refused && nothing_taken) {
+            logger.error(format_args!(
+                "address-space: the refusal did not hold; halting"
+            ));
+            cpu::halt_forever();
+        }
+    }
+
     for (space, frame) in [(&mut space_a, frame_a), (&mut space_b, frame_b)] {
         // S9-b-1: 渡す値は従来と同じ writable=true なので振る舞いは変わらない。
-        let attributes = PageAttributes {
-            user: true,
-            writable: true,
-            cacheable: true,
-            shared: false,
-        };
+        let attributes = PagePermissions::user_data();
         // SAFETY: どちらもまだ稼働していない。direct map は覆っている。
         if let Err(error) =
             unsafe { space.map_user_4kib(allocator, direct_map, virt, frame, attributes) }
@@ -9282,8 +9316,9 @@ fn verify_user_page_mapping<const CAP: usize>(
     logger: &mut Logger<Serial>,
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
 ) {
-    use kernel::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
+    use kernel::arch::x86_64::paging::active::ActivePageTable;
     use kernel::arch::x86_64::paging::verify;
+    use kernel::paging::permissions::PagePermissions;
 
     /// テストページの仮想アドレス（PML4[USER_PML4_INDEX] の先頭 = 512 GiB）。
     const USER_TEST_VIRT: u64 = 0x0000_0080_0000_0000;
@@ -9311,12 +9346,7 @@ fn verify_user_page_mapping<const CAP: usize>(
     let pml4_phys = table.root();
 
     // --- マップする（専用サブツリー、user=true で全階層 U=1） ---
-    let attributes = PageAttributes {
-        user: true,
-        writable: true,
-        cacheable: true,
-        shared: false,
-    };
+    let attributes = PagePermissions::user_data();
     // SAFETY: virt はまだマップされていない空き PML4 スロット配下。leaf_phys は
     // 今確保した未使用フレーム。allocator は中間テーブルの確保に使う。
     if let Err(e) = unsafe { table.map_4kib(virt, leaf_phys, attributes, allocator) } {
@@ -9463,9 +9493,10 @@ fn verify_ring3_excursion<const CAP: usize>(
     logger: &mut Logger<Serial>,
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
 ) {
-    use kernel::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
+    use kernel::arch::x86_64::paging::active::ActivePageTable;
     use kernel::arch::x86_64::paging::verify;
     use kernel::arch::x86_64::ring3;
+    use kernel::paging::permissions::PagePermissions;
 
     let identity = common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
         .expect("the identity window is canonical");
@@ -9496,23 +9527,28 @@ fn verify_ring3_excursion<const CAP: usize>(
     // 2 ページを U=1 でマップする（M5-e-2 残置の中間テーブルを再利用）。
     // 破壊テスト (ring3-test-user-page-supervisor): USER を落とす（U=0）。遠征前の両側監査が
     // user violation として検出する。
-    #[cfg(not(feature = "ring3-test-user-page-supervisor"))]
-    let user_flag = true;
-    #[cfg(feature = "ring3-test-user-page-supervisor")]
-    let user_flag = false;
-    // 3 枚目は writable=false でマップする（S9-a）。**Ring 3 からの書き込みが #PF に
+    // **権限は用途の名前で決める**（2026-10-02）。コードのページは、書いてから実行するので、書けて実行もできる
+    // 区画として取る（実行禁止を有効にする段で、この試しの形を変える。`ADR-0071` の決定 3）。
+    // 3 枚目は読むだけでマップする（S9-a）。**Ring 3 からの書き込みが #PF に
     // なることを ring3-vectors の 6 本目が確かめる的である。**
-    for (virt, phys, writable, what) in [
-        (code_virt, code_phys, true, "code"),
-        (stack_virt, stack_phys, true, "stack"),
-        (readonly_virt, readonly_phys, false, "read-only"),
+    #[cfg(not(feature = "ring3-test-user-page-supervisor"))]
+    let (code, stack, read_only) = (
+        PagePermissions::user_program(true, true),
+        PagePermissions::user_data(),
+        PagePermissions::user_program(false, false),
+    );
+    // 破壊テストの形: 同じ 3 枚を、ユーザーから届かない権限でマップする（書けるかは同じ）。
+    #[cfg(feature = "ring3-test-user-page-supervisor")]
+    let (code, stack, read_only) = (
+        PagePermissions::kernel_unrestricted(),
+        PagePermissions::kernel_data(),
+        PagePermissions::kernel_read_only(),
+    );
+    for (virt, phys, attributes, what) in [
+        (code_virt, code_phys, code, "code"),
+        (stack_virt, stack_phys, stack, "stack"),
+        (readonly_virt, readonly_phys, read_only, "read-only"),
     ] {
-        let attributes = PageAttributes {
-            user: user_flag,
-            writable,
-            cacheable: true,
-            shared: false,
-        };
         // SAFETY: いずれも未マップのユーザーサブツリー内アドレス。frame は未使用。
         if let Err(e) = unsafe { table.map_4kib(virt, phys, attributes, allocator) } {
             logger.error(format_args!(
@@ -9998,8 +10034,9 @@ fn verify_syscall_pointer<const CAP: usize>(
     logger: &mut Logger<Serial>,
     allocator: &mut frame_allocator::FrameAllocator<CAP>,
 ) {
-    use kernel::arch::x86_64::paging::active::{ActivePageTable, PageAttributes, PageSize};
+    use kernel::arch::x86_64::paging::active::{ActivePageTable, PageSize};
     use kernel::arch::x86_64::ring3;
+    use kernel::paging::permissions::PagePermissions;
 
     let identity = common::addr::DirectMap::identity(common::addr::DirectMap::IDENTITY_MAX_LENGTH)
         .expect("the identity window is canonical");
@@ -10030,12 +10067,7 @@ fn verify_syscall_pointer<const CAP: usize>(
         ));
         cpu::halt_forever();
     };
-    let sup_attributes = PageAttributes {
-        user: false,
-        writable: true,
-        cacheable: true,
-        shared: false,
-    };
+    let sup_attributes = PagePermissions::kernel_data();
     // SAFETY: sup はユーザーサブツリー内の未マップ VA。user=false でマップするので Ring 3 から
     // 到達不可（walk_page_table_user_accessible が SupervisorOnly で弾く）。frame は未使用。
     if let Err(e) = unsafe { table.map_4kib(sup, sup_phys, sup_attributes, allocator) } {

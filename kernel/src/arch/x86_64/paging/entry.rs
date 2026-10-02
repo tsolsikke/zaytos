@@ -182,7 +182,10 @@ pub enum LeafSize {
 /// `crate::paging::permissions` の doc）。G・PWT・PAT は立てない。
 pub const fn leaf_flags(permissions: PagePermissions, size: LeafSize) -> u64 {
     let mut flags = PTE_PRESENT;
-    if permissions.write() {
+    // 破壊テスト (S9-a, map-force-writable): 書けるかの欄を無視して、葉を常に W=1 にする。
+    // 読み取り専用でマップしたユーザーのページへ Ring 3 が書けてしまい、ring3-vectors の #PF-write-ro が
+    // #PF ではなく後続の ud2 で終わる。**以前は、葉を書く 2 つの関数がそれぞれ持っていた。**
+    if permissions.write() || cfg!(feature = "map-force-writable") {
         flags |= PTE_WRITABLE;
     }
     if permissions.user() {

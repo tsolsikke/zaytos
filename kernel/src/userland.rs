@@ -1351,10 +1351,10 @@ fn forget_task_root_before_destroy(logger: &mut Logger<Serial>, process: &UserPr
 ///
 /// # 区画の権限をそのまま葉へ落とす
 ///
-/// `PT_LOAD` の `p_flags` の W を [`PageAttributes::writable`] へ渡す。`hello` の
-/// 2 区画はどちらも書き込み不可なので、**ここが `writable: false` の最初の実利用に
+/// `PT_LOAD` の `p_flags` の W と X を、権限（`PagePermissions::user_program`）へ渡す。`hello` の
+/// 2 区画はどちらも書き込み不可なので、**ここが、書けない葉の最初の実利用に
 /// なる**（S9-a で足した引数が、S9-b の本命の経路で使われる）。
-/// スタックだけは `writable: true` でマップする。
+/// スタックだけは、書けるデータ（`PagePermissions::user_data`）としてマップする。
 ///
 /// # 失敗しても止まらない。**呼び出し側が決める**
 ///
@@ -1406,7 +1406,7 @@ fn load_user_program_into(
     envp: Option<&[&[u8]]>,
 ) -> Result<(), UserLoadError> {
     use crate::arch::x86_64::walk_page_table;
-    use crate::arch::x86_64::PageAttributes;
+    use crate::paging::permissions::PagePermissions;
     use common::elf::Elf;
 
     const PAGE_SIZE: u64 = 4096;
@@ -1452,6 +1452,9 @@ fn load_user_program_into(
 
     for ph in elf.load_segments() {
         let writable = ph.p_flags & common::elf::PF_W != 0;
+        // **実行できるかも、区画のフラグから取る**（2026-10-02）。今はビットにならない（どのページも実行できる）。
+        // 実行禁止を有効にする段で、そのまま効く。
+        let executable = ph.p_flags & common::elf::PF_X != 0;
         let first_page = ph.p_vaddr & !(PAGE_SIZE - 1);
         // 破壊テスト (ADR-0039, user-load-filesz-only): `memsz` ではなく `filesz` で
         // 最終ページを出す。**`.bss` がマップされない**——`/bin/bss-test` が
@@ -1537,12 +1540,10 @@ fn load_user_program_into(
             };
             // 破壊テスト (S9-b-1, user-run-writable-text): 区画の権限を無視して書けるように
             // マップする。**読み取り専用のはずの葉が W=1 になり、下の読み戻しが検出する。**
-            let attributes = PageAttributes {
-                user: true,
-                writable: writable || cfg!(feature = "user-run-writable-text"),
-                cacheable: true,
-                shared: false,
-            };
+            let attributes = PagePermissions::user_program(
+                writable || cfg!(feature = "user-run-writable-text"),
+                executable,
+            );
             // SAFETY: この空間はまだ稼働していない。direct map は覆っている。
             if let Err(e) = unsafe {
                 process
@@ -1612,12 +1613,7 @@ fn load_user_program_into(
     let Some(stack_virt) = common::addr::VirtAddr::new(stack_page) else {
         return Err(UserLoadError::NotCanonical(stack_page));
     };
-    let stack_attributes = PageAttributes {
-        user: true,
-        writable: true,
-        cacheable: true,
-        shared: false,
-    };
+    let stack_attributes = PagePermissions::user_data();
     // SAFETY: この空間はまだ稼働していない。direct map は覆っている。
     if let Err(e) = unsafe {
         process

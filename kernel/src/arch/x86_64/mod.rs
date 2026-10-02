@@ -32,7 +32,7 @@ pub use idt::{
     timer_ticks, timer_ticks_for, timer_ticks_total, EntryPath, ExitAction, Interrupted,
     KernelEntryGuard,
 };
-pub use paging::active::{ActivePageTable, PageAttributes};
+pub use paging::active::ActivePageTable;
 pub use paging::address_space::{AddressSpace, AddressSpaceError};
 pub use paging::survey::{for_each_mapped_range, MappedRange, MappingPermissions, MappingSize};
 pub use paging::switch::{active_page_table_root, set_active_page_table_root};

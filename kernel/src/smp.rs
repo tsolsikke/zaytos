@@ -13,7 +13,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use core::fmt::Write as _;
 
 #[cfg(feature = "smp-tlb-shootdown-probe")]
-use crate::arch::x86_64::{ActivePageTable, PageAttributes};
+use crate::arch::x86_64::ActivePageTable;
+#[cfg(feature = "smp-tlb-shootdown-probe")]
+use crate::paging::permissions::PagePermissions;
 #[cfg(feature = "smp-tlb-shootdown-probe")]
 use common::addr::VirtAddr;
 use common::log::Logger;
@@ -102,14 +104,9 @@ pub unsafe fn prepare_shootdown_probe<const CAP: usize>(
         logger.error(format_args!("smp: the shootdown probe VA is not canonical"));
         return;
     };
-    let attributes = PageAttributes {
-        user: false,
-        writable: true,
-        cacheable: true,
-        shared: false,
-    };
+    let permissions = PagePermissions::kernel_data();
     // SAFETY: 稼働中のテーブルへ、まだ誰も使っていない VA をマップする。
-    if let Err(error) = unsafe { table.map_4kib(virt, frame, attributes, allocator) } {
+    if let Err(error) = unsafe { table.map_4kib(virt, frame, permissions, allocator) } {
         logger.error(format_args!(
             "smp: could not map the shootdown probe page: {error:?}"
         ));

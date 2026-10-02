@@ -36,10 +36,11 @@ use common::arch::x86_64::cpu;
 use common::log::Logger;
 use common::machine::pc::serial::Serial;
 
-use crate::arch::x86_64::paging::active::{ActivePageTable, MapUpdateError, PageAttributes};
+use crate::arch::x86_64::paging::active::{ActivePageTable, MapUpdateError};
 use crate::arch::x86_64::paging::entry;
 use crate::frame_allocator::{FrameAllocator, FRAME_SIZE};
 use crate::machine::pc::acpi::{IoApicLocation, MadtSurvey};
+use crate::paging::permissions::PagePermissions;
 
 /// Local APIC の ID レジスタのオフセット。ID はビット 31:24 にある。
 const LAPIC_REGISTER_ID: u64 = 0x20;
@@ -331,19 +332,8 @@ fn map_mmio_page<const CAP: usize>(
         // テーブルへ U ビットを混ぜない。`cacheable=false` により PCD が立つ
         // （MMIO では読み書きの順序と副作用が意味を持つため。ADR-0015）。
         // 既に葉が present なら `AlreadyMapped` が返り、何も書き換えない。
-        let result = unsafe {
-            table.map_4kib(
-                virt,
-                target,
-                PageAttributes {
-                    user: false,
-                    writable: true,
-                    cacheable: false,
-                    shared: false,
-                },
-                allocator,
-            )
-        };
+        let result =
+            unsafe { table.map_4kib(virt, target, PagePermissions::kernel_device(), allocator) };
         match result {
             Ok(()) => {}
             // 一律に失敗としない。既に正しく写っているなら、その環境で

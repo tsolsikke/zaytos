@@ -30,6 +30,7 @@ use common::arch::x86_64::cpu;
 use common::critical::InterruptGuard;
 
 use crate::frame_allocator::{FrameAllocator, FRAME_SIZE};
+use crate::paging::permissions::PagePermissions;
 
 use common::addr::{DirectMap, PhysAddr, VirtAddr};
 
@@ -217,40 +218,6 @@ pub enum MapUpdateError {
     OutOfFrames,
     /// マップしようとした葉が既に present。二重マップを黙って上書きしない（M5-e-2）。
     AlreadyMapped,
-}
-
-/// [`ActivePageTable::map_4kib`] がマップする 1 枚に与える属性（S9-a）。
-///
-/// # なぜ bool を並べずに構造体にするか
-///
-/// 引数が 3 つとも `bool` になる。位置引数で並べると、取り違えても型が通り、
-/// **静かに違う属性のページがマップされる。** フィールド名を書かせる形なら、
-/// 取り違えはコンパイルエラーになるか、読めば分かる。
-/// **マッピングの属性は「ガードを写像の不在で作る」と同じで、間違えたことが後から
-/// 症状としてしか出ない種類の値である。**
-///
-/// # 足りない属性
-///
-/// **実行可否（NX）は無い。** **カーネルは `EFER.NXE` を立てていない**（BSP ではファームウェア
-/// 次第。AP は BSP の値をコピーする）ので、NXE が 0 のコアで立てると予約ビット違反の #PF になる。
-/// 有効化は別項の解禁条件に従う（`docs/deferred-decisions.md`）。
-/// G と PWT と PAT も無い。前者は立てない方針、後の 2 つは要求が出ていない。
-///
-/// # 契約（境界の型。2026-09-30）
-///
-/// - 共通の側は、ページを足すときの属性を欄の名前で書いて渡す（`crate::syscall`・`crate::smp`・
-///   `crate::userland`）。欄の意味をページテーブルのビットへ直すのは `arch` である。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PageAttributes {
-    /// Ring 3 から到達できるか（U/S）。**中間エントリへも伝播する。**
-    pub user: bool,
-    /// 書き込めるか（W）。**葉だけに効く。中間へは伝播しない。**
-    pub writable: bool,
-    /// キャッシュしてよいか。偽なら PCD を立てる（MMIO 用）。
-    pub cacheable: bool,
-    /// 共有メモリの葉か（`ADR-0065`）。**真なら PTE のビット 9 を立てる**——
-    /// **`destroy` はこの葉を集めない（`crate::shm` が参照数で返す）。** **葉だけに効く。**
-    pub shared: bool,
 }
 
 /// 分割の結果。呼び出し側が照合に使う。
@@ -534,7 +501,7 @@ impl ActivePageTable {
     /// 稼働中テーブルへ 4KiB ページを 1 枚マップする（M5-e-2）。
     ///
     /// 途中の中間テーブル（PDPT/PD/PT）が不在なら確保して作る。
-    /// [`PageAttributes::user`] が真なら、**作る中間エントリと葉 PTE の両方**で
+    /// 権限がユーザーから届くものなら、**作る中間エントリと葉 PTE の両方**で
     /// U/S ビット（[`entry::PTE_USER`]）を立て、Ring 3 から到達可能にする。
     /// CPU は各階層の U/S を AND で合成するため、ユーザーページは PML4 から PT まで
     /// 全階層で U=1 が要る。
@@ -551,11 +518,11 @@ impl ActivePageTable {
     ///
     /// # 属性
     ///
+    /// **権限は [`PagePermissions`] で受け、ビットへ直すのは `entry` の変換である**
+    /// （[`entry::leaf_entry`] と [`entry::table_entry`]。2026-10-02）。
     /// G は立てない（TLB を CR3 リロード / `invlpg` で管理する前提。
     /// `tlb_flush_precondition` の G=0 前提）。NX も立てない（EFER.NXE 未有効。
-    /// 予約ビット違反の #PF を避ける）。書き込み可否は
-    /// [`PageAttributes::writable`]、キャッシュは [`PageAttributes::cacheable`] で
-    /// 制御する。
+    /// 予約ビット違反の #PF を避ける）。
     ///
     /// # 書き込み可否は葉だけで表す。中間へは伝播しない
     ///
@@ -571,7 +538,7 @@ impl ActivePageTable {
     /// 「書き込めるが実行もできる」ページしか作れず、`W^X` は成立していない。**
     /// 名前だけ先に使うと、到達していないものを到達したように書くことになる。
     ///
-    /// # `writable: false` でマップしたページについて、何を主張してよいか
+    /// # 書けない権限でマップしたページについて、何を主張してよいか
     ///
     /// **主張してよいのは「Ring 3 から書くと #PF になる」までである。**
     /// 「カーネル（Ring 0）から書いても落ちる」は、まだ主張しない。**`CR0.WP` は 2026-09-24 から
@@ -588,27 +555,22 @@ impl ActivePageTable {
         &mut self,
         virt: VirtAddr,
         phys: PhysAddr,
-        attributes: PageAttributes,
+        permissions: PagePermissions,
         frames: &mut FrameAllocator<CAP>,
     ) -> Result<(), MapUpdateError> {
         let _guard = InterruptGuard::enter();
 
-        // 中間エントリのフラグ。U だけを伝播する（AND 合成のため全階層に要る）。
-        // W は伝播しない（上の doc）。
-        let mut table_flags = entry::PTE_PRESENT | entry::PTE_WRITABLE;
-        if attributes.user {
-            table_flags |= entry::PTE_USER;
-        }
-
+        // 中間エントリは、U だけを伝播する（AND 合成のため全階層に要る）。W は伝播しない（上の doc）。
+        // ビットは `entry::table_entry` が決める。
         // PML4 → PDPT → PD を辿り、不在の中間を確保して作る。
         // SAFETY: pml4_phys は current() が読んだ稼働中 PML4。添字は 512 未満。
         let pdpt = unsafe {
-            self.ensure_child(self.pml4_phys, entry::pml4_index(virt), table_flags, frames)?
+            self.ensure_child(self.pml4_phys, entry::pml4_index(virt), permissions, frames)?
         };
         // SAFETY: 直前に得た有効な PDPT。
-        let pd = unsafe { self.ensure_child(pdpt, entry::pdpt_index(virt), table_flags, frames)? };
+        let pd = unsafe { self.ensure_child(pdpt, entry::pdpt_index(virt), permissions, frames)? };
         // SAFETY: 直前に得た有効な PD。
-        let pt = unsafe { self.ensure_child(pd, entry::pd_index(virt), table_flags, frames)? };
+        let pt = unsafe { self.ensure_child(pd, entry::pd_index(virt), permissions, frames)? };
 
         // 葉。既に present なら二重マップとして弾く（黙って上書きしない）。
         let pt_index = entry::pt_index(virt);
@@ -618,30 +580,15 @@ impl ActivePageTable {
             return Err(MapUpdateError::AlreadyMapped);
         }
 
-        let mut leaf_flags = entry::PTE_PRESENT;
-        // 破壊テスト (S9-a, map-force-writable): 書き込み可否の引数を無視して常に W=1 に
-        // する。読み取り専用でマップしたユーザーページへ Ring 3 が書けてしまい、
-        // ring3-vectors の #PF-write-ro が #PF ではなく後続の ud2 で終了させられる。
-        if attributes.writable || cfg!(feature = "map-force-writable") {
-            leaf_flags |= entry::PTE_WRITABLE;
-        }
-        if attributes.user {
-            leaf_flags |= entry::PTE_USER;
-        }
-        if !attributes.cacheable {
-            leaf_flags |= entry::PTE_PCD;
-        }
-        // **共有メモリの葉に目印を立てる（`ADR-0065`）。** **`destroy` が集めないための目印で、
-        // 立てる者は `crate::syscall` の `mmap` だけである**（A-4 まで誰も立てない）。
-        if attributes.shared {
-            leaf_flags |= entry::PTE_SHARED;
-        }
+        // **葉のビットは `entry::leaf_entry` が決める**（書けるか・ユーザーから届くか・キャッシュ・共有の印）。
+        // 共有の印（`ADR-0065`）は、`destroy` が集めないための目印で、立てるのは `crate::syscall` の `mmap` の
+        // 2 つだけである。破壊テスト `map-force-writable` は、変換の中に在る。
         // SAFETY: pt/添字は上記の契約。書く値は 4KiB ページを指す正しい PTE。
         unsafe {
             self.write(
                 pt,
                 pt_index,
-                (phys.as_u64() & entry::ADDR_MASK_4K) | leaf_flags,
+                entry::leaf_entry(phys, permissions, entry::LeafSize::Small),
             )
         };
         // SAFETY: テーブルの書き換えが終わってから、追加した 1 本を落とす。
@@ -650,7 +597,7 @@ impl ActivePageTable {
     }
 
     /// `table_phys[index]` が指す子テーブルの物理を返す。不在なら 1 枚確保して
-    /// ゼロ埋めし、`table_flags` で親エントリを書く（M5-e-2）。
+    /// ゼロ埋めし、葉の権限から決まる途中の項目（[`entry::table_entry`]）を書く（M5-e-2）。
     ///
     /// 既に present の中間があればそれをそのまま返し、U ビットを立て直さない
     /// （[`Self::map_4kib`] のドキュメント参照）。
@@ -663,7 +610,7 @@ impl ActivePageTable {
         &mut self,
         table_phys: PhysAddr,
         index: usize,
-        table_flags: u64,
+        permissions: PagePermissions,
         frames: &mut FrameAllocator<CAP>,
     ) -> Result<PhysAddr, MapUpdateError> {
         // SAFETY: 呼び出し元契約による。読み取りのみ。
@@ -705,14 +652,8 @@ impl ActivePageTable {
             );
         }
         // SAFETY: table_phys/index は上記契約。新規に確保した child を指す
-        // 中間エントリを書く。table_flags は呼び出し側が U を含めて決める。
-        unsafe {
-            self.write(
-                table_phys,
-                index,
-                (child.as_u64() & entry::ADDR_MASK_4K) | table_flags,
-            )
-        };
+        // 中間エントリを書く。U を立てるかは、葉の権限から変換が決める。
+        unsafe { self.write(table_phys, index, entry::table_entry(child, permissions)) };
         Ok(child)
     }
 }

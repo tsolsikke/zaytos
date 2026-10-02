@@ -9,8 +9,9 @@ use common::log::Logger;
 use common::machine::pc::serial::Serial;
 
 use crate::arch::x86_64::ap_bring_up::ApStacks;
-use crate::arch::x86_64::paging::active::{ActivePageTable, PageAttributes};
+use crate::arch::x86_64::paging::active::ActivePageTable;
 use crate::frame_allocator::FrameAllocator;
+use crate::paging::permissions::PagePermissions;
 
 #[cfg(test)]
 mod tests {
@@ -185,11 +186,10 @@ pub unsafe fn map_ap_stacks<const CAP: usize>(
             //
             // 破壊テスト (2026-10-01, ap-stacks-uncached-test): キャッシュ無効で写す。**起動は通る**（遅くなるだけ）。
             // ページの権限の一覧の道具が、この領域のキャッシュの属性の違いを名前つきで示す。
-            let attributes = PageAttributes {
-                user: false,
-                writable: true,
-                cacheable: !cfg!(feature = "ap-stacks-uncached-test"),
-                shared: false,
+            let attributes = if cfg!(feature = "ap-stacks-uncached-test") {
+                PagePermissions::kernel_device()
+            } else {
+                PagePermissions::kernel_data()
             };
             // SAFETY: 稼働中のテーブルへ、まだ誰も使っていない VA をマップする。
             if let Err(error) = unsafe { table.map_4kib(virt, frame, attributes, allocator) } {
