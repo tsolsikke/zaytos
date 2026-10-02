@@ -9516,6 +9516,40 @@ fn assert_folded_at(
     cpu::halt_forever();
 }
 
+/// 起動時の Ring 3 の試しのコードのページを、カーネルが書くための番地（2026-10-02。`ADR-0071` の決定 3）。
+///
+/// **ユーザーの側の番地（`ring3::USER_CODE_VIRT`）は、読んで実行するだけで、書けない。** カーネルは、同じ
+/// フレームを直接マッピングの側の番地から書く。**既に在る葉の権限を、書くために後から変えることはしない。**
+///
+/// **直接マッピングという別名からは書ける。** 実行できるページに、書ける別名が無いことまでは、まだ求めていない
+/// （実行禁止の 3 段目。保留している。`docs/deferred-decisions.md`）。
+///
+/// コードのページがマップされていなければ、名前つきで止まる（`verify_ring3_excursion` がマップする）。
+fn ring3_trial_code_alias(logger: &mut Logger<Serial>) -> *mut u8 {
+    use kernel::arch::x86_64::paging::active::ActivePageTable;
+    use kernel::arch::x86_64::ring3;
+
+    let direct_map = common::addr::direct_map();
+    let code_virt = common::addr::VirtAddr::new(ring3::USER_CODE_VIRT)
+        .expect("the user code virtual address is canonical");
+    // SAFETY: CR3 は自前のテーブルで、配下は登録済みの直接マッピングで読める。読むだけである。
+    let table = unsafe { ActivePageTable::current(direct_map) };
+    match table.translate(code_virt) {
+        Ok(Some(translation)) => {
+            let frame = common::addr::PhysAddr::new(translation.phys.as_u64() & !0xFFF)
+                .expect("a frame address fits in a physical address");
+            direct_map.phys_to_virt(frame).as_mut_ptr::<u8>()
+        }
+        other => {
+            logger.error(format_args!(
+                "ring3: the trial code page {:#x} is not mapped ({other:?}); halting",
+                code_virt.as_u64()
+            ));
+            cpu::halt_forever();
+        }
+    }
+}
+
 /// Ring 3 への単発遠征を検証する（M5-e-3）。
 ///
 /// M5-e-2 が残した PML4[[`USER_PML4_INDEX`]] サブツリーへ、ユーザーコード（`cli` 1 命令）
@@ -9564,13 +9598,14 @@ fn verify_ring3_excursion<const CAP: usize>(
     // 2 ページを U=1 でマップする（M5-e-2 残置の中間テーブルを再利用）。
     // 破壊テスト (ring3-test-user-page-supervisor): USER を落とす（U=0）。遠征前の両側監査が
     // user violation として検出する。
-    // **権限は用途の名前で決める**（2026-10-02）。コードのページは、書いてから実行するので、書けて実行もできる
-    // 区画として取る（実行禁止を有効にする段で、この試しの形を変える。`ADR-0071` の決定 3）。
+    // **権限は用途の名前で決める**（2026-10-02）。**コードのページは、ユーザーの側では読んで実行するだけで、
+    // 書けない**（`ADR-0071` の決定 3。以前は、書いてから実行するので、書けて実行もできる区画として取っていた）。
+    // **命令を書くのはカーネルで、同じフレームを直接マッピングの番地から書く**（[`ring3_trial_code_alias`]）。
     // 3 枚目は読むだけでマップする（S9-a）。**Ring 3 からの書き込みが #PF に
     // なることを ring3-vectors の 6 本目が確かめる的である。**
     #[cfg(not(feature = "ring3-test-user-page-supervisor"))]
     let (code, stack, read_only) = (
-        PagePermissions::user_program(true, true),
+        PagePermissions::user_program(false, true),
         PagePermissions::user_data(),
         PagePermissions::user_program(false, false),
     );
@@ -9595,10 +9630,11 @@ fn verify_ring3_excursion<const CAP: usize>(
         }
     }
 
-    // ユーザーコードへ cli(0xFA) を書き込む。NX を立てていないので実行可能。
-    // SAFETY: code_virt は今マップした writable なユーザーページ。SMAP は未有効。
+    // ユーザーコードへ cli(0xFA) を書き込む。**書くのは、直接マッピングの側の番地からである**（ユーザーの側の
+    // 番地は、書けない権限でマップした）。
+    // SAFETY: 今マップしたコードのページのフレームを、直接マッピング越しに書く。ほかに使う者は居ない。
     unsafe {
-        core::ptr::write_volatile(code_virt.as_mut_ptr::<u8>(), 0xFA);
+        core::ptr::write_volatile(ring3_trial_code_alias(logger), 0xFA);
     }
 
     // マップした直後の両側 U/S 監査（遠征前）。
@@ -9814,10 +9850,10 @@ fn verify_syscall_roundtrip(logger: &mut Logger<Serial>) {
     emit(&[0xFA], &mut code, &mut n);
     let code_len = n;
 
-    // SAFETY: code_virt は今マップを確認したユーザーページ。NX 未設定で実行可能、
-    // SMAP 未有効で書き込み可能。code_len <= 64 <= 4096。
+    // SAFETY: 今マップを確認したユーザーのコードのページのフレームを、直接マッピング越しに書く
+    // （ユーザーの側の番地は書けない）。code_len <= 64 <= 4096。
     unsafe {
-        let p = code_virt.as_mut_ptr::<u8>();
+        let p = ring3_trial_code_alias(logger);
         for (i, byte) in code[..code_len].iter().enumerate() {
             core::ptr::write_volatile(p.add(i), *byte);
         }
@@ -9983,9 +10019,6 @@ fn issue_ptr_len_syscall(logger: &mut Logger<Serial>, number: u64, buf: u64, len
     use kernel::arch::x86_64::ring3;
     use kernel::syscall;
 
-    let code_virt = common::addr::VirtAddr::new(ring3::USER_CODE_VIRT)
-        .expect("the user code virtual address is canonical");
-
     // ユーザールーチン: movabs rdi, buf; movabs rsi, len; mov eax, number;
     //   int 0x80; mov [rsp-8], rax; cli
     // buf は 512 GiB 付近で 32bit に収まらないので movabs（imm64）で積む。
@@ -10007,10 +10040,10 @@ fn issue_ptr_len_syscall(logger: &mut Logger<Serial>, number: u64, buf: u64, len
     emit(&[0xFA], &mut code, &mut n); // cli
     let code_len = n;
 
-    // SAFETY: code_virt は verify_ring3_excursion がマップしたユーザーコードページ。NX 未設定で
-    // 実行可能、SMAP 未有効で書き込み可能。code_len <= 64 <= 4096。
+    // SAFETY: verify_ring3_excursion がマップしたユーザーのコードのページのフレームを、直接マッピング越しに書く
+    // （ユーザーの側の番地は書けない）。code_len <= 64 <= 4096。
     unsafe {
-        let p = code_virt.as_mut_ptr::<u8>();
+        let p = ring3_trial_code_alias(logger);
         for (i, byte) in code[..code_len].iter().enumerate() {
             core::ptr::write_volatile(p.add(i), *byte);
         }
@@ -10373,13 +10406,14 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<Serial>) {
     ];
 
     let main_rsp0_top = gdt::active_kernel_entry_stack_top();
-    let code_ptr = ring3::USER_CODE_VIRT as *mut u8;
+    // **命令を書くのは、直接マッピングの側の番地からである**（ユーザーの側の番地は、書けない権限でマップしてある）。
+    let code_ptr = ring3_trial_code_alias(logger);
 
     for (name, expected_vector, bytes, fault_offset, load_target, expected_error, is_store) in cases
     {
         // ユーザーコードページの先頭を、この遠征の命令列で埋める。
-        // SAFETY: verify_ring3_excursion がマップした U=1 / W=1 のユーザーページ。
-        // 書くのは先頭の数バイトだけで、4KiB に収まる。SMAP は未有効。
+        // SAFETY: verify_ring3_excursion がマップしたユーザーのコードのページのフレームを、直接マッピング越しに
+        // 書く。書くのは先頭の数バイトだけで、4KiB に収まる。
         unsafe {
             if expected_vector == 14 {
                 // movabs rax, imm64
