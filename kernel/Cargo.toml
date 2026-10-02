@@ -716,6 +716,22 @@ nx-probe-ap-without-nxe-test = ["nx-probe-only-leaf-test"]
 # AP が、本番のページテーブルへ切り替える前に、EFER.NXE を落とす（2026-10-02）。
 # 切り替える前の確かめが、名前つきで止める。
 ap-switches-without-nxe-test = []
+# 権限の違反の破壊テストの傘（2026-10-02。カーネルの写像の W^X）。試しが告げた番地と CR2 を突き合わせる行を、
+# 例外の出力に足す。下の 5 つが入れる。単独では何も起こさない。
+wx-violation-test = []
+# カーネルの像の .text の 1 バイトへ、カーネルが書く。#PF（書き込み・権限の違反）で止まる。
+kernel-writes-text-test = ["wx-violation-test"]
+# カーネルの像の読むだけの区画の 1 バイトへ、カーネルが書く。#PF（書き込み・権限の違反）で止まる。
+kernel-writes-rodata-test = ["wx-violation-test"]
+# カーネルの像の .data に置いた 1 バイト（ret）を、カーネルが実行する。#PF（命令の取り出し）で止まる。
+kernel-executes-data-test = ["wx-violation-test"]
+# カーネルの関数を、直接マッピングの番地（別名）から実行する。#PF（命令の取り出し）で止まる。
+kernel-executes-direct-map-test = ["wx-violation-test"]
+# AP の CPU ごとのスタックのページに置いた 1 バイト（ret）を、カーネルが実行する。#PF（命令の取り出し）で止まる。
+kernel-executes-stack-test = ["wx-violation-test"]
+# カーネルの像の読むだけの区画の最初の 1 ページを、書き込み可で写す（2026-10-02）。起動は通る。
+# ページの権限の一覧が、違いを名前つきで示す。`cargo xtask run --page-permissions --sabotage kernel-rodata-page-writable-test`。
+kernel-rodata-page-writable-test = []
 # 権限の変換が、実行の欄を無視して、実行禁止のビットを立てない（直す前の形。2026-10-02）。
 # 試しのページを足した直後の読み戻しが、実行禁止のビットが付いていないことを名指しして止まる。
 leaf-ignores-execute-test = []

@@ -26,6 +26,8 @@ pub use execute_disable_probe::{read_execute_disable_probe, ProbeReading, PROBE_
 pub use fp::clobber_fp_state_on_kernel_entry;
 pub use fp::{restore_fp_state, save_fp_state, FpArea};
 pub use gdt::{active_kernel_entry_stack_top, set_active_kernel_entry_stack_top};
+#[cfg(feature = "wx-violation-test")]
+pub use idt::announce_expected_fault;
 pub use idt::context::IrqContext;
 pub use idt::{
     advance_monotonic_ticks, count_timer_tick, entries_from_direction_flag_set, first_tick_arrival,

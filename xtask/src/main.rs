@@ -363,6 +363,86 @@ const CRITICAL_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // **権限の違反が #PF で止まること**（2026-10-02。カーネルの写像の W^X。`ADR-0071` の手順 4）。
+    // **「落ちた」だけにしない**——触る前に、狙うページが在ること・権限を稼働中の表から読み戻した行と、誤りコード
+    // （書き込みか命令の取り出しか、権限の違反か）と、CR2 が告げた番地と同じであることを見る。
+    // 触った後に戻ってきた行（守りが効いていない）が出ないことも見る。
+    // カーネルの像の `.text` の 1 バイトへ書く。
+    CriticalTest {
+        name: "kernel-writes-text",
+        feature: "kernel-writes-text-test",
+        expected_markers: &[
+            "wx-test: about to write to the kernel text at 0xffffffff80",
+            "present=true writable=false executable=true",
+            "exception: vector=14 (#PF page fault)",
+            "cause=protection violation access=write mode=supervisor",
+            "cr2 is the address the permission test announced = true",
+        ],
+        forbidden_markers: &[
+            "wx-test: the write went through",
+            "wx-test: the call returned",
+            "the sabotage did nothing",
+        ],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // カーネルの像の読むだけの区画の 1 バイトへ書く。
+    CriticalTest {
+        name: "kernel-writes-rodata",
+        feature: "kernel-writes-rodata-test",
+        expected_markers: &[
+            "wx-test: about to write to the kernel read-only data at 0xffffffff80",
+            "present=true writable=false executable=false",
+            "exception: vector=14 (#PF page fault)",
+            "cause=protection violation access=write mode=supervisor",
+            "cr2 is the address the permission test announced = true",
+        ],
+        forbidden_markers: &[
+            "wx-test: the write went through",
+            "wx-test: the call returned",
+            "the sabotage did nothing",
+        ],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // カーネルの像の `.data` に置いた 1 バイト（ret）を実行する。
+    CriticalTest {
+        name: "kernel-executes-data",
+        feature: "kernel-executes-data-test",
+        expected_markers: &[
+            "wx-test: about to execute a byte in the kernel data at 0xffffffff80",
+            "present=true writable=true executable=false",
+            "exception: vector=14 (#PF page fault)",
+            "cause=protection violation access=instruction fetch mode=supervisor",
+            "cr2 is the address the permission test announced = true",
+        ],
+        forbidden_markers: &[
+            "wx-test: the write went through",
+            "wx-test: the call returned",
+            "the sabotage did nothing",
+        ],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // カーネルの関数を、直接マッピングの番地（書ける別名）から実行する。**別名は実行できない。**
+    CriticalTest {
+        name: "kernel-executes-direct-map",
+        feature: "kernel-executes-direct-map-test",
+        expected_markers: &[
+            "wx-test: about to execute a kernel function through its direct map alias at 0xffff8000",
+            "present=true writable=true executable=false",
+            "exception: vector=14 (#PF page fault)",
+            "cause=protection violation access=instruction fetch mode=supervisor",
+            "cr2 is the address the permission test announced = true",
+        ],
+        forbidden_markers: &[
+            "wx-test: the write went through",
+            "wx-test: the call returned",
+            "the sabotage did nothing",
+        ],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // **権限の変換が、実行禁止のビットを立てない形**（2026-10-02。実行禁止を入れる前の形）。**試しのページを
     // 足した直後の読み戻しが、ビットが付いていないことを名指しして止まる**——付いていないページを読んでも、
     // 何も確かめたことにならないからである。「読めた」の行は出ない。
@@ -6197,6 +6277,16 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         key: "ap-stacks-uncached-test",
         signs: &[
             "before interrupts are enabled | application processor stacks | 4K: cache 0 -> 2",
+        ],
+        note: "",
+        reached: true,
+    },
+    NamedJudgement {
+        check: "page permissions",
+        key: "kernel-rodata-page-writable-test",
+        signs: &[
+            "before interrupts are enabled | kernel rodata | 4K: new (w=1 u=0 x=0",
+            "after the application processors started | kernel rodata | 4K: new (w=1 u=0 x=0",
         ],
         note: "",
         reached: true,
@@ -22991,6 +23081,26 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // AP の CPU ごとのスタックのページに置いた 1 バイト（ret）を実行する（2026-10-02）。**像の `.data` とは別の経路
+    // （稼働中の表へ 1 枚ずつ足す経路）で写したページの実行禁止を見る。** 実行するのは BSP で、AP を起こす前である。
+    CriticalTest {
+        name: "kernel-executes-stack",
+        feature: "kernel-executes-stack-test",
+        expected_markers: &[
+            "wx-test: about to execute a byte on a per-CPU stack page at 0xffff8100",
+            "present=true writable=true executable=false",
+            "exception: vector=14 (#PF page fault)",
+            "cause=protection violation access=instruction fetch mode=supervisor",
+            "cr2 is the address the permission test announced = true",
+        ],
+        forbidden_markers: &[
+            "wx-test: the write went through",
+            "wx-test: the call returned",
+            "the sabotage did nothing",
+        ],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     CriticalTest {
         name: "ap-touch-scheduler",
         feature: "smp-ap-touch-scheduler-test",
@@ -28196,6 +28306,25 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             &mut failed,
         );
 
+        // カーネルの像の読むだけの区画の 1 ページを、書き込み可で写す形（2026-10-02。像を区画ごとに写す経路）。
+        total += 1;
+        begin_item(
+            Family::Memory,
+            "the page permissions listing names a page of the kernel read-only data that was mapped writable",
+        );
+        let result = cmd_page_permissions(
+            &PAGE_PERMISSIONS_SCENES[0],
+            &["kernel-rodata-page-writable-test"],
+            false,
+        );
+        report_sabotage_verdict(
+            "page permissions",
+            "writable rodata page",
+            &["kernel-rodata-page-writable-test"],
+            &result,
+            &mut failed,
+        );
+
         // **`zi` の実演（zi-d）。** 決定的な台本入力で、開いて動いて編集し、
         // `:wq` で保存し、`cat` で読み戻すところまでを見る。
         total += 1;
@@ -30266,7 +30395,7 @@ fn count_elements(text: &str) -> usize {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 60,
-    full: 447,
+    full: 453,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。

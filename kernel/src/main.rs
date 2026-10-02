@@ -1582,6 +1582,10 @@ extern "sysv64" fn kernel_main() -> ! {
     // **この後は、カーネルの写像の権限を変えない。**
     report_kernel_image_permissions(&mut logger);
 
+    // 破壊テスト (wx-violation-test): 書けないページへ書くか、実行できないページを実行する。#PF で止まる。
+    #[cfg(feature = "wx-violation-test")]
+    run_permission_violation_test(&mut logger);
+
     // === S2-a: APIC のレジスタを読んで現在値を記録する ===
     //
     // 読むだけの段階で、割り込みの経路は変えない（PIC / PIT のまま）。I/O APIC の
@@ -12048,6 +12052,41 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "CPU ごとのスタックをキャッシュ無効で写す",
     ),
     (
+        "wx-violation-test",
+        cfg!(feature = "wx-violation-test"),
+        "権限の違反の破壊テストの傘（例外の出力に、告げた番地との突き合わせの行を足す）",
+    ),
+    (
+        "kernel-writes-text-test",
+        cfg!(feature = "kernel-writes-text-test"),
+        "カーネルの像の .text の 1 バイトへ、カーネルが書く",
+    ),
+    (
+        "kernel-writes-rodata-test",
+        cfg!(feature = "kernel-writes-rodata-test"),
+        "カーネルの像の読むだけの区画の 1 バイトへ、カーネルが書く",
+    ),
+    (
+        "kernel-executes-data-test",
+        cfg!(feature = "kernel-executes-data-test"),
+        "カーネルの像の .data に置いた 1 バイトを、カーネルが実行する",
+    ),
+    (
+        "kernel-executes-direct-map-test",
+        cfg!(feature = "kernel-executes-direct-map-test"),
+        "カーネルの関数を、直接マッピングの番地（別名）から実行する",
+    ),
+    (
+        "kernel-executes-stack-test",
+        cfg!(feature = "kernel-executes-stack-test"),
+        "AP の CPU ごとのスタックのページに置いた 1 バイトを、カーネルが実行する",
+    ),
+    (
+        "kernel-rodata-page-writable-test",
+        cfg!(feature = "kernel-rodata-page-writable-test"),
+        "カーネルの像の読むだけの区画の最初の 1 ページを、書き込み可で写す",
+    ),
+    (
         "leaf-ignores-execute-test",
         cfg!(feature = "leaf-ignores-execute-test"),
         "権限の変換が、実行の欄を無視して、実行禁止のビットを立てない",
@@ -13508,7 +13547,36 @@ fn map_kernel_image<const CAP: usize>(
         let start = common::addr::PhysAddr::new(section.start)
             .expect("a kernel image address fits in a physical address");
         let virt = kernel::kernel_virt_from_phys(start);
-        if let Err(e) = builder.map_range(virt, start, section.len(), section.permissions) {
+        // 破壊テスト (2026-10-02, kernel-rodata-page-writable): 読むだけの区画の最初の 1 ページを、書けるデータの
+        // 権限で写す。**起動は通る**（誰も書かないので）。ページの権限の一覧が、違いを名前つきで示す。
+        let sabotaged_pages = if cfg!(feature = "kernel-rodata-page-writable-test")
+            && section.permissions
+                == kernel::paging::permissions::PagePermissions::kernel_read_only()
+        {
+            1
+        } else {
+            0
+        };
+        let sabotaged_len = sabotaged_pages * frame_allocator::FRAME_SIZE;
+        let mapped = builder
+            .map_range(
+                virt,
+                start,
+                sabotaged_len,
+                kernel::paging::permissions::PagePermissions::kernel_data(),
+            )
+            .and_then(|()| {
+                builder.map_range(
+                    virt.checked_add(sabotaged_len)
+                        .expect("the section stays within the kernel image"),
+                    start
+                        .checked_add(sabotaged_len)
+                        .expect("the section stays within the kernel image"),
+                    section.len() - sabotaged_len,
+                    section.permissions,
+                )
+            });
+        if let Err(e) = mapped {
             logger.error(format_args!(
                 "{who}: kernel image {} mapping ({:#x} -> phys {:#x}, len {:#x}) failed: {e:?}",
                 section.name,
@@ -13563,10 +13631,20 @@ fn report_kernel_image_permissions(logger: &mut Logger<Serial>) {
         }
         // 見張りのページを除いた、マップされているはずのページ数。
         let pages = section.pages() - guard_pages;
+        // 破壊テスト `kernel-rodata-page-writable-test` は、読むだけの区画の 1 ページを書ける権限で写す。その形でも
+        // 起動を続け、ページの権限の一覧に違いを出させる（ここで止めると、一覧まで届かない）。
+        let tolerated_writable = if cfg!(feature = "kernel-rodata-page-writable-test")
+            && section.permissions
+                == kernel::paging::permissions::PagePermissions::kernel_read_only()
+        {
+            1
+        } else {
+            0
+        };
         let want_writable = if section.permissions.write() {
             pages
         } else {
-            0
+            tolerated_writable
         };
         // **変換が実行禁止のビットを立てない破壊テストのビルドでは、どのページも実行できる形になる**
         // （`entry::LEAVES_CARRY_EXECUTE_DISABLE`。実行禁止のビットを持つ葉を、試しのページだけにする形）。
@@ -13602,6 +13680,122 @@ fn report_kernel_image_permissions(logger: &mut Logger<Serial>) {
             "kernel-image: a section of the kernel image is not mapped with its own permissions; halting"
         ));
         cpu::halt_forever();
+    }
+}
+
+/// 権限の違反の破壊テスト（2026-10-02。`ADR-0071` の手順 4。`wx-violation-test` の傘の下の 5 つ）。
+///
+/// **書けないページへ書く・実行できないページを実行すると、#PF で止まること**を見る。**「落ちた」だけにしない**
+/// ——触る前に、狙うページが在ること・番地・権限を、稼働中の表から読み戻して出し、番地を例外の出力へ告げる。
+/// 例外の出力は、誤りコード（書き込みか命令の取り出しか、権限の違反か）と、CR2 が告げた番地と同じかを出す。
+/// **触った後に戻ってきたら、守りが効いていない**——その行を出す（検査は、その行が出ないことも見る）。
+#[cfg(feature = "wx-violation-test")]
+fn run_permission_violation_test(logger: &mut Logger<Serial>) {
+    use kernel::arch::x86_64::paging::verify;
+
+    /// 読むだけの区画に置かれる 16 バイト（`kernel-writes-rodata-test` の的）。
+    static READ_ONLY_TARGET: [u8; 16] = *b"read-only target";
+    /// `.data` に置かれる `ret`（`kernel-executes-data-test` の的。0 でない初期値なので `.bss` に行かない）。
+    static mut DATA_TARGET: [u8; 16] = [0xC3; 16];
+    /// 何もしないで戻る関数（`kernel-executes-direct-map-test` が、直接マッピングの側の別名から呼ぶ）。
+    extern "C" fn returns_at_once() {}
+
+    let direct_map = common::addr::direct_map();
+    // (何を, 番地, 実行するか（しないなら書く）)。**傘の下の 5 つのうち、入れた 1 つが的を決める。**
+    let target: Option<(&str, u64, bool)> = if cfg!(feature = "kernel-writes-text-test") {
+        Some((
+            "write to the kernel text",
+            report_kernel_image_permissions as *const () as u64,
+            false,
+        ))
+    } else if cfg!(feature = "kernel-writes-rodata-test") {
+        Some((
+            "write to the kernel read-only data",
+            core::ptr::addr_of!(READ_ONLY_TARGET) as u64,
+            false,
+        ))
+    } else if cfg!(feature = "kernel-executes-data-test") {
+        Some((
+            "execute a byte in the kernel data",
+            core::ptr::addr_of!(DATA_TARGET) as u64,
+            true,
+        ))
+    } else if cfg!(feature = "kernel-executes-direct-map-test") {
+        // カーネルの関数のフレームを、直接マッピングの側の番地（別名）で指す。
+        let phys = kernel::kernel_phys_from_virt(
+            common::addr::VirtAddr::new(returns_at_once as *const () as u64)
+                .expect("a kernel function has a canonical address"),
+        );
+        Some((
+            "execute a kernel function through its direct map alias",
+            direct_map.phys_to_virt(phys).as_u64(),
+            true,
+        ))
+    } else if cfg!(feature = "kernel-executes-stack-test") {
+        // AP の CPU ごとのスタックの、いちばん下のページ。**像の `.data` や `.bss` とは別の経路（稼働中の表へ
+        // 1 枚ずつ足す経路）で写したページである。** AP を起こす前なので、まだ誰も使っていない。
+        match kernel::smp::ap_kernel_stack_range(1) {
+            Some((bottom, _)) => {
+                // SAFETY: マップ済みの、まだ誰も使っていない AP のスタックの 1 バイトを書く。
+                unsafe { (bottom as *mut u8).write_volatile(0xC3) };
+                Some(("execute a byte on a per-CPU stack page", bottom, true))
+            }
+            None => {
+                logger.error(format_args!(
+                    "wx-test: no per-CPU stack is mapped for slot 1; the sabotage did nothing"
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let Some((what, address, execute)) = target else {
+        return;
+    };
+    let virt = common::addr::VirtAddr::new(address).expect("the target address is canonical");
+    // SAFETY: 根は稼働中の表で、登録済みの直接マッピングを通して配下の表が読める。読むだけである。
+    let resolved = unsafe {
+        verify::walk_page_table(paging::switch::active_page_table_root(), direct_map, virt)
+    };
+    match resolved {
+        Ok(resolved) => logger.info(format_args!(
+            "wx-test: about to {what} at {address:#018x}: present=true writable={} executable={} \
+             (leaf {:#x}, phys {:#x}) [read back from the live table]",
+            resolved.leaf_writable(),
+            resolved.leaf_executable(),
+            resolved.entry,
+            resolved.phys.as_u64()
+        )),
+        Err(error) => {
+            logger.error(format_args!(
+                "wx-test: the target {address:#018x} is not mapped ({error:?}); the sabotage did nothing"
+            ));
+            return;
+        }
+    }
+    kernel::arch::x86_64::announce_expected_fault(address);
+    if execute {
+        // SAFETY: 破壊テスト。的は `ret` の 1 バイト（か、何もしないで戻る関数）で、実行できてしまった場合は
+        // すぐ戻る。実行禁止が効いていれば、命令の取り出しで #PF になり、ここへは戻らない。
+        unsafe {
+            let call: extern "C" fn() = core::mem::transmute(address as *const ());
+            call();
+        }
+        logger.error(format_args!(
+            "wx-test: the call returned; the page at {address:#018x} is executable, so nothing stopped it"
+        ));
+    } else {
+        // SAFETY: 破壊テスト。的の 1 バイトを読み、同じ値を書き戻す（書けてしまった場合も、中身は変わらない）。
+        // 書けない権限が効いていれば、書き込みで #PF になり、ここへは戻らない。
+        unsafe {
+            let pointer = address as *mut u8;
+            let value = pointer.read_volatile();
+            pointer.write_volatile(value);
+        }
+        logger.error(format_args!(
+            "wx-test: the write went through; the page at {address:#018x} is writable, so nothing stopped it"
+        ));
     }
 }
 

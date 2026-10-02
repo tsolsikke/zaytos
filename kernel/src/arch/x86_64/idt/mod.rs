@@ -2470,6 +2470,19 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
             guard.bottom.as_u64(),
             guard.top.as_u64()
         );
+        // 権限の違反の破壊テスト（`wx-violation-test`）: 試しが「これから触る」と告げた番地と、CR2 を突き合わせる。
+        // **落ちた番地が狙った番地であること**を、止まる側が 1 行で示す（番地はビルドごとに動くので、外からは
+        // 決まった文字列で比べられない）。
+        #[cfg(feature = "wx-violation-test")]
+        {
+            let announced = ANNOUNCED_FAULT_ADDRESS.load(core::sync::atomic::Ordering::SeqCst);
+            let _ = writeln!(
+                serial,
+                "[ERROR]   cr2 is the address the permission test announced = {} (announced \
+                 {announced:#018x})",
+                announced != 0 && announced == context.cr2
+            );
+        }
     } else {
         let _ = writeln!(
             serial,
@@ -2502,6 +2515,18 @@ extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call
     let _ = writeln!(serial, "[ERROR] halting (cli + hlt loop)");
 
     cpu::halt_forever();
+}
+
+/// 権限の違反の破壊テストが「これから触る」と告げた番地（0 は「告げていない」）。**試しのビルドにだけ在る。**
+#[cfg(feature = "wx-violation-test")]
+static ANNOUNCED_FAULT_ADDRESS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// 権限の違反の破壊テストが、これから触る番地を告げる（`wx-violation-test`。2026-10-02）。**例外の出力が、CR2 と
+/// 突き合わせて 1 行出す。**
+#[cfg(feature = "wx-violation-test")]
+pub fn announce_expected_fault(address: u64) {
+    ANNOUNCED_FAULT_ADDRESS.store(address, core::sync::atomic::Ordering::SeqCst);
 }
 
 /// エラーコードをベクタに応じて解釈して出す。
