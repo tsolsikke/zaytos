@@ -70,6 +70,13 @@ pub const PTE_GLOBAL: u64 = 1 << 8;
 /// 使う思想である**（`docs/architecture.md` の「ABIの形は合わせる」）。
 pub const PTE_SHARED: u64 = 1 << 9;
 
+/// 実行の禁止（ビット 63。XD）。**`EFER.NXE` が 0 の CPU では予約のビットで、立てた項目を引くと `#PF` になる。**
+///
+/// **権限の変換（[`leaf_flags`]）は、まだこのビットを立てない。** 立てるのは、試し専用のページを足す
+/// `ActivePageTable::map_execute_disable_probe` だけである（2026-10-02。変換が実行の欄を読むようにする前に、
+/// どの CPU でもこのビットを持つ項目を引けることを確かめる）。
+pub const PTE_NO_EXECUTE: u64 = 1 << 63;
+
 /// 試しの形（`user-leaf-high-bit-test`）が、ユーザーの葉に立てるビット（52）。
 ///
 /// **ビット 52 は、CPU が無視する、ソフトウェア用の空きビットである**（保護キーを使わない間は、52 から 62 が空いて

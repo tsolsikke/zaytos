@@ -1567,6 +1567,17 @@ extern "sysv64" fn kernel_main() -> ! {
         };
     }
 
+    // **実行禁止のビットを付けた試し専用のページを 1 枚マップし、BSP で読む**（2026-10-02。`ADR-0071` の手順 4）。
+    // **AP を起こす前である**——AP は、本番の表へ切り替えた後に同じページを読む（`kernel::smp`）。
+    // SAFETY: 本番テーブルへ切り替え済みで、直接マッピングが使える。起動時の単一の文脈で、AP はまだ走っていない。
+    // BSP の EFER.NXE は、起動の最初期に読み戻して確かめてある（立っていなければ、そこで止まっている）。
+    unsafe {
+        kernel::arch::x86_64::execute_disable_probe::map_execute_disable_probe(
+            &mut logger,
+            &mut allocator,
+        );
+    }
+
     // === S2-a: APIC のレジスタを読んで現在値を記録する ===
     //
     // 読むだけの段階で、割り込みの経路は変えない（PIC / PIT のまま）。I/O APIC の
@@ -11302,6 +11313,21 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "bsp-enters-with-nxe-clear-test",
         cfg!(feature = "bsp-enters-with-nxe-clear-test"),
         "ファームウェアが EFER.NXE を落として渡す形を BSP で作り、カーネルに立てさせる（破壊ではない）",
+    ),
+    (
+        "nx-probe-bsp-without-nxe-test",
+        cfg!(feature = "nx-probe-bsp-without-nxe-test"),
+        "BSP が、実行禁止のビットを付けた試しのページを読む直前に、EFER.NXE を落とす",
+    ),
+    (
+        "nx-probe-ap-without-nxe-test",
+        cfg!(feature = "nx-probe-ap-without-nxe-test"),
+        "AP が、実行禁止のビットを付けた試しのページを読む直前に、EFER.NXE を落とす",
+    ),
+    (
+        "ap-switches-without-nxe-test",
+        cfg!(feature = "ap-switches-without-nxe-test"),
+        "AP が、本番のページテーブルへ切り替える前に、EFER.NXE を落とす",
     ),
     (
         "ap-trampoline-without-nxe-test",

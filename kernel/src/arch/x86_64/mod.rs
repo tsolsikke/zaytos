@@ -4,6 +4,7 @@ pub mod ap_bring_up;
 pub mod ap_stacks;
 pub mod ap_trampoline;
 pub mod cpu_state;
+pub mod execute_disable_probe;
 pub mod fp;
 pub mod gdt;
 pub mod idt;
@@ -20,6 +21,7 @@ pub use ap_bring_up::{bring_up_application_processor, ApBringUp, ApStacks};
 pub use ap_stacks::{kernel_stack_bounds_from_top, map_ap_stacks};
 pub use ap_trampoline::{ap_stack_frame, install_trampoline, trampoline_frame};
 pub use cpu_state::{check_aps_match_bsp, record_this_ap};
+pub use execute_disable_probe::{read_execute_disable_probe, ProbeReading, PROBE_PATTERN};
 #[cfg(feature = "fp-clobber-on-kernel-entry-test")]
 pub use fp::clobber_fp_state_on_kernel_entry;
 pub use fp::{restore_fp_state, save_fp_state, FpArea};

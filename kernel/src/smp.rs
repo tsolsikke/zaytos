@@ -553,6 +553,31 @@ extern "C" fn ap_after_switch(slot: usize) -> ! {
         common::arch::x86_64::halt_forever();
     }
 
+    // **実行禁止のビットを付けた試しのページを、このコアで読む**（2026-10-02。`ADR-0071` の手順 4）。
+    // **BSP が AP を起こす前にマップしてある。** **このコアの EFER.NXE が 0 なら、読んだ時点で予約のビットの違反の
+    // #PF になる**（読めた値と NXE を出す。BSP の行は、このコアについて何も示さない）。
+    match crate::arch::x86_64::read_execute_disable_probe(slot) {
+        Some(reading) if reading.holds() => {
+            let _ = writeln!(
+                serial,
+                "[INFO] nx-probe: ap {slot} read the probe page: value={:#x} (expected {:#x}), \
+                 EFER.NXE={} (expected 1)",
+                reading.value,
+                crate::arch::x86_64::PROBE_PATTERN,
+                u8::from(reading.nxe)
+            );
+        }
+        other => {
+            let _ = writeln!(
+                serial,
+                "[ERROR] nx-probe: ap {slot} read the probe page and got {other:?}, but the value \
+                 must be {:#x} with EFER.NXE set; halting",
+                crate::arch::x86_64::PROBE_PATTERN
+            );
+            common::arch::x86_64::halt_forever();
+        }
+    }
+
     // 破壊テスト (S3-b-2b-2, smp-ap-touch-scheduler): AP からスケジューラの現在タスクを
     // 読む。この段階は AP でタスクを実行しないので、sentinel を読んで落ちるのが
     // 正しい。丸めていたら「タスク 0 が走っている」と静かに答えていた。

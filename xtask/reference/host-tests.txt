@@ -278,6 +278,8 @@ kernel::arch::x86_64::cpu_state::tests::the_measured_state_has_every_required_bi
 kernel::arch::x86_64::cpu_state::tests::the_measured_state_sets_no_reserved_and_no_unclassified_bit
 kernel::arch::x86_64::cpu_state::tests::the_required_bits_line_is_built_from_the_vendor_table
 kernel::arch::x86_64::cpu_state::tests::the_vendor_is_read_from_the_cpuid_signature
+kernel::arch::x86_64::execute_disable_probe::tests::the_probe_sits_at_the_start_of_kernel_slot_261
+kernel::arch::x86_64::execute_disable_probe::tests::the_reading_holds_only_with_the_pattern_and_nxe
 kernel::arch::x86_64::gdt::layout::tests::a_new_tss_has_no_stacks_and_no_io_bitmap
 kernel::arch::x86_64::gdt::layout::tests::a_selector_packs_the_index_above_the_rpl
 kernel::arch::x86_64::gdt::layout::tests::a_tss_descriptor_is_present_and_marked_as_an_available_tss

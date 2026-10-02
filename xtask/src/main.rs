@@ -346,6 +346,22 @@ const CRITICAL_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // **実行禁止のビットを持つ項目を、NXE が 0 のまま引く形**（2026-10-02。BSP）。**試しのページを読む直前に
+    // NXE を落とす。** 読んだ時点で、予約のビットの違反の #PF になり、CR2 が試しのページを指す。
+    // 「読めた」の行は出ない。
+    CriticalTest {
+        name: "nx-probe-bsp-without-nxe",
+        feature: "nx-probe-bsp-without-nxe-test",
+        expected_markers: &[
+            "nx-probe: mapped a probe page at 0xffff828000000000",
+            "exception: vector=14 (#PF page fault)",
+            "reserved bit set in a page table entry",
+            "cr2=0xffff828000000000 (faulting address)",
+        ],
+        forbidden_markers: &["nx-probe: cpu 0 read the probe page", "user-run: hello"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     CriticalTest {
         name: "cpu-state-sees-sce",
         feature: "cpu-state-sees-sce-test",
@@ -17760,6 +17776,10 @@ const BOOT_LOG_CORE_COUNT_MARKERS: &[&str] = &[
     // ので、「AP 1 が BSP と一致する」は参照の側が見ている。**食い違えばカーネルが止まる。**
     "cpu-state: ap ",
     "started AP(s) match the BSP's CR0, CR4 and EFER",
+    // AP が、実行禁止のビットを付けた試しのページを読んだ行（2026-10-02）。**AP の数だけ出る。**
+    // **隠したものを見る者**: `-smp 2` の参照にはこの行が残るので、「AP 1 でも読める」は参照の側が見ている。
+    // BSP の行（`nx-probe: cpu 0`）は、どのコア数でも同じなので、ここには挙げない。
+    "nx-probe: ap ",
     // virtio-blk の feature bits（S13-b）。**実測でコア数に依る**——QEMU は
     // キューの数を vCPU 数に合わせるので、`-smp 1` と `-smp 2` で 0x1000 違う。
     // capacity などの判定は別の行にあり、そちらは残る。
@@ -22918,6 +22938,40 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
             "init: starting /bin/zash",
         ],
         forbidden_markers: &["so the kernel did not write EFER", "[ERROR]", "halting"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // **AP が、実行禁止のビットを持つ項目を、NXE が 0 のまま引く形**（2026-10-02）。**BSP は読めている**
+    // （`nx-probe: cpu 0` の行が出る）。AP が試しのページを読む直前に NXE を落とし、AP の上で、予約のビットの
+    // 違反の #PF になる。
+    CriticalTest {
+        name: "nx-probe-ap-without-nxe",
+        feature: "nx-probe-ap-without-nxe-test",
+        expected_markers: &[
+            "nx-probe: cpu 0 read the probe page: value=0x4e585f50524f4245 (expected 0x4e585f50524f4245), EFER.NXE=1 (expected 1)",
+            "exception: vector=14 (#PF page fault)",
+            "reserved bit set in a page table entry",
+            // **AP の上で起きたこと**を、止まったときのスタックが AP の CPU ごとのスタックの置き場（`PML4[258]`）に
+            // 在ることで見る。
+            "rsp=0xffff8100",
+            "cr2=0xffff828000000000 (faulting address)",
+        ],
+        forbidden_markers: &["nx-probe: ap 1 read the probe page"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // **AP が、NXE が 0 のまま本番のページテーブルへ切り替えようとする形**（2026-10-02）。**切り替える前の
+    // 確かめが、名前つきで止める。** 切り替えた後の行は出ない。
+    CriticalTest {
+        name: "ap-switches-without-nxe",
+        feature: "ap-switches-without-nxe-test",
+        expected_markers: &[
+            "smp: ap 1 is about to load the production page table with EFER.NXE clear (EFER=0x500)",
+        ],
+        forbidden_markers: &[
+            "smp: ap 1 switched to the production page table",
+            "nx-probe: ap 1 read the probe page",
+        ],
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
@@ -30196,7 +30250,7 @@ fn count_elements(text: &str) -> usize {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 60,
-    full: 443,
+    full: 446,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。

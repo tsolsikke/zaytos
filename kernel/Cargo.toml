@@ -702,6 +702,15 @@ bsp-enters-with-nxe-clear-test = []
 # AP のトランポリンが LME だけを立て、NXE を立てない（直す前の形。2026-10-02）。
 # AP がトランポリンを出た直後の EFER を BSP が確かめ、NXE が落ちていることを名指しして止まる。
 ap-trampoline-without-nxe-test = []
+# BSP が、実行禁止のビットを付けた試しのページを読む直前に、EFER.NXE を落とす（2026-10-02）。
+# 読んだ時点で、予約のビットの違反の #PF になる（CR2 が試しのページ）。
+nx-probe-bsp-without-nxe-test = []
+# AP が、実行禁止のビットを付けた試しのページを読む直前に、EFER.NXE を落とす（2026-10-02）。
+# AP の上で、予約のビットの違反の #PF になる。
+nx-probe-ap-without-nxe-test = []
+# AP が、本番のページテーブルへ切り替える前に、EFER.NXE を落とす（2026-10-02）。
+# 切り替える前の確かめが、名前つきで止める。
+ap-switches-without-nxe-test = []
 # その製造元で「分類していない」最初のビットが立っているものとして判定する（2026-09-24。レジスタは
 # 書かない。QEMU の既定の AMD では EFER.SVME）。[WARN] が名前つきで出て、起動は止まらない。
 cpu-state-sees-an-unclassified-bit-test = []

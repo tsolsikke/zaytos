@@ -120,6 +120,43 @@ pub unsafe fn bring_up_application_processor(
         crate::arch::x86_64::cpu_state::adopt_bsp_state_on_this_ap(info.slot);
     }
 
+    // 0-2. **本番のページテーブルへ切り替える前に、このコアの EFER.NXE を確かめる**（2026-10-02。`ADR-0071` の手順 4）。
+    //    **本番の表には、実行禁止のビットを持つ項目が在る。** NXE が 0 のまま切り替えると、その項目を引いた時点で
+    //    予約のビットの違反の #PF になる。**切り替えた後では、このコアのスタック自体がそういうページになりうるので、
+    //    止まる理由を出せない。** だから、起動の表の上に居る今のうちに見る。
+    {
+        use common::arch::x86_64::cpu::{read_efer, Efer};
+        // 破壊テスト (2026-10-02, ap-switches-without-nxe): ここで NXE を落とす。**下の確かめが、切り替える前に
+        // 名前つきで止めること**を見る。載っているのは起動の表で、実行禁止のビットを持つ項目は無い。
+        #[cfg(feature = "ap-switches-without-nxe-test")]
+        // SAFETY: 破壊テスト。NXE だけを落とす（LME はそのまま）。
+        unsafe {
+            common::arch::x86_64::cpu::write_efer(Efer::from_raw(
+                read_efer().raw() & !Efer::NO_EXECUTE_ENABLE,
+            ));
+        }
+        let efer = read_efer().raw();
+        let nxe = u8::from(efer & Efer::NO_EXECUTE_ENABLE != 0);
+        let mut port = Serial::primary();
+        port.init();
+        if nxe != 1 {
+            let _ = writeln!(
+                port,
+                "[ERROR] smp: ap {} is about to load the production page table with EFER.NXE clear \
+                 (EFER={efer:#x}); the table holds entries with the execute-disable bit, which are \
+                 reserved while NXE is clear; halting",
+                info.slot
+            );
+            cpu::halt_forever();
+        }
+        let _ = writeln!(
+            port,
+            "[INFO] smp: ap {} has EFER.NXE={nxe} (expected 1) before it loads the production page \
+             table (EFER={efer:#x})",
+            info.slot
+        );
+    }
+
     // 1. 自分の GDT / TSS を載せる。索引は引数で受け取ったものである
     //    （`cpu_id()` はまだ使えない。GDT が載って初めて正しくなる）。
     // SAFETY: slot は BSP が割り当てた 0..MAX_CPUS の値。IST の頂点は本番

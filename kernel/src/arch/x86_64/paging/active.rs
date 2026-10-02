@@ -574,6 +574,54 @@ impl ActivePageTable {
         permissions: PagePermissions,
         frames: &mut FrameAllocator<CAP>,
     ) -> Result<(), MapUpdateError> {
+        // SAFETY: 呼び出し側の契約をそのまま渡す。葉に足すビットは無い。
+        unsafe { self.map_4kib_leaf(virt, phys, permissions, 0, frames) }
+    }
+
+    /// 実行禁止のビット（[`entry::PTE_NO_EXECUTE`]）を付けた、読むだけのカーネルのページを 1 枚足す
+    /// （2026-10-02。**試し専用**）。
+    ///
+    /// **権限の変換は、まだ実行の欄を読まない**ので、このビットを持つ葉を作れるのは、この関数だけである。
+    /// `crate::arch::x86_64::execute_disable_probe` が、BSP と AP の両方で「このビットを持つ項目を引ける
+    /// （`EFER.NXE` が立っている）」ことを確かめるために使う。変換が実行の欄を読むようになったら、この関数は
+    /// 要らなくなる（[`Self::map_4kib`] に、実行しない権限を渡せば同じ葉になる）。
+    ///
+    /// # Safety
+    ///
+    /// [`Self::map_4kib`] と同じ。加えて、**この表を載せるどの CPU でも `EFER.NXE` が立っていること**
+    /// （立っていない CPU がこのページを引くと、予約のビットの違反の `#PF` になる）。
+    pub unsafe fn map_execute_disable_probe<const CAP: usize>(
+        &mut self,
+        virt: VirtAddr,
+        phys: PhysAddr,
+        frames: &mut FrameAllocator<CAP>,
+    ) -> Result<(), MapUpdateError> {
+        // SAFETY: 呼び出し側の契約。権限は読むだけのカーネルのページで、葉に実行禁止のビットを足す。
+        unsafe {
+            self.map_4kib_leaf(
+                virt,
+                phys,
+                PagePermissions::kernel_read_only(),
+                entry::PTE_NO_EXECUTE,
+                frames,
+            )
+        }
+    }
+
+    /// [`Self::map_4kib`] の本体。`extra_leaf_bits` は、変換が決めたビットに加えて葉へ立てるビットである
+    /// （[`Self::map_execute_disable_probe`] だけが 0 でない値を渡す）。
+    ///
+    /// # Safety
+    ///
+    /// [`Self::map_4kib`] と同じ。
+    unsafe fn map_4kib_leaf<const CAP: usize>(
+        &mut self,
+        virt: VirtAddr,
+        phys: PhysAddr,
+        permissions: PagePermissions,
+        extra_leaf_bits: u64,
+        frames: &mut FrameAllocator<CAP>,
+    ) -> Result<(), MapUpdateError> {
         let _guard = InterruptGuard::enter();
 
         // 中間エントリは、U だけを伝播する（AND 合成のため全階層に要る）。W は伝播しない（上の doc）。
@@ -604,7 +652,7 @@ impl ActivePageTable {
             self.write(
                 pt,
                 pt_index,
-                entry::leaf_entry(phys, permissions, entry::LeafSize::Small),
+                entry::leaf_entry(phys, permissions, entry::LeafSize::Small) | extra_leaf_bits,
             )
         };
         // SAFETY: テーブルの書き換えが終わってから、追加した 1 本を落とす。
