@@ -1995,7 +1995,7 @@ VirtualBoxの計数でベクタ0x42が打鍵4バイトで+4、8259のベクタ0x
 
 **わざと権限を変えると、道具が違いを名前つきで示すこと**を、全検査の2項目で見る。
 
-- `user-run-writable-text`（`hello`の区画を書き込み可でマップする）: `user program hello | segment 0 | 4K: w 0 -> 1`
+- `user-run-writable-text`（`hello`の実行しない区画を書き込み可でマップする）: `user program hello | segment 1 | 4K: w 0 -> 1`（2026-10-03までは区画0だった。実行する区画を書けるようにすると、書けて実行もできる権限になり、ページを足す入口が先に断る）
 - `ap-stacks-uncached-test`（CPUごとのスタックをキャッシュ無効でマップする）: `before interrupts are enabled | application processor stacks | 4K: cache 0 -> 2`
 
 **最初に採った一覧で分かったこと**（2026-10-01）。カーネルの像は、4つの区画が全部、書き込み可・実行可でマップされている（区画ごとの権限の差は無い）。恒等と直接マッピングの中の、フレームバッファの外のキャッシュ無効の範囲（1,024ページ）は、物理の`0xffc00000..0x100000000`である（起動ログのマップの計画の行。メモリマップのMMIOの型の範囲で、4GiBの直下に在る）。
@@ -2052,6 +2052,45 @@ VirtualBoxの計数でベクタ0x42が打鍵4バイトで+4、8259のベクタ0x
 - 一覧と要約が見るのは、時点ごとの表である（上の「ページの権限を時点ごとに一覧にして、前後で比べる」の限界と同じ）。
 - 実行の欄の値（どの名前が「実行できる」か）は、手順4まで、どの検査も見ない。ビットにならないからである。型の側のホストのテストが、名前ごとの値を固定している。
 - 4KiBを1枚張る経路は、歩く所が2つのままである（稼働中の表と、稼働していない空間）。ビットの組み立てだけが1つになった。
+
+### ユーザーの写像に、写像ごとのW^Xを入れた（2026-10-03。`ADR-0071`の手順4）
+
+**権限の変換が、ユーザーの側の実行しない権限の葉にも、実行禁止のビットを立てる。書けて実行もできる権限は、ELFの確かめ・ページを足す入口・`mmap`の3か所で断る。** ユーザーのタスクはBSPだけで走るので、確かめもBSPだけである。
+
+**起動ログの行**（既定の起動。起動ログの参照に載る）。
+
+- `ring3-vectors: #PF-exec-ro …`と`ring3-vectors: #PF-exec-stack …`——起動時のRing 3の試しで、読むだけのページとスタックのページへ跳ぶと、跳んだ先で止まる（`rip`と`cr2`が同じ番地、誤りコード`0x15`＝存在・ユーザー・命令の取り出し）。跳ぶ先には、カーネルが受け皿の`ud2`を置く——実行できてしまえば、ベクタが14ではなく6になる。
+- `user-run: nx-stack …`・`nx-data`・`nx-rodata`——自分のスタック・`.data`・読むだけの区画へ跳ぶプログラムが、跳んだ先で止められる（`err=0x15`）。その後に`fault-test`と`syscall-test`が今までどおり走る。止まり方の判定は、CPUの置き場（`ring3::stopped_fetching_instruction_at`）が持つ。
+- `address-space: a mapping that is both writable and executable was refused = true …, and no frame was taken for it = true`——入口が、書けて実行もできる権限を、フレームを1枚も取らずに断ること。
+- `user-load-corrupt: p_flags of the first segment set to read, write and execute -> Layout(WritableAndExecutable { index: 0 })`——わざと作ったELFが、並びの確かめで断られること（壊した像は7個になった）。
+- `syscall-test`の検算71——実行できる保護（`PROT_READ | PROT_EXEC`）を求めた`mmap`が`-EPERM`を返すこと。
+
+**項目。**
+
+| 項目 | 見るもの | 実測（2026-10-03） |
+|---|---|---|
+| `ring3-test user-leaf-ignores-execute`（破壊テスト） | 変換がユーザーの側の葉に実行禁止のビットを立てない形。`ring3-vectors: #PF-exec-ro folded with vector=6, expected 14`で止まる | 通った |
+| `ring3-test user-load-ignores-execute`（破壊テスト） | ローダーが、書けない区画をフラグに依らず実行できる形で写す。Ring 3の試しは通り、`nx-rodata`が跳んだ先の`ud2`を実行して`vector=6`で終わり、`did not stop fetching an instruction at 0x401000`で止まる | 通った |
+| `ring3-test user-map-allows-writable-executable`（破壊テスト） | 入口が断らない形。`a mapping that is both writable and executable was refused = false`で止まる | 通った |
+| `syscall-test mmap-allows-exec`（破壊テスト） | `mmap`が断らない形。`syscall-test exited with status 71`で止まる | 通った |
+
+**ページの権限の一覧の参照で変わった行**（起動の場面。変わった「時点と領域」の組は30、変わらなかった組は53。カーネルの側の行は1つも変わっていない）。
+
+- ユーザーのプログラムの、読むだけの区画・書ける区画・スタック・共有メモリ（`mapped by request`）: 実行の欄が1から0になった。実行する区画（区画0）は1のまま。
+- 起動時のRing 3の試しのページ: 読むだけのページとスタックのページが0になった。コードのページは1のまま。
+- `brk`の場面では`heap`の行が、画面の場面では画面の`mmap`の行が、0になった。
+- **3つの参照で、ユーザーの側で実行できる行は15・17・17で、その全部が区画0か試しのコードのページである。起動の表の外に、書けて実行もできる行は無い。**
+
+**実行禁止のビットを立てない破壊テストのビルド**（`leaf-ignores-execute-test`・`nx-probe-only-leaf-test`）では、跳ぶ検査（Ring 3の試しの2本と、プログラム3つ）を走らせない（走らせなかったことは行に出る）。走らせると、そのビルドが見たい所（試しのページの読み戻し、NXEを落とした読み）より前に、跳ぶ検査で止まる——入れたときに、3つの破壊テストが実際にそうなった。
+
+**既に在った破壊テスト`user-run-writable-text`は、実行しない区画だけを対象にした。** 実行する区画を書けるようにすると、書けて実行もできる権限になり、ページを足す入口が先に断って、読み戻しまで届かない（実測で見つけた）。一覧の道具のしるしは、区画0から区画1に変わった。
+
+**限界。**
+
+- 確かめはBSPだけである（`deferred-decisions.md`）。
+- ユーザーのコードのフレームは、直接マッピングの側（カーネル）からは書ける。
+- `brk`で伸ばしたページへ跳ぶ試しは無い（`deferred-decisions.md`）。
+- `mmap`の実行できる保護は全部断っている。ELFのWとXの両方を持つ区画も断る。どちらもLinuxと違う（`deferred-decisions.md`）。
 
 ### カーネルの写像に、写像ごとのW^Xを入れた（2026-10-02。`ADR-0071`の手順4）
 
