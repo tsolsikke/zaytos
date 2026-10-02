@@ -1,6 +1,6 @@
 the boot table | identity | 2M | w=1 u=0 x=1 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~262144
-the boot table | kernel window outside the image | 2M | w=1 u=0 x=1 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~261159
-the boot table | kernel text | 2M | w=1 u=0 x=1 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~285
+the boot table | kernel window outside the image | 2M | w=1 u=0 x=1 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~261158
+the boot table | kernel text | 2M | w=1 u=0 x=1 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~286
 the boot table | kernel rodata | 2M | w=1 u=0 x=1 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~90
 the boot table | kernel data | 2M | w=1 u=0 x=1 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~107
 the boot table | kernel bss | 2M | w=1 u=0 x=1 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~503
@@ -10,7 +10,7 @@ the first table of its own | identity | 2M | w=1 u=0 x=0 cache=0 g=0 shared=0 ta
 the first table of its own | framebuffer (identity) | 2M | w=1 u=0 x=0 cache=2 g=0 shared=0 tables(w=1 u=0 x=1) | pages=512
 the first table of its own | framebuffer (identity) | 4K | w=1 u=0 x=0 cache=2 g=0 shared=0 tables(w=1 u=0 x=1) | pages=488
 the first table of its own | identity | 2M | w=1 u=0 x=0 cache=2 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~1024
-the first table of its own | kernel text | 4K | w=0 u=0 x=1 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~285
+the first table of its own | kernel text | 4K | w=0 u=0 x=1 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~286
 the first table of its own | kernel rodata | 4K | w=0 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~90
 the first table of its own | kernel data | 4K | w=1 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~107
 the first table of its own | kernel bss | 4K | w=1 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~503
@@ -25,7 +25,7 @@ the table with the direct map | direct map | 2M | w=1 u=0 x=0 cache=0 g=0 shared
 the table with the direct map | framebuffer (direct map) | 2M | w=1 u=0 x=0 cache=2 g=0 shared=0 tables(w=1 u=0 x=1) | pages=512
 the table with the direct map | framebuffer (direct map) | 4K | w=1 u=0 x=0 cache=2 g=0 shared=0 tables(w=1 u=0 x=1) | pages=488
 the table with the direct map | direct map | 2M | w=1 u=0 x=0 cache=2 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~1024
-the table with the direct map | kernel text | 4K | w=0 u=0 x=1 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~285
+the table with the direct map | kernel text | 4K | w=0 u=0 x=1 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~286
 the table with the direct map | kernel rodata | 4K | w=0 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~90
 the table with the direct map | kernel data | 4K | w=1 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~107
 the table with the direct map | kernel bss | 4K | w=1 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~503
@@ -77,7 +77,7 @@ before interrupts are enabled | interrupt controller registers | 4K | w=1 u=0 x=
 before interrupts are enabled | direct map | 2M | w=1 u=0 x=0 cache=2 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~1024
 before interrupts are enabled | application processor stacks | 4K | w=1 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~40
 before interrupts are enabled | execute-disable probe | 4K | w=0 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=1
-before interrupts are enabled | kernel text | 4K | w=0 u=0 x=1 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~285
+before interrupts are enabled | kernel text | 4K | w=0 u=0 x=1 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~286
 before interrupts are enabled | kernel rodata | 4K | w=0 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~90
 before interrupts are enabled | kernel data | 4K | w=1 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~107
 before interrupts are enabled | kernel bss | 4K | w=1 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~498
@@ -95,7 +95,7 @@ after the application processors started | interrupt controller registers | 4K |
 after the application processors started | direct map | 2M | w=1 u=0 x=0 cache=2 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~1024
 after the application processors started | application processor stacks | 4K | w=1 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~40
 after the application processors started | execute-disable probe | 4K | w=0 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=1
-after the application processors started | kernel text | 4K | w=0 u=0 x=1 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~285
+after the application processors started | kernel text | 4K | w=0 u=0 x=1 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~286
 after the application processors started | kernel rodata | 4K | w=0 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~90
 after the application processors started | kernel data | 4K | w=1 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~107
 after the application processors started | kernel bss | 4K | w=1 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~498

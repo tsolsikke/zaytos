@@ -119,6 +119,10 @@ pub enum LayoutError {
     /// 前の区画の最終ページから始まり、そのページに置くファイルの中身を持つ。
     /// **共有するページは前の区画が写したものを使うので、後ろの区画の中身を重ねる経路が無い。**
     FileDataInSharedPage { index: usize, page: u64 },
+    /// 書けて、実行もできる区画がある（`p_flags` に W と X の両方が立っている。2026-10-03）。
+    /// **書けるページは実行できない、という決まりで写すので、受け付けない。** Linux は、こういう区画も
+    /// 読み込む——断るのは、このカーネルの決まりである。
+    WritableAndExecutable { index: usize },
 }
 
 /// パース済みの ELF64 実行ファイル。元のバイトスライスを借用するのみで、
@@ -301,6 +305,7 @@ impl<'a> Elf<'a> {
 /// - 2 つの区画が同じページに載るのは、後ろの区画が前の区画の最終ページから始まる形だけで、そのとき
 ///   2 つの権限（`p_flags` の読み・書き・実行）は同じで、後ろの区画はファイルの中身を持たない
 ///   （`.data` の直後から `.bss` が始まる形。`ADR-0039`）
+/// - 書けて実行もできる区画は無い（`p_flags` の W と X の両方を持つ区画は断る。2026-10-03）
 ///
 /// **`p_vaddr` が置いてよい範囲に在るかは見ない**（ユーザーの範囲の外は、写すときに断られる）。
 ///
@@ -321,6 +326,9 @@ pub fn check_load_layout(segments: impl Iterator<Item = ProgramHeader>) -> Resul
         end.checked_add(LOAD_PAGE_SIZE - 1)
             .ok_or(LayoutError::AddressOverflow { index })?;
         let permissions = ph.p_flags & PF_PERMISSIONS;
+        if permissions & PF_W != 0 && permissions & PF_X != 0 {
+            return Err(LayoutError::WritableAndExecutable { index });
+        }
         if let Some((previous_start, previous_end, previous_permissions)) = previous {
             if ph.p_vaddr < previous_start {
                 return Err(LayoutError::OutOfOrder { index });
@@ -611,6 +619,38 @@ mod tests {
     const RX: u32 = PF_R | PF_X;
     const R: u32 = PF_R;
     const RW: u32 = PF_R | PF_W;
+    const RWX: u32 = PF_R | PF_W | PF_X;
+
+    /// **書けて実行もできる区画は断る**（2026-10-03）。どの位置の区画でも、読みのビットが無くても断る。
+    #[test]
+    fn a_segment_that_is_both_writable_and_executable_is_refused() {
+        assert_eq!(
+            check_load_layout([load(0x400000, 0x100, 0x100, RWX)].into_iter()),
+            Err(LayoutError::WritableAndExecutable { index: 0 })
+        );
+        assert_eq!(
+            check_load_layout(
+                [
+                    load(0x400000, 0x100, 0x100, RX),
+                    load(0x401000, 0x100, 0x100, R),
+                    load(0x402000, 0x100, 0x100, PF_W | PF_X),
+                ]
+                .into_iter()
+            ),
+            Err(LayoutError::WritableAndExecutable { index: 2 })
+        );
+        // 書けるだけ、実行できるだけの区画は通る。
+        assert_eq!(
+            check_load_layout(
+                [
+                    load(0x400000, 0x100, 0x100, RX),
+                    load(0x401000, 0x100, 0x100, RW),
+                ]
+                .into_iter()
+            ),
+            Ok(())
+        );
+    }
 
     /// 今のユーザープログラムの形（`.text`・`.rodata`・`.data` がページの境界から始まり、`.bss` が
     /// `.data` の直後から始まる）は通る。区画が無い像も、1 つだけの像も通る。

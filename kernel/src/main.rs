@@ -4885,6 +4885,48 @@ fn demo_two_address_spaces(
         }
     }
 
+    // **書けて実行もできる権限も、項目を書く前に断る**（2026-10-03。ユーザーの写像の W^X）。上と同じく、途中の
+    // 項目の表を取る前である。ELF の区画でこの形のものは、区画の並びの確かめが先に断る。ここは 2 枚目の守りである。
+    {
+        let free_before = allocator.free_frame_count();
+        let taken_before = space_a.frames_taken();
+        // SAFETY: 稼働していない空間。断られるので、何も書かれない。
+        let refused = unsafe {
+            space_a.map_user_4kib(
+                allocator,
+                direct_map,
+                virt,
+                frame_a,
+                PagePermissions::user_program(true, true),
+            )
+        };
+        let was_refused = matches!(
+            refused,
+            Err(kernel::arch::x86_64::paging::address_space::AddressSpaceError::WritableAndExecutable)
+        );
+        let nothing_taken =
+            allocator.free_frame_count() == free_before && space_a.frames_taken() == taken_before;
+        let level = if was_refused && nothing_taken {
+            LogLevel::Info
+        } else {
+            LogLevel::Error
+        };
+        logger.log(
+            level,
+            format_args!(
+                "address-space: a mapping that is both writable and executable was refused = \
+                 {was_refused} (expected true, got {refused:?}), and no frame was taken for it = \
+                 {nothing_taken} (expected true)"
+            ),
+        );
+        if !(was_refused && nothing_taken) {
+            logger.error(format_args!(
+                "address-space: the refusal of a writable and executable mapping did not hold; halting"
+            ));
+            cpu::halt_forever();
+        }
+    }
+
     for (space, frame) in [(&mut space_a, frame_a), (&mut space_b, frame_b)] {
         // S9-b-1: 渡す値は従来と同じ writable=true なので振る舞いは変わらない。
         let attributes = PagePermissions::user_data();
@@ -8685,6 +8727,10 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
         70,
         "read into a read-only page (.rodata) did not return -EFAULT",
     ),
+    (
+        71,
+        "mmap asking for PROT_EXEC did not return -EPERM",
+    ),
 ];
 
 /// `fault-test` が起こす #PF のエラーコード（S9-b-3-2a）。
@@ -9013,6 +9059,8 @@ fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<Serial>) {
     const PHDR0: usize = 64;
     /// `Elf64_Phdr` の大きさ。
     const PHDR_SIZE: usize = 56;
+    /// `p_flags` のオフセット。
+    const P_FLAGS: usize = 4;
     /// `p_vaddr` のオフセット。
     const P_VADDR: usize = 16;
     /// `p_filesz` のオフセット。
@@ -9040,7 +9088,7 @@ fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<Serial>) {
     type Patch = (usize, u64, usize);
 
     // **書き換えは [`Patch`] の並びで表す。** 1 つの像で 2 つ以上の欄を書き換える形がある。
-    let cases: [(&str, &[Patch], Refused); 6] = [
+    let cases: [(&str, &[Patch], Refused); 7] = [
         ("magic byte 0 set to 0", &[(0, 0, 1)], Refused::Parse),
         (
             "p_vaddr of the second segment moved out of the user subtree",
@@ -9071,6 +9119,12 @@ fn verify_corrupt_user_program_is_not_loaded(logger: &mut Logger<Serial>) {
                 (PHDR1 + P_FILESZ, 0, 8),
                 (PHDR1 + P_MEMSZ, 0, 8),
             ],
+            Refused::Layout,
+        ),
+        // **書けて実行もできる区画は、並びの確かめが断る**（2026-10-03）。`p_flags` を読み・書き・実行（7）にする。
+        (
+            "p_flags of the first segment set to read, write and execute",
+            &[(PHDR0 + P_FLAGS, 7, 4)],
             Refused::Layout,
         ),
     ];
@@ -9534,15 +9588,20 @@ fn assert_folded_at(
 ///
 /// コードのページがマップされていなければ、名前つきで止まる（`verify_ring3_excursion` がマップする）。
 fn ring3_trial_code_alias(logger: &mut Logger<Serial>) -> *mut u8 {
+    ring3_trial_page_alias(logger, kernel::arch::x86_64::ring3::USER_CODE_VIRT)
+}
+
+/// 起動時の Ring 3 の試しのページ（`page` はユーザーの側の番地。ページの先頭）を、カーネルが書くための番地
+/// （直接マッピングの側。2026-10-03）。**読むだけのページにも、カーネルはここから書ける**（別名。上の doc）。
+/// マップされていなければ、名前つきで止まる。
+fn ring3_trial_page_alias(logger: &mut Logger<Serial>, page: u64) -> *mut u8 {
     use kernel::arch::x86_64::paging::active::ActivePageTable;
-    use kernel::arch::x86_64::ring3;
 
     let direct_map = common::addr::direct_map();
-    let code_virt = common::addr::VirtAddr::new(ring3::USER_CODE_VIRT)
-        .expect("the user code virtual address is canonical");
+    let virt = common::addr::VirtAddr::new(page).expect("the trial page address is canonical");
     // SAFETY: CR3 は自前のテーブルで、配下は登録済みの直接マッピングで読める。読むだけである。
     let table = unsafe { ActivePageTable::current(direct_map) };
-    match table.translate(code_virt) {
+    match table.translate(virt) {
         Ok(Some(translation)) => {
             let frame = common::addr::PhysAddr::new(translation.phys.as_u64() & !0xFFF)
                 .expect("a frame address fits in a physical address");
@@ -9550,8 +9609,7 @@ fn ring3_trial_code_alias(logger: &mut Logger<Serial>) -> *mut u8 {
         }
         other => {
             logger.error(format_args!(
-                "ring3: the trial code page {:#x} is not mapped ({other:?}); halting",
-                code_virt.as_u64()
+                "ring3: the trial page {page:#x} is not mapped ({other:?}); halting"
             ));
             cpu::halt_forever();
         }
@@ -10375,10 +10433,19 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<Serial>) {
     // エラーコードで撃ち分けている。**
     const READONLY_USER_VIRT: u64 = ring3::USER_READONLY_VIRT;
 
+    /// #PF の遠征が、的をどう触るか（2026-10-03 に、跳ぶ形を足した）。
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Touch {
+        /// 読む（`mov al, [rax]`）。#PF でない遠征も、これにしておく（使わない）。
+        Load,
+        /// 書く（`mov [rax], al`）。
+        Store,
+    }
+
     /// 1 本の遠征の記述。名前 / 期待ベクタ / 命令列（#PF は空でアクセス列を生成） /
     /// フォルトする命令のオフセット / #PF のアクセス先（0 = #PF でない） /
-    /// 期待するエラーコード（#PF のみ意味を持つ） / 読みでなく書きか。
-    type FaultCase = (&'static str, u8, &'static [u8], u64, u64, u64, bool);
+    /// 期待するエラーコード（#PF のみ意味を持つ） / 的の触り方。
+    type FaultCase = (&'static str, u8, &'static [u8], u64, u64, u64, Touch);
     let cases: [FaultCase; 6] = [
         // #DE: xor edx,edx / xor ecx,ecx / div ecx。0 除算。落ちるのは div（+4）。
         (
@@ -10388,19 +10455,27 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<Serial>) {
             4,
             0,
             0,
-            false,
+            Touch::Load,
         ),
         // #UD: ud2。落ちるのは先頭。
-        ("#UD", 6, &[0x0F, 0x0B], 0, 0, 0, false),
+        ("#UD", 6, &[0x0F, 0x0B], 0, 0, 0, Touch::Load),
         // #GP: cli。Ring 3 では特権命令。落ちるのは先頭。
-        ("#GP", 13, &[0xFA], 0, 0, 0, false),
+        ("#GP", 13, &[0xFA], 0, 0, 0, Touch::Load),
         // #PF: movabs rax, <読み先>（10 バイト）/ mov al,[rax]。落ちるのは
         // 読み（+10）。読み先は未マップのユーザー VA。エラーコード 0x4 =
         // 不在・ユーザー・読み。
-        ("#PF", 14, &[], 10, UNMAPPED_USER_VIRT, 0x4, false),
+        ("#PF", 14, &[], 10, UNMAPPED_USER_VIRT, 0x4, Touch::Load),
         // #PF-kernel: 同じ命令列で、読み先だけカーネル VA。エラーコード 0x5 =
         // 存在・ユーザー・読み（権限違反）。
-        ("#PF-kernel", 14, &[], 10, KERNEL_TARGET_VIRT, 0x5, false),
+        (
+            "#PF-kernel",
+            14,
+            &[],
+            10,
+            KERNEL_TARGET_VIRT,
+            0x5,
+            Touch::Load,
+        ),
         // #PF-write-ro: movabs rax, <書き先>/ mov [rax],al / ud2。書き先は
         // writable=false でマップしたユーザーページ。エラーコード 0x7 =
         // 存在・ユーザー・書き。
@@ -10410,15 +10485,22 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<Serial>) {
         // ベクタ 6 が終了処理される。**どちらでも遠征は戻るので、判定行が
         // 「ベクタが違う」と示せる。** 受け皿を置かないと、書きが通った後に
         // ページ上のゼロを命令として実行し始め、落ち方が決まらない。
-        ("#PF-write-ro", 14, &[], 10, READONLY_USER_VIRT, 0x7, true),
+        (
+            "#PF-write-ro",
+            14,
+            &[],
+            10,
+            READONLY_USER_VIRT,
+            0x7,
+            Touch::Store,
+        ),
     ];
 
     let main_rsp0_top = gdt::active_kernel_entry_stack_top();
     // **命令を書くのは、直接マッピングの側の番地からである**（ユーザーの側の番地は、書けない権限でマップしてある）。
     let code_ptr = ring3_trial_code_alias(logger);
 
-    for (name, expected_vector, bytes, fault_offset, load_target, expected_error, is_store) in cases
-    {
+    for (name, expected_vector, bytes, fault_offset, load_target, expected_error, touch) in cases {
         // ユーザーコードページの先頭を、この遠征の命令列で埋める。
         // SAFETY: verify_ring3_excursion がマップしたユーザーのコードのページのフレームを、直接マッピング越しに
         // 書く。書くのは先頭の数バイトだけで、4KiB に収まる。
@@ -10432,9 +10514,10 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<Serial>) {
                     core::ptr::write_volatile(code_ptr.add(2 + i as usize), byte);
                 }
                 // mov al,[rax]（読み）か mov [rax],al（書き）。1 バイトしか違わない。
-                core::ptr::write_volatile(code_ptr.add(10), if is_store { 0x88 } else { 0x8A });
+                let opcode = if touch == Touch::Store { 0x88 } else { 0x8A };
+                core::ptr::write_volatile(code_ptr.add(10), opcode);
                 core::ptr::write_volatile(code_ptr.add(11), 0x00);
-                if is_store {
+                if touch == Touch::Store {
                     // 書きが通ってしまった場合の受け皿（ud2）。
                     core::ptr::write_volatile(code_ptr.add(12), 0x0F);
                     core::ptr::write_volatile(code_ptr.add(13), 0x0B);
@@ -12039,7 +12122,7 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
     (
         "user-run-writable-text",
         cfg!(feature = "user-run-writable-text"),
-        "PT_LOAD を writable: true で張る",
+        "実行しない PT_LOAD を writable: true で張る",
     ),
     (
         "user-load-skip-layout-check",
@@ -12085,6 +12168,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "kernel-rodata-page-writable-test",
         cfg!(feature = "kernel-rodata-page-writable-test"),
         "カーネルの像の読むだけの区画の最初の 1 ページを、書き込み可で写す",
+    ),
+    (
+        "user-map-allows-writable-executable-test",
+        cfg!(feature = "user-map-allows-writable-executable-test"),
+        "ユーザーのページを足す入口が、書けて実行もできる権限を断らない",
+    ),
+    (
+        "mmap-allows-exec-test",
+        cfg!(feature = "mmap-allows-exec-test"),
+        "mmap が、実行できる保護（PROT_EXEC）の求めを断らない",
     ),
     (
         "leaf-ignores-execute-test",

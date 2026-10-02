@@ -56,6 +56,7 @@ common::complete::tests::the_first_word_is_the_one_with_only_blanks_before_it
 common::complete::tests::the_path_splits_at_the_last_slash
 common::complete::tests::the_word_ends_at_the_cursor
 common::critical::tests::the_interrupt_guard_drops_last
+common::elf::tests::a_segment_that_is_both_writable_and_executable_is_refused
 common::elf::tests::parses_entry_point_and_single_load_segment
 common::elf::tests::rejects_a_program_header_entry_size_larger_than_the_elf64_size
 common::elf::tests::rejects_a_program_header_entry_size_smaller_than_the_elf64_size
@@ -657,6 +658,7 @@ kernel::paging::image::tests::boundaries_out_of_order_and_empty_sections_are_ref
 kernel::paging::image::tests::no_section_is_both_writable_and_executable
 kernel::paging::image::tests::the_measured_image_splits_into_code_read_only_and_data
 kernel::paging::image::tests::the_sections_cover_the_image_without_a_gap_or_an_overlap
+kernel::paging::permissions::tests::only_a_writable_and_executable_segment_is_both_on_the_user_side
 kernel::paging::permissions::tests::only_the_boot_table_name_is_both_writable_and_executable_on_the_kernel_side
 kernel::paging::permissions::tests::only_the_device_name_is_uncached
 kernel::paging::permissions::tests::the_kernel_side_names_are_never_reachable_from_user_mode

@@ -83,6 +83,11 @@ pub enum AddressSpaceError {
     /// **[`AddressSpace::map_user_4kib`] は、ユーザーのページをマップするためだけに在る。** 以前は、渡された
     /// 属性に関わらず U を立てていた。権限の型を 1 つにしてからは、ユーザーから届かない権限を断る。
     NotForUser,
+    /// 書けて、実行もできる権限で、ユーザーの側へマップしようとした（2026-10-03）。
+    ///
+    /// **書けるページは実行できない、という決まりで写す**（写像ごとの W^X）。ELF の区画でこの形のものは、
+    /// 区画の並びの確かめ（`common::elf::check_load_layout`）が先に断る。ここは 2 枚目の守りである。
+    WritableAndExecutable,
 }
 
 /// 起動の終わり（`run_init` の前）に採った、カーネル側の PML4 の項目（添字 256〜511）の指紋
@@ -401,6 +406,12 @@ impl AddressSpace {
         // ユーザーの枝の中に、ユーザーから届かない項目ができる。
         if !permissions.user() {
             return Err(AddressSpaceError::NotForUser);
+        }
+        // **書けて実行もできる権限は断る**（2026-10-03）。破壊テスト (user-map-allows-writable-executable): 断らない。
+        if permissions.writable_and_executable()
+            && !cfg!(feature = "user-map-allows-writable-executable-test")
+        {
+            return Err(AddressSpaceError::WritableAndExecutable);
         }
         if !direct_map.covers(frame) {
             return Err(AddressSpaceError::Unreachable);

@@ -110,6 +110,7 @@
 //! - `66` 待ち受けの無い名前への `connect` が `-ECONNREFUSED` を返さなかった（`ADR-0064`）
 //! - `67` `memfd_create`＋`ftruncate`＋`mmap` した共有メモリへ書いた値が読み戻せなかった（`ADR-0065`）
 //! - `68` 共有メモリでない fd（stdin）の `mmap` が `-EBADF` を返さなかった（`ADR-0065`）
+//! - `71` 実行できる保護（`PROT_EXEC`）を求めた `mmap` が `-EPERM` を返さなかった（2026-10-03）
 //! - `69` 方向フラグを立てたまま打った `clock_gettime` が 0 を返さなかった（2026-09-24。
 //!   **判定の本体はカーネルの入口の監視である**——こちらは前提を作り、戻り値だけを見る）
 //! - `70` 読み込み先が読み取り専用のページ（このプログラムの `.rodata`）の `read` が `-EFAULT` を返さなかった
@@ -185,6 +186,10 @@ const SHM_TEST_LEN: u32 = 4096;
 const SHM_TEST_PATTERN: u32 = 0x5C0F_1234;
 /// `PROT_READ | PROT_WRITE`。
 const PROT_RW: u32 = 3;
+/// `PROT_READ | PROT_EXEC`（2026-10-03。実行できる保護を求める形）。
+const PROT_RX: u32 = 5;
+/// `-EPERM`（Linux の値は 1）。
+const MINUS_EPERM: i32 = -1;
 /// `MAP_SHARED`。
 const MAP_SHARED: u32 = 1;
 /// `-EBADF`。
@@ -1309,6 +1314,19 @@ core::arch::global_asm!(
     "  cmp rax, {minus_ebadf_shm}",
     "  mov edi, 68",
     "  jne 9f",
+    // 71: 実行できる保護を求めた mmap は -EPERM（2026-10-03）。**共有メモリは、書けるか読むだけかで写し、
+    // 実行はさせない。** 同じ共有メモリの fd に、読みと実行（PROT_READ | PROT_EXEC）を求める。
+    "  mov eax, {sys_mmap}",
+    "  xor edi, edi",
+    "  mov esi, {shm_len}",
+    "  mov edx, {prot_rx}",
+    "  mov r10d, {map_shared}",
+    "  mov r8, r12",               // fd
+    "  xor r9, r9",
+    "  int 0x80",
+    "  cmp rax, {minus_eperm}",
+    "  mov edi, 71",
+    "  jne 9f",
     "  mov eax, {sys_close}",      // shm の fd を閉じる
     "  mov rdi, r12",
     "  int 0x80",
@@ -1519,6 +1537,8 @@ core::arch::global_asm!(
     shm_len = const SHM_TEST_LEN,
     shm_pattern = const SHM_TEST_PATTERN,
     prot_rw = const PROT_RW,
+    prot_rx = const PROT_RX,
+    minus_eperm = const MINUS_EPERM,
     map_shared = const MAP_SHARED,
     minus_ebadf_shm = const MINUS_EBADF_SHM,
     sys_socket = const SYS_SOCKET,

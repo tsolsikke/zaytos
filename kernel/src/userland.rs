@@ -1447,8 +1447,8 @@ fn load_user_program_into(
 
     for ph in elf.load_segments() {
         let writable = ph.p_flags & common::elf::PF_W != 0;
-        // **実行できるかも、区画のフラグから取る**（2026-10-02）。今はビットにならない（どのページも実行できる）。
-        // 実行禁止を有効にする段で、そのまま効く。
+        // **実行できるかも、区画のフラグから取る**（2026-10-02）。実行しない区画の葉には、実行禁止のビットが付く
+        // （2026-10-03）。**書けて実行もできる区画は、ここへ来る前に、並びの確かめが断っている。**
         let executable = ph.p_flags & common::elf::PF_X != 0;
         let first_page = ph.p_vaddr & !(PAGE_SIZE - 1);
         // 破壊テスト (ADR-0039, user-load-filesz-only): `memsz` ではなく `filesz` で
@@ -1535,8 +1535,10 @@ fn load_user_program_into(
             };
             // 破壊テスト (S9-b-1, user-run-writable-text): 区画の権限を無視して書けるように
             // マップする。**読み取り専用のはずの葉が W=1 になり、下の読み戻しが検出する。**
+            // **書けるようにするのは、実行しない区画だけである**（2026-10-03）——実行する区画を書けるようにすると、
+            // 書けて実行もできる権限になり、ページを足す入口が先に断る（読み戻しまで届かない）。
             let attributes = PagePermissions::user_program(
-                writable || cfg!(feature = "user-run-writable-text"),
+                writable || (cfg!(feature = "user-run-writable-text") && !executable),
                 executable,
             );
             // SAFETY: この空間はまだ稼働していない。direct map は覆っている。

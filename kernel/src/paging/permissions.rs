@@ -13,6 +13,12 @@
 //! ここの名前つきの関数が決めた `execute` の値が、そのまま効く。値は手順 4 の決定（`ADR-0071` の決定 1 の 4）に
 //! 合わせてある。
 //!
+//! # 書けて実行もできる権限
+//!
+//! **ユーザーから届いて、書けて、実行もできる権限は、ページを足す入口が断る**
+//! （[`PagePermissions::writable_and_executable`]）。カーネルの側で、書けて実行もできるのは、起動の表の名前
+//! （[`PagePermissions::boot_table_unrestricted`]）だけである。
+//!
 //! # 純粋な論理
 //!
 //! ポインタにもレジスタにも触らない。ホストの `cargo test` で確かめる。
@@ -153,6 +159,12 @@ impl PagePermissions {
         self.execute
     }
 
+    /// 書けて、実行もできるか。**ユーザーから届く権限でこれが真のものは、ページを足す入口が断る**
+    /// （書けるページは実行できない、という決まり。2026-10-03）。
+    pub const fn writable_and_executable(self) -> bool {
+        self.write && self.execute
+    }
+
     /// ユーザーから届くか。
     pub const fn user(self) -> bool {
         self.user
@@ -242,6 +254,22 @@ mod tests {
         assert!(!text.write() && text.execute());
         let data = PagePermissions::user_program(true, false);
         assert!(data.write() && !data.execute());
+    }
+
+    /// **ユーザーの側で、書けて実行もできるのは、区画のフラグの両方が立った形だけである**（入口が断る形）。
+    #[test]
+    fn only_a_writable_and_executable_segment_is_both_on_the_user_side() {
+        assert!(PagePermissions::user_program(true, true).writable_and_executable());
+        for permissions in [
+            PagePermissions::user_program(false, true),
+            PagePermissions::user_program(true, false),
+            PagePermissions::user_program(false, false),
+            PagePermissions::user_data(),
+            PagePermissions::user_shared(true),
+            PagePermissions::user_shared(false),
+        ] {
+            assert!(!permissions.writable_and_executable(), "{permissions:?}");
+        }
     }
 
     /// **カーネルの側で、書けて実行もできるのは、起動の表の名前だけである**（写像ごとの W^X）。

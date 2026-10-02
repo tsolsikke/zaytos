@@ -107,6 +107,12 @@ pub const ENOTEMPTY: i64 = 39;
 /// 作ろうとしたら在った）。
 pub const EEXIST: i64 = 17;
 
+/// `-EPERM`（その操作は許されていない）の errno（2026-10-03。Linux の `asm-generic/errno-base.h` の値）。
+///
+/// **`mmap` が、実行できる保護（`PROT_EXEC`）を求められたときに返す。** Linux の `mmap` も、実行を許さない場所
+/// （`noexec` でマウントされたファイルなど）に `PROT_EXEC` を求められると `EPERM` を返す。
+pub const EPERM: i64 = 1;
+
 /// `-EACCES`（許されない）の errno（S11-5）。
 ///
 /// **[`crate::abi::private::SYS_SPAWN`] が通常ファイルでないものを渡されたときに返す。**

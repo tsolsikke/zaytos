@@ -218,6 +218,9 @@ pub enum MapUpdateError {
     OutOfFrames,
     /// マップしようとした葉が既に present。二重マップを黙って上書きしない（M5-e-2）。
     AlreadyMapped,
+    /// ユーザーから届いて、書けて、実行もできる権限でマップしようとした（2026-10-03）。
+    /// **書けるページは実行できない、という決まりで写すので、断る。** 項目は 1 つも書かない。
+    WritableAndExecutable,
 }
 
 /// [`ActivePageTable::unmap_4kib`] が外した葉（2026-10-02）。
@@ -591,6 +594,7 @@ impl ActivePageTable {
     /// **ユーザーの側の葉は、まだどれも実行できる**——ユーザーの写像に入れるまでは、ユーザーのページについて
     /// 「書けるページは実行できない」とは言えない。**言えるのは、カーネルの側の写像ごとの話までである。**
     /// 同じフレームの別名（直接マッピング）まで含めた話でもない（保留している）。
+    /// **ユーザーから届いて、書けて、実行もできる権限は断る**（[`MapUpdateError::WritableAndExecutable`]。2026-10-03）。
     ///
     /// # 書けない権限でマップしたページについて、何を主張してよいか
     ///
@@ -613,6 +617,14 @@ impl ActivePageTable {
         permissions: PagePermissions,
         frames: &mut FrameAllocator<CAP>,
     ) -> Result<(), MapUpdateError> {
+        // **ユーザーから届いて、書けて、実行もできる権限は断る**（2026-10-03）。途中の項目の表を取る前である。
+        // 破壊テスト (user-map-allows-writable-executable): 断らない。
+        if permissions.user()
+            && permissions.writable_and_executable()
+            && !cfg!(feature = "user-map-allows-writable-executable-test")
+        {
+            return Err(MapUpdateError::WritableAndExecutable);
+        }
         let _guard = InterruptGuard::enter();
 
         // 中間エントリは、U だけを伝播する（AND 合成のため全階層に要る）。W は伝播しない（上の doc）。

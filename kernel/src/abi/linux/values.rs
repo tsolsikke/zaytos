@@ -77,6 +77,10 @@ pub const POLLIN: u16 = 0x001;
 /// `PROT_WRITE`（`mmap`。書ける葉を作る）。
 pub const PROT_WRITE: u64 = 2;
 
+/// `PROT_EXEC`（`mmap`。実行できる葉を求める。Linux の `asm-generic/mman-common.h` の値）。
+/// **今は、これを求める `mmap` を全部断る**（`-EPERM`。`crate::syscall` の `mmap` の本体）。
+pub const PROT_EXEC: u64 = 4;
+
 /// `SOL_SOCKET`（`cmsghdr` の level）。
 pub const SOL_SOCKET: u32 = 1;
 

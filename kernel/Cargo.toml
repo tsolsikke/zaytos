@@ -732,6 +732,12 @@ kernel-executes-stack-test = ["wx-violation-test"]
 # カーネルの像の読むだけの区画の最初の 1 ページを、書き込み可で写す（2026-10-02）。起動は通る。
 # ページの権限の一覧が、違いを名前つきで示す。`cargo xtask run --page-permissions --sabotage kernel-rodata-page-writable-test`。
 kernel-rodata-page-writable-test = []
+# ユーザーのページを足す入口が、書けて実行もできる権限を断らない（2026-10-03）。
+# 起動時の「断ること」の確かめが落ちる。
+user-map-allows-writable-executable-test = []
+# mmap が、実行できる保護（PROT_EXEC）の求めを断らない（2026-10-03。以前の形）。
+# syscall-test の検算 71 が落ちる。`--syscall-test mmap-allows-exec`。
+mmap-allows-exec-test = []
 # 権限の変換が、実行の欄を無視して、実行禁止のビットを立てない（直す前の形。2026-10-02）。
 # 試しのページを足した直後の読み戻しが、実行禁止のビットが付いていないことを名指しして止まる。
 leaf-ignores-execute-test = []
@@ -811,8 +817,9 @@ user-leaf-high-bit-test = []
 # ud2 へ届かない。user-run の判定行がベクタの食い違いで止める。
 # `--ring3-test user-skip-load`。
 user-run-skip-load = []
-# PT_LOAD を writable: true で張る。読み取り専用のはずの葉が W=1 になり、
-# user-load の読み戻しが捕まえる。**この破壊だけが読み戻しまで到達する**
+# 実行しない PT_LOAD を writable: true で張る。読み取り専用のはずの葉が W=1 になり、
+# user-load の読み戻しが捕まえる（2026-10-03 から、実行する区画は対象にしない。書けて実行もできる権限は、
+# ページを足す入口が先に断るため）。**この破壊だけが読み戻しまで到達する**
 # （map-force-writable は先に ring3-vectors が落ちる）。`--ring3-test user-writable-text`。
 user-run-writable-text = []
 # entry ではなく最初の PT_LOAD の先頭へ飛ぶ。詰め物の ud2 で即座に #UD になり、

@@ -1155,7 +1155,20 @@ const RING3_TESTS: &[CriticalTest] = &[
             "moved into the first segment's page failed in the wrong place",
             "halting",
         ],
-        forbidden_markers: &["user-load-corrupt: all 6 corrupted images were refused"],
+        forbidden_markers: &["user-load-corrupt: all 7 corrupted images were refused"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // **ユーザーのページを足す入口が、書けて実行もできる権限を断らない形**（2026-10-03）。起動時の
+    // 「断ること」の確かめが落ちる。
+    CriticalTest {
+        name: "user-map-allows-writable-executable",
+        feature: "user-map-allows-writable-executable-test",
+        expected_markers: &[
+            "address-space: a mapping that is both writable and executable was refused = false",
+            "the refusal of a writable and executable mapping did not hold; halting",
+        ],
+        forbidden_markers: &["user-run: hello"],
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
@@ -1313,6 +1326,18 @@ const SYSCALL_TESTS: &[CriticalTest] = &[
     },
     // ページ走査を先頭ページだけで打ち切る。無効4（straddle）の末尾無効を取り逃して
     // 受理され、battery が検出して halt する。
+    // **`mmap` が、実行できる保護の求めを断らない形**（2026-10-03。以前の形）。`syscall-test` の検算 71 が落ちる。
+    CriticalTest {
+        name: "mmap-allows-exec",
+        feature: "mmap-allows-exec-test",
+        expected_markers: &[
+            "user-run: syscall-test exited with status 71",
+            "mmap asking for PROT_EXEC did not return -EPERM",
+        ],
+        forbidden_markers: &["user-load: syscall-test ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     CriticalTest {
         name: "validate-skip-laststep",
         feature: "syscall-test-validate-skip-laststep",
@@ -6271,7 +6296,8 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
     NamedJudgement {
         check: "page permissions",
         key: "user-run-writable-text",
-        signs: &["user program hello | segment 0 | 4K: w 0 -> 1"],
+        // **区画 1（読むだけの区画）である**（2026-10-03）。区画 0（実行する区画）は、この破壊テストの対象から外した。
+        signs: &["user program hello | segment 1 | 4K: w 0 -> 1"],
         note: "",
         reached: true,
     },
@@ -30395,7 +30421,7 @@ fn count_elements(text: &str) -> usize {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 60,
-    full: 453,
+    full: 455,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。

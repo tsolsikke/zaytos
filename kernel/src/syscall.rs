@@ -50,13 +50,13 @@ use crate::abi::linux::{
     DIRENT64_ALIGN, DIRENT64_HEADER_LEN, DRM_CLIP_RECT_LEN, DT_DIR, DT_REG, DT_UNKNOWN,
     FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, FB_TYPE_PACKED_PIXELS, FB_VISUAL_TRUECOLOR,
     INPUT_EVENT_LEN, IOVEC_LEN, MSGHDR_CONTROLLEN, MSGHDR_LEN, O_ACCMODE, O_APPEND, O_CREAT,
-    O_RDONLY, O_TRUNC, O_WRONLY, POLLFD_LEN, POLLIN, PROT_WRITE, SCM_RIGHTS, SEEK_SET,
+    O_RDONLY, O_TRUNC, O_WRONLY, POLLFD_LEN, POLLIN, PROT_EXEC, PROT_WRITE, SCM_RIGHTS, SEEK_SET,
     SOCKADDR_UN_LEN, SOCK_STREAM, SOL_SOCKET, TIMESPEC_LEN, TIOCGWINSZ, WINSIZE_LEN,
 };
 use crate::abi::linux::{
     E2BIG, EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, EBUSY, ECHILD, ECONNREFUSED, EEXIST,
     EFAULT, EINVAL, EIO, EISCONN, EISDIR, EMFILE, EMSGSIZE, ENAMETOOLONG, ENOBUFS, ENODEV, ENOENT,
-    ENOEXEC, ENOMEM, ENOSPC, ENOSYS, ENOTCONN, ENOTDIR, ENOTEMPTY, ENOTSOCK, ENOTTY, EPIPE,
+    ENOEXEC, ENOMEM, ENOSPC, ENOSYS, ENOTCONN, ENOTDIR, ENOTEMPTY, ENOTSOCK, ENOTTY, EPERM, EPIPE,
     EPROTONOSUPPORT, EROFS, ESPIPE,
 };
 use crate::abi::private::{
@@ -2141,6 +2141,14 @@ unsafe fn mmap_from_ring3(len: u64, prot: u64, fd: u64, offset: u64, direct_map:
 
     if offset != 0 {
         return (-EINVAL) as u64;
+    }
+    // **実行できる保護を求められたら断る**（2026-10-03）。**共有メモリも画面も、書けるか読むだけかで写し、実行は
+    // させない。** 画面へ分かれる前に見るので、どちらの `mmap` にも効く。**今は、実行できる `mmap` を全部断っている**
+    // ——Linux のプログラムをそのまま動かす段階では、ファイルを写す `mmap` の「読んで実行する」を許し、断るのを
+    // 「書けて実行もできる」だけにする必要がある（`docs/deferred-decisions.md`）。
+    // 破壊テスト (mmap-allows-exec): 断らない（求めを無視して、実行できない葉を写す。以前の形）。
+    if prot & PROT_EXEC != 0 && !cfg!(feature = "mmap-allows-exec-test") {
+        return (-EPERM) as u64;
     }
     // **画面の fd なら裏バッファをマップする（`ADR-0066` の Y-c）。** **マップの仕方は共有メモリと同じ**
     // （`PTE_SHARED`）。
@@ -5481,6 +5489,7 @@ mod tests {
                 index: 1,
                 page: 0x402000,
             },
+            LayoutError::WritableAndExecutable { index: 0 },
         ] {
             assert_eq!(
                 errno_for_user_load(UserLoadError::Layout(layout)),
