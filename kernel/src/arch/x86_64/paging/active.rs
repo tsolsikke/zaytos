@@ -220,6 +220,20 @@ pub enum MapUpdateError {
     AlreadyMapped,
 }
 
+/// [`ActivePageTable::unmap_4kib`] が外した葉（2026-10-02）。
+///
+/// **フレームの番地は `frame` で受け取る。** `entry` は外す前の項目の値で、確かめの行に出すためのものである。
+/// **`entry` を番地として読んではならない**——項目には、番地のほかに権限のビットが載っている。以前は、項目の値だけを
+/// 返していて、`brk` の縮める側がそれを物理の番地として読んでいた。フラグが下位 12 ビットにしか無い間は通るが、
+/// 番地より上の位置にビットが立つと（実行禁止のビットなど）、番地として読めず、フレームが返らなくなる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnmappedPage {
+    /// 外した葉が指していたフレーム（項目の番地の部分だけを取り出したもの）。
+    pub frame: PhysAddr,
+    /// 外す前の項目の値（番地と、権限のビット）。
+    pub entry: u64,
+}
+
 /// 分割の結果。呼び出し側が照合に使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SplitOutcome {
@@ -433,13 +447,13 @@ impl ActivePageTable {
         Ok(pde)
     }
 
-    /// `virt` を含む 4KiB ページをアンマップする。無効化前の PTE を返す。
+    /// `virt` を含む 4KiB ページをアンマップする。外した葉（[`UnmappedPage`]）を返す。
     ///
     /// # 物理フレームは解放しない
     ///
     /// そのフレームが他から参照されているかを、この関数は知らない。
-    /// 解放の判断は呼び出し側が行う。返り値の PTE に物理アドレスが
-    /// 入っているので、呼び出し側はそれを使える。
+    /// 解放の判断は呼び出し側が行う。**フレームの番地は、返り値の `frame` を使うこと**
+    /// （外す前の項目の値を、番地として読まない。[`UnmappedPage`] の doc）。
     ///
     /// 2MiB ページの中を指していた場合に分割で確保した PT も解放しない。
     /// 512 本のうち 1 本を消しただけで、残り 511 本は生きている。
@@ -453,7 +467,7 @@ impl ActivePageTable {
     ///
     /// [`Self::split_huge_page`] と同じ。加えて、**アンマップした領域へ
     /// 以後アクセスしないことは呼び出し側の責任**である。触れば #PF になる。
-    pub unsafe fn unmap_4kib(&mut self, virt: VirtAddr) -> Result<u64, MapUpdateError> {
+    pub unsafe fn unmap_4kib(&mut self, virt: VirtAddr) -> Result<UnmappedPage, MapUpdateError> {
         let _guard = InterruptGuard::enter();
 
         let (pd, pd_index) = self.locate_pd(virt)?;
@@ -494,7 +508,10 @@ impl ActivePageTable {
             cpu::invalidate_tlb_entry(virt.as_u64())
         };
 
-        Ok(pte)
+        Ok(UnmappedPage {
+            frame: entry::page_address_4k(pte),
+            entry: pte,
+        })
     }
 
     /// 稼働中テーブルへ 4KiB ページを 1 枚マップする（M5-e-2）。

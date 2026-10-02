@@ -760,6 +760,10 @@ ring3-test-corrupt-frame-cs = []
 # paging-test の傘には入れない。傘に入れると Ring 3 の検証自体が載らなくなり、
 # 破壊を観測する側が消える。`--paging-test map-force-writable`。
 map-force-writable = []
+# 試しの形（破壊ではない）: ユーザーから届く葉に、番地より上の位置のビット（52。CPU は無視する）を立てる。
+# 項目の値を番地として読む所が残っていると、フレームの会計が合わなくなって止まる。
+# 実行禁止のビット（63）を入れる前の確かめ。`--paging-test user-leaf-high-bit`。
+user-leaf-high-bit-test = []
 # S9-b-1: 埋め込んだユーザープログラムの破壊確認。いずれも既定ビルドには入らない。
 # PT_LOAD のコピーを落とす。ページはゼロのままで、Ring 3 が entry からゼロを実行し、
 # ud2 へ届かない。user-run の判定行がベクタの食い違いで止める。

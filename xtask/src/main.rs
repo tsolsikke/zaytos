@@ -678,6 +678,23 @@ const PAGING_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // 2026-10-02: ユーザーから届く葉に、番地より上の位置のビット（52。CPU は無視する）を立てた形でも、
+    // 起動時のプログラムが今までどおり走り、フレームの会計が合うこと。**破壊ではない**——通るのが正しい。
+    //
+    // **項目の値を番地として読む所が在ると、ここで落ちる。** `brk` の縮める側が、外した項目の値を物理の番地として
+    // 読んでいたときは、`syscall-test` が伸ばした 2 枚が返らず、会計の誤り（`DestroyAccounting`）で止まった
+    // （直す前の形で実測した）。実行禁止のビット（63）も番地より上に在るので、入れる前にこの形で確かめる。
+    CriticalTest {
+        name: "user-leaf-high-bit",
+        feature: "user-leaf-high-bit-test",
+        expected_markers: &[
+            "user-heap: syscall-test had brk take 2 frame(s) and give back 2",
+            "init: starting /bin/zash",
+        ],
+        forbidden_markers: &["left the allocator short", "DestroyAccounting", "halting"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // 正しい実装で、PCD 付きの 2MiB ページを分割しても属性が残ること。
     // わざと壊す側（drop-pcd）と対にして初めて意味を持つ。
     CriticalTest {
@@ -30136,7 +30153,7 @@ fn count_elements(text: &str) -> usize {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 60,
-    full: 438,
+    full: 439,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。

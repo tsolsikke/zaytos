@@ -3637,12 +3637,12 @@ unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
                 page -= PAGE_SIZE;
                 if let Some(virt) = common::addr::VirtAddr::new(page) {
                     // SAFETY: 稼働中の表から外し、フレームを返す。
-                    if let Ok(frame) = unsafe { table.unmap_4kib(virt) } {
-                        // **`unmap_4kib` は物理アドレスを `u64` で返す。**
-                        if let Some(frame) = PhysAddr::new(frame) {
-                            let _ = allocator.deallocate_frame(frame);
-                            crate::userland::with_current_heap(|heap| heap.note_given());
-                        }
+                    if let Ok(page) = unsafe { table.unmap_4kib(virt) } {
+                        // **返すのは、外した葉が指していたフレームである**（`page.frame`）。以前は、外す前の
+                        // 項目の値を物理の番地として読んでいて、番地より上の位置にビットが立つと、
+                        // フレームが返らなかった（2026-10-02 に直した）。
+                        let _ = allocator.deallocate_frame(page.frame);
+                        crate::userland::with_current_heap(|heap| heap.note_given());
                     }
                 }
             }

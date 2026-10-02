@@ -596,7 +596,7 @@ pub unsafe fn install_guard_page(
     // SAFETY: guard_virt はスタックの直下のガードページで、スタック本体とは別の
     // 1 ページ。今後このページへ正規のアクセスは無く、触れたら溢れとして #PF で
     // 検出するのが目的である。
-    match unsafe { table.unmap_4kib(guard_virt) } {
+    match unsafe { table.unmap_4kib(guard_virt) }.map(|page| page.entry) {
         Ok(old_pte) => {
             // 会計: unmap 後にこのページが解決不能になっていること（ガードが効いて
             // いること）を、構築とは別に translate で確かめる。

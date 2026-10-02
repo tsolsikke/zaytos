@@ -70,6 +70,14 @@ pub const PTE_GLOBAL: u64 = 1 << 8;
 /// 使う思想である**（`docs/architecture.md` の「ABIの形は合わせる」）。
 pub const PTE_SHARED: u64 = 1 << 9;
 
+/// 試しの形（`user-leaf-high-bit-test`）が、ユーザーの葉に立てるビット（52）。
+///
+/// **ビット 52 は、CPU が無視する、ソフトウェア用の空きビットである**（保護キーを使わない間は、52 から 62 が空いて
+/// いる。カーネルは `CR4.PKE` を立てていない）。番地（ビット 12-51）より上に在るので、項目の値を番地として読む
+/// 所が残っていれば、この形で表に出る。**実行禁止のビット（63）も番地より上に在る**——実行禁止を入れる前に、
+/// 番地より上のビットが立った項目を、カーネルが正しく扱えることを確かめるためのものである。
+pub const PTE_HIGH_BIT_FOR_TEST: u64 = 1 << 52;
+
 /// 4KiB ページのアドレス部分（ビット 12-51）。
 pub const ADDR_MASK_4K: u64 = 0x000F_FFFF_FFFF_F000;
 
@@ -199,6 +207,12 @@ pub const fn leaf_flags(permissions: PagePermissions, size: LeafSize) -> u64 {
     }
     if matches!(size, LeafSize::Large) {
         flags |= PDE_PAGE_SIZE;
+    }
+    // 試しの形 (user-leaf-high-bit-test): ユーザーから届く葉に、番地より上の位置のビットを立てる。
+    // **破壊ではない**——CPU は無視するので、正しいカーネルは今までどおり動く。項目の値を番地として読む所が
+    // 在ると、フレームの会計が合わなくなって止まる。
+    if cfg!(feature = "user-leaf-high-bit-test") && permissions.user() {
+        flags |= PTE_HIGH_BIT_FOR_TEST;
     }
     flags
 }

@@ -10676,7 +10676,7 @@ fn verify_split_and_unmap<const CAP: usize>(
     let target = base_virt.checked_add(entry::PAGE_SIZE_4K).unwrap();
     // SAFETY: 上記と同じ領域で、以後この 4KiB へはアクセスしない。
     let old_pte = match unsafe { table.unmap_4kib(target) } {
-        Ok(pte) => pte,
+        Ok(page) => page.entry,
         Err(error) => {
             logger.error(format_args!("split-test: unmap failed: {error:?}; halting"));
             cpu::halt_forever();
@@ -11937,6 +11937,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "map_4kib の書き込み可否の引数を無視して葉を常に W=1 にする",
     ),
     (
+        "user-leaf-high-bit-test",
+        cfg!(feature = "user-leaf-high-bit-test"),
+        "ユーザーから届く葉に、番地より上の位置のビット（52）を立てる（破壊ではない）",
+    ),
+    (
         "user-run-skip-load",
         cfg!(feature = "user-run-skip-load"),
         "PT_LOAD のコピーを落とす",
@@ -12618,7 +12623,7 @@ fn run_paging_test<const CAP: usize>(
     }
 
     // SAFETY: 上記の領域。以後この 4KiB へアクセスするのが、この検証の目的である。
-    let old = unsafe { table.unmap_4kib(target) };
+    let old = unsafe { table.unmap_4kib(target) }.map(|page| page.entry);
     let target_none = matches!(table.translate(target), Ok(None));
     // 添字を間違えていれば、別のページが消えているはずである。
     let neighbour_none = matches!(table.translate(unmap_base), Ok(None));
