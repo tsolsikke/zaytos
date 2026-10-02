@@ -34,3 +34,6 @@ pc-mce           pc                256M    file      virtio    dir    -
 # 既定の qemu64 の製造元だけを GenuineIntel にしたものが Intel の回である。
 pc-epyc          pc                256M    file      virtio    dir    EPYC
 pc-intel         pc                256M    file      virtio    dir    qemu64,vendor=GenuineIntel
+# 実行禁止（NX）に対応していない CPU（2026-10-02）。既定の qemu64 から NX を外したもの。
+# カーネルは EFER に書かず、名前つきの行を出して止まる。
+pc-no-nx         pc                256M    file      virtio    dir    qemu64,-nx

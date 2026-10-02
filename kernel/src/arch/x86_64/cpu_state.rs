@@ -877,7 +877,14 @@ pub unsafe fn establish_required_bits_on_bsp() {
     // 破壊テスト (2026-10-02, bsp-leaves-nxe-clear): **ファームウェアが NXE を落として渡し、カーネルが立てない形**を
     // 作る。**OVMF と VirtualBox の EFI は NXE を立てて渡すので、落として作る。** **立てた後の読み戻しが
     // EFER.NXE を名指しして止まる。** 載っているのは起動の表で、実行禁止のビットを立てた項目は無い。
-    #[cfg(feature = "bsp-leaves-nxe-clear-test")]
+    //
+    // 試しの形 (2026-10-02, bsp-enters-with-nxe-clear。破壊ではない): **ファームウェアが NXE を落として渡す形**
+    // だけを作り、カーネルには立てさせる。**立てる書き込みは、OVMF でも VirtualBox でも通らない経路である**
+    // （どちらも立てて渡す）ので、この形で走らせて見る。確かめの行が「カーネルが立てた」と出て、起動は進む。
+    #[cfg(any(
+        feature = "bsp-leaves-nxe-clear-test",
+        feature = "bsp-enters-with-nxe-clear-test"
+    ))]
     let efer_at_entry = {
         let cleared = efer_at_entry & !Efer::NO_EXECUTE_ENABLE;
         // SAFETY: 呼び出し側の契約。NXE だけを落とす（LME はそのまま）。

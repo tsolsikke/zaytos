@@ -696,6 +696,9 @@ bsp-keeps-cd-test = []
 # ファームウェアが EFER.NXE を落として渡し、カーネルが立てない形を BSP で作る（2026-10-02）。
 # 立てた後の読み戻しが EFER.NXE を名指しして止まる。
 bsp-leaves-nxe-clear-test = []
+# 試しの形（破壊ではない）: ファームウェアが EFER.NXE を落として渡す形を BSP で作り、カーネルに立てさせる（2026-10-02）。
+# OVMF も VirtualBox の EFI も立てて渡すので、カーネルが EFER に書く経路は、この形でしか通らない。
+bsp-enters-with-nxe-clear-test = []
 # AP のトランポリンが LME だけを立て、NXE を立てない（直す前の形。2026-10-02）。
 # AP がトランポリンを出た直後の EFER を BSP が確かめ、NXE が落ちていることを名指しして止まる。
 ap-trampoline-without-nxe-test = []

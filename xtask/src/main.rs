@@ -9559,6 +9559,12 @@ const MACHINE_VARIANT_CHECKS: &[(&str, VariantExpect)] = &[
             forbidden: &["[ERROR]", "[WARN] cpu-state:"],
         },
     ),
+    // **実行禁止に対応していない CPU では、名前つきの行を出して止まる**（2026-10-02。運用者の決定）。
+    // **EFER には書かない**——書けば `#GP` になり、この行より前に落ちる。
+    (
+        "pc-no-nx",
+        VariantExpect::StopsWith("cpu-state: this CPU does not support execute-disable"),
+    ),
 ];
 
 /// 起動媒体の破壊テスト（`ADR-0068` の HW-e）。**カーネルの feature ではなく、イメージの中身を変える。**
@@ -22897,6 +22903,24 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // **カーネルへ入った時点で NXE が落ちている形**（2026-10-02。**破壊ではない**——通るのが正しい）。
+    // **OVMF は NXE を立てて渡すので、カーネルが EFER に書く経路は、既定の起動では 1 度も通らない。**
+    // 入口で落としてから、カーネルに立てさせる。確かめの行が「カーネルが立てた」と出て、AP もトランポリンで立てて
+    // 届き、シェルを起こす所まで進むこと。
+    CriticalTest {
+        name: "bsp-enters-with-nxe-clear",
+        feature: "bsp-enters-with-nxe-clear-test",
+        expected_markers: &[
+            "it was clear when the kernel was entered, so the kernel set it: EFER 0x500 -> 0xd00",
+            "EFER.LME, LMA, NXE set",
+            "cpu-state: ap 1 left the trampoline with EFER=0xd00, EFER.NXE=1 (expected 1)",
+            "cpu-state: 1 started AP(s) match the BSP's CR0, CR4 and EFER",
+            "init: starting /bin/zash",
+        ],
+        forbidden_markers: &["so the kernel did not write EFER", "[ERROR]", "halting"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     CriticalTest {
         name: "ap-touch-scheduler",
         feature: "smp-ap-touch-scheduler-test",
@@ -30172,7 +30196,7 @@ fn count_elements(text: &str) -> usize {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 60,
-    full: 441,
+    full: 443,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -34840,12 +34864,16 @@ fn read_cr3() -> u64 {
             .any(|variant| variant.name == "pc-epyc" && variant.cpu == Some("EPYC")));
         assert!(variants.iter().any(|variant| variant.name == "pc-intel"
             && variant.cpu == Some("qemu64,vendor=GenuineIntel")));
+        // **実行禁止に対応していない CPU の変種**（2026-10-02）。
+        assert!(variants
+            .iter()
+            .any(|variant| variant.name == "pc-no-nx" && variant.cpu == Some("qemu64,-nx")));
         assert_eq!(
             variants
                 .iter()
                 .filter(|variant| variant.cpu.is_some())
                 .count(),
-            2
+            3
         );
     }
 

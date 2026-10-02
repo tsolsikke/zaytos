@@ -11299,6 +11299,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "ファームウェアが EFER.NXE を落として渡し、カーネルが立てない形を BSP で作る",
     ),
     (
+        "bsp-enters-with-nxe-clear-test",
+        cfg!(feature = "bsp-enters-with-nxe-clear-test"),
+        "ファームウェアが EFER.NXE を落として渡す形を BSP で作り、カーネルに立てさせる（破壊ではない）",
+    ),
+    (
         "ap-trampoline-without-nxe-test",
         cfg!(feature = "ap-trampoline-without-nxe-test"),
         "AP のトランポリンが LME だけを立て、NXE を立てない（直す前の形）",
