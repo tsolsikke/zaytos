@@ -5661,6 +5661,9 @@ struct NamedJudgement {
     check: &'static str,
     /// 破壊テストの feature（検出すると `Ok` を返す永続の 2 つは、項目の文脈の名前）。
     key: &'static str,
+    /// 狙いの判定の行のしるし。**同じ 1 行の中に、全部が出ることを求める**（1 行の断片を並べる。
+    /// [`judgement_verdict`]）。**別々の行をしるしにしてはならない**——2 つが同じ行に出ることは無いので、破壊が
+    /// 捕まっていても「しるしが出ていない」と判定される（2026-10-02 に、全検査で踏んだ）。
     signs: &'static [&'static str],
     note: &'static str,
     /// 狙いの判定に届いているか（2026-09-26。計器の外の破壊を絞る段。運用者の決定 1 の ②）。**偽の行は、
@@ -6284,10 +6287,7 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
     NamedJudgement {
         check: "page permissions",
         key: "kernel-rodata-page-writable-test",
-        signs: &[
-            "before interrupts are enabled | kernel rodata | 4K: new (w=1 u=0 x=0",
-            "after the application processors started | kernel rodata | 4K: new (w=1 u=0 x=0",
-        ],
+        signs: &["before interrupts are enabled | kernel rodata | 4K: new (w=1 u=0 x=0"],
         note: "",
         reached: true,
     },
