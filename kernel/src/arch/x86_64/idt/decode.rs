@@ -53,9 +53,15 @@ impl PageFaultErrorCode {
         self.0 & (1 << 6) != 0
     }
 
-    /// 原因（存在しない / 権限違反）。
+    /// 原因（予約のビットの違反 / 権限違反 / 存在しない）。
+    ///
+    /// **予約のビットの違反を先に見る**（2026-10-02）。**このとき bit 0 は、CPU によって 0 のことも 1 のことも
+    /// ある**——QEMU（TCG）は 0 で渡した（誤りコード `0x8`。`EFER.NXE` を落として、実行禁止のビットを持つ項目を
+    /// 引いた実測）。bit 0 だけで決めると、項目が在って壊れているのに「ページが無い」と出る。
     pub fn cause(&self) -> &'static str {
-        if self.is_protection_violation() {
+        if self.is_reserved_bit_violation() {
+            "reserved bit violation"
+        } else if self.is_protection_violation() {
             "protection violation"
         } else {
             "page not present"
@@ -215,6 +221,11 @@ mod tests {
         let code = PageFaultErrorCode(0b1000);
         assert!(code.is_reserved_bit_violation());
         assert!(!code.is_instruction_fetch());
+        // **原因は、bit 0 がどちらでも、予約のビットの違反と出す**（2026-10-02。`0x8` は QEMU の実測）。
+        assert_eq!(code.cause(), "reserved bit violation");
+        assert_eq!(PageFaultErrorCode(0b1001).cause(), "reserved bit violation");
+        assert_eq!(code.access(), "read");
+        assert_eq!(code.mode(), "supervisor");
     }
 
     #[test]

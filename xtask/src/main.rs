@@ -355,6 +355,7 @@ const CRITICAL_TESTS: &[CriticalTest] = &[
         expected_markers: &[
             "nx-probe: mapped a probe page at 0xffff828000000000",
             "exception: vector=14 (#PF page fault)",
+            "cause=reserved bit violation access=read mode=supervisor",
             "reserved bit set in a page table entry",
             "cr2=0xffff828000000000 (faulting address)",
         ],
@@ -22950,6 +22951,7 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
         expected_markers: &[
             "nx-probe: cpu 0 read the probe page: value=0x4e585f50524f4245 (expected 0x4e585f50524f4245), EFER.NXE=1 (expected 1)",
             "exception: vector=14 (#PF page fault)",
+            "cause=reserved bit violation access=read mode=supervisor",
             "reserved bit set in a page table entry",
             // **AP の上で起きたこと**を、止まったときのスタックが AP の CPU ごとのスタックの置き場（`PML4[258]`）に
             // 在ることで見る。
