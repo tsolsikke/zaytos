@@ -2050,6 +2050,39 @@ VirtualBoxの計数でベクタ0x42が打鍵4バイトで+4、8259のベクタ0x
 - 実行の欄の値（どの名前が「実行できる」か）は、手順4まで、どの検査も見ない。ビットにならないからである。型の側のホストのテストが、名前ごとの値を固定している。
 - 4KiBを1枚張る経路は、歩く所が2つのままである（稼働中の表と、稼働していない空間）。ビットの組み立てだけが1つになった。
 
+### 実行禁止（EFER.NXE）をすべてのCPUで有効にした（2026-10-02。`ADR-0071`の手順4の最初）
+
+**カーネルが、EFER.NXEを自分で立て、起こすCPUの全部で読み戻して確かめる。** 項目に実行禁止のビットを付けるのは次の作業で、ここでは付けていない。
+
+**起動ログの行**（既定の起動。起動ログの参照に載る）。
+
+- `cpu-state: the CPU supports execute-disable: CPUID leaf 0x80000001 EDX bit 20 = 1 (expected 1), …`——BSPが、NXEを立てる前にCPUIDで対応を確かめたこと。対応していなければ、ここで名前つきの行を出して止まる。
+- `cpu-state: EFER.NXE=1 (expected 1) on the BSP [read back]; …`——立てた後に読み戻した値と、カーネルへ入った時点で既に立っていたか（書かなかった）、落ちていたか（カーネルが立てた）。読み戻しが0なら、ここで止まる。自分のページテーブルを組むより前である。
+- `cpu-state: the 23 bit(s) the kernel needs hold (… EFER.LME, LMA, NXE set; …)`——EFER.NXEは、カーネルが要るビットの表の「1であるべき」に入った（数はAMDで23、Intelで21）。
+- `cpu-state: ap 1 left the trampoline with EFER=0xd00, EFER.NXE=1 (expected 1) [read by the AP before it copied the BSP]`——APがトランポリンを出た直後に、BSPの値をコピーする前に、自分で読んだ値。BSPが確かめる。**コピーした後の突き合わせだけでは、トランポリンが立てたのか、コピーで立ったのかが分からない。**
+
+**項目。**
+
+| 項目 | 見るもの | 実測（2026-10-02） |
+|---|---|---|
+| `critical-test bsp-leaves-nxe-clear`（破壊テスト） | カーネルへ入った時点でNXEが落ちていて、カーネルが立てない形で、読み戻しが`cpu-state: EFER.NXE is 0 on the BSP …`と名指しして止まり、最初のユーザープログラムが走らない | 通った。`EFER 0x500 -> 0x500`で止まった |
+| `smp-ap-test ap-trampoline-without-nxe`（破壊テスト） | トランポリンがLMEだけを立てる形（直す前の形）で、`cpu-state: ap 1 left the trampoline with EFER.NXE clear (EFER=0x500 …`で止まり、まとめの行が出ない | 通った。同じ回に、コピーした後の突き合わせの行は「一致」と出ている（終わりの突き合わせでは見えない欠陥である） |
+| `smp-ap-test bsp-enters-with-nxe-clear`（破壊ではない。通るのが正しい） | カーネルへ入った時点でNXEが落ちている形で、`… so the kernel set it: EFER 0x500 -> 0xd00`と出て、APもNXEが1で届き、シェルを起こす所まで進む。`[ERROR]`が出ない | 通った |
+| `machine-variant pc-no-nx`（CPUからNXを外した変種。`-cpu qemu64,-nx`） | `cpu-state: this CPU does not support execute-disable …`で止まり、プロンプトが出ない | 通った。OVMFはこのCPUでも起動し、NXEを落としたまま渡した（EFER=`0x500`）。カーネルはEFERに書かず、`#GP`は出ていない |
+
+**後の2つを常設にした理由。** OVMFもVirtualBoxのEFIもNXEを立てて渡すので、カーネルがEFERに書く経路と、対応していないCPUで止まる経路は、既定の起動では1度も通らない。ホストのテストが見るのは判定の側（対応の読み方と、書く・書かないの決め方）だけで、EFERを実際に書く所は見ていない。
+
+**APのトランポリンの機械語。** 変えたのは、EFERへ立てるビットの定数だけである（`or eax, 0x100`が`or eax, 0x900`になった）。変える前と後のカーネルから雛形の4096バイトを取り出して比べると、違うのは1バイト（先頭から`0x28`。`01`が`09`）で、命令の長さ（6バイト）、far jumpの位置（先頭から57バイト）、雛形の長さは同じだった。設置の照合（コピーと雛形の突き合わせ）は、QEMUでもVirtualBoxでも食い違い0である。
+
+**VirtualBox**（確かめ用のVM。CPUの製造元はGenuineIntel）。同じ4行が出て（葉の最大は`0x80000008`、要るビットは21）、APはEFER=`0xd00`で届いた。`[ERROR]`は0行で、`judge-vbox`は通った。
+
+**限界。**
+
+- 確かめたAPは1つである（`MAX_CPUS`が2。QEMUでもVirtualBoxでも、起こすAPは1つ）。
+- APの側では、CPUIDを見ていない（BSPと同じCPUである前提。`deferred-decisions.md`）。
+- 「NXEが立ってから、実行禁止のビットを付けた項目を引く」順序を、CPUの例外で確かめる形（試し専用のページ）は、まだ無い。次の作業の最初に入れる（`ADR-0071`の2026-10-02のAddendum）。
+- BSPの破壊テストは、立てた直後の読み戻しで止まる。要るビットの表の側がEFER.NXEを名指しすることは、ホストのテスト（`nxe_must_be_set_for_every_vendor`）が見ていて、起動の中では走らせていない。
+
 ### アドレス空間を壊す順序を共通の側へ移した（2026-10-02。`ADR-0071`の手順3）
 
 **アドレス空間を壊す入口を、2つに分けた。**
@@ -2174,7 +2207,7 @@ VirtualBoxの計数でベクタ0x42が打鍵4バイトで+4、8259のベクタ0x
 | `--full`「the FS/GS and SMAP check catches kernel-uses-gs-test」 | 破壊テストのイメージで、基本の検査の項目が`%gs:`を名指しして落ちる | 破壊テストのイメージに`mov %gs:0x0,%rax`が1つ残った（手でビルドして数えた） |
 | `critical-test cpu-state-sees-sce`（破壊テスト） | **`cpu-state: EFER.SCE is 1`と棚卸しの文言で止まり、最初のユーザープログラムが走らない** | 通った |
 | `critical-test bsp-keeps-cd`（破壊テスト。2026-09-24） | **ファームウェアがCDを立てて渡し、カーネルが落とさない形で、`cpu-state: CR0.CD is 1, but the kernel needs it to be 0`で止まり、最初のユーザープログラムが走らない** | 通った。**CR0が`0x80010033 -> 0xc0010033`になり、監視がCR0.CDを名指しした** |
-| `smp-ap-test ap-keeps-its-own-control-registers`（破壊テスト。2026-09-24） | **APがBSPの値をコピーしない形で、`cpu-state: ap 1 differs from the BSP in CR0`と`CD set on the AP`と棚卸しの文言で止まり、まとめの行が出ない** | 通った。**CR0・CR4・EFERの違いを名前で出した**（NE・WP・NW・CD、DE・MCE、NXE） |
+| `smp-ap-test ap-keeps-its-own-control-registers`（破壊テスト。2026-09-24） | **APがBSPの値をコピーしない形で、`cpu-state: ap 1 differs from the BSP in CR0`と`CD set on the AP`と棚卸しの文言で止まり、まとめの行が出ない** | 通った。**CR0・CR4・EFERの違いを名前で出した**（NE・WP・NW・CD、DE・MCE、NXE）。**2026-10-02からは、EFERは違わない**（トランポリンがNXEも立てるので、コピーしなくてもBSPと同じ`0xd00`になる）。期待はCR0の行なので、判定は変わらない |
 | `critical-test cpu-state-sees-an-unclassified-bit`（破壊テスト。2026-09-24） | **その製造元で分類していない最初のビットが立って見える形で、`[WARN] cpu-state: EFER.SVME is 1 and is not classified yet`が出て、止まらず、最初のユーザープログラムが走る**（QEMUの既定はAMDなのでEFER.SVME） | 通った |
 | `critical-test cpu-state-sees-ffxsr`（破壊テスト。2026-09-24） | **EFER.FFXSRが立って見える形で、`cpu-state: EFER.FFXSR is 1, but the kernel needs it to be 0`で止まり、最初のユーザープログラムが走らない** | 通った |
 | `machine-variant pc-epyc`（2026-09-24） | **`-cpu EPYC`で、`cpu-state: the CPU vendor is AuthenticAMD (CPUID leaf 0)`が出て、`[ERROR]`と`[WARN] cpu-state:`が出ない** | 8.8秒で通った。**CR4は`0x668`で、AMDの表の22ビットが成り立った** |
