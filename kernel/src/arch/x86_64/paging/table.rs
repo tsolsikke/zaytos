@@ -19,10 +19,13 @@ use common::addr::{DirectMap, PhysAddr, VirtAddr};
 
 use crate::frame_allocator::{FrameAllocator, FRAME_SIZE};
 
+use crate::paging::permissions::PagePermissions;
+
 // **ビットの定数は `entry` の 1 組を使う**（2026-10-02。以前は、このファイルが同じ値の写しを持っていた）。
-// `PDE_PAGE_SIZE` は PD レベルでのみ設定する（2MiB ページ）。PDPT レベルで設定すると 1GiB ページの意味に
-// なるため、このモジュールでは PDPT レベルには絶対に立てない。
-use super::entry::{ADDR_MASK_4K, PAGE_SIZE_2M, PDE_PAGE_SIZE, PTE_PCD, PTE_PRESENT, PTE_WRITABLE};
+// **項目を書くときのビットは、`entry` の変換（`leaf_entry` と `table_entry`）が決める。** ここで読む定数は、
+// 既に在る項目を調べるためのものである。2MiB の葉は PD レベルにだけ書く（PDPT レベルに書くと 1GiB ページの
+// 意味になるため、このモジュールは PDPT レベルには葉を書かない）。
+use super::entry::{self, LeafSize, ADDR_MASK_4K, PAGE_SIZE_2M, PDE_PAGE_SIZE, PTE_PRESENT};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageTableError {
@@ -260,12 +263,14 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
         // SAFETY: `table_phys`/`index` は上記と同じ契約。新規に確保した
         // `child_phys` を Present + Writable な中間エントリとして書く
         // （中間テーブル自体はキャッシュ属性を特別扱いしない）。
+        // **途中の項目は、葉の権限に依らず、常にカーネルの側のものとして書く**（このビルダーが組むのは
+        // カーネルの表だけである。ユーザーから届く項目は作らない）。
         unsafe {
             write_entry(
                 self.direct_map,
                 table_phys,
                 index,
-                child_phys.as_u64() | PTE_PRESENT | PTE_WRITABLE,
+                entry::table_entry(child_phys, PagePermissions::kernel_unrestricted()),
             );
         }
         Ok(child_phys)
@@ -295,7 +300,7 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
         virt: VirtAddr,
         phys: PhysAddr,
         len: u64,
-        cacheable: bool,
+        permissions: PagePermissions,
     ) -> Result<(), PageTableError> {
         if !len.is_multiple_of(FRAME_SIZE) {
             return Err(PageTableError::MisalignedRange);
@@ -317,7 +322,7 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
                 && virt_here.is_aligned(PAGE_SIZE_2M)
                 && phys_here.is_aligned(PAGE_SIZE_2M);
 
-            self.map_one(virt_here, phys_here, huge, cacheable)?;
+            self.map_one(virt_here, phys_here, huge, permissions)?;
             offset += if huge { PAGE_SIZE_2M } else { FRAME_SIZE };
         }
         Ok(())
@@ -329,15 +334,10 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
         virt: VirtAddr,
         phys: PhysAddr,
         huge: bool,
-        cacheable: bool,
+        permissions: PagePermissions,
     ) -> Result<(), PageTableError> {
         let pdpt = self.ensure_child(self.pml4_phys, virt.top_index())?;
         let pd = self.ensure_child(pdpt, virt.upper_index())?;
-
-        let mut flags = PTE_PRESENT | PTE_WRITABLE;
-        if !cacheable {
-            flags |= PTE_PCD;
-        }
 
         if huge {
             // SAFETY: `pd` はこのビルダーが構築した有効な PD。添字は 512 未満。
@@ -347,7 +347,7 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
                     self.direct_map,
                     pd,
                     virt.middle_index(),
-                    (phys.as_u64() & ADDR_MASK_4K) | flags | PDE_PAGE_SIZE,
+                    entry::leaf_entry(phys, permissions, LeafSize::Large),
                 );
             }
         } else {
@@ -358,7 +358,7 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
                     self.direct_map,
                     pt,
                     virt.leaf_index(),
-                    (phys.as_u64() & ADDR_MASK_4K) | flags,
+                    entry::leaf_entry(phys, permissions, LeafSize::Small),
                 );
             }
         }
@@ -372,12 +372,12 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
     /// 意図的に立てない: **カーネルは EFER.NXE を立てていない**（BSP ではファームウェアが
     /// 立てて渡すことがあるが、それに依らない。2026-09-24 の実測で OVMF と VirtualBox の EFI は
     /// 立てていた）。**NXE が 0 のコアで立てると予約ビット違反のページフォルトになる。**
-    /// 権限の細分化は次の独立したステップに送る。
+    /// 権限の細分化は次の独立したステップに送る。**ビットを決めるのは `entry` の変換である。**
     pub fn map_page(
         &mut self,
         phys_addr: PhysAddr,
         huge: bool,
-        cacheable: bool,
+        permissions: PagePermissions,
     ) -> Result<(), PageTableError> {
         // 恒等マッピングの計画なので、物理アドレスをそのまま仮想アドレスと
         // して添字を取る。**higher-half 移行ではここが変わる。** 計画が
@@ -386,11 +386,6 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
             .expect("an identity-mapped physical address is canonical");
         let pdpt = self.ensure_child(self.pml4_phys, virt.top_index())?;
         let pd = self.ensure_child(pdpt, virt.upper_index())?;
-
-        let mut flags = PTE_PRESENT | PTE_WRITABLE;
-        if !cacheable {
-            flags |= PTE_PCD;
-        }
 
         if huge {
             // SAFETY: `pd` はこのビルダーが構築した、有効な PD テーブル。
@@ -402,7 +397,7 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
                     self.direct_map,
                     pd,
                     virt.middle_index(),
-                    (phys_addr.as_u64() & ADDR_MASK_4K) | flags | PDE_PAGE_SIZE,
+                    entry::leaf_entry(phys_addr, permissions, LeafSize::Large),
                 );
             }
         } else {
@@ -413,7 +408,7 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
                     self.direct_map,
                     pt,
                     virt.leaf_index(),
-                    (phys_addr.as_u64() & ADDR_MASK_4K) | flags,
+                    entry::leaf_entry(phys_addr, permissions, LeafSize::Small),
                 );
             }
         }

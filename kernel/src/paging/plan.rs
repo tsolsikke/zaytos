@@ -14,6 +14,7 @@ use common::addr::PhysAddr;
 
 use crate::frame_allocator::FRAME_SIZE;
 use crate::memory_map::{self, RegionPolicy};
+use crate::paging::permissions::PagePermissions;
 
 pub const PAGE_SIZE_2M: u64 = 2 * 1024 * 1024;
 
@@ -26,6 +27,19 @@ pub const PAGE_SIZE_2M: u64 = 2 * 1024 * 1024;
 /// 256 にしている。
 pub const DEFAULT_CAPACITY: usize = 256;
 
+/// 起動の途中に組む表の範囲の権限を、キャッシュしてよいかから決める（2026-10-02。`ADR-0071` の手順 3）。
+///
+/// **計画が持つ属性は「キャッシュしてよいか」だけである**（メモリマップの種別から決まる）。キャッシュしてよい
+/// 範囲（メモリ）は、今は区画ごとの権限を持たず、書けて実行もできる。キャッシュしない範囲（MMIO と
+/// フレームバッファ）は装置である。
+pub const fn permissions_for(cacheable: bool) -> PagePermissions {
+    if cacheable {
+        PagePermissions::kernel_unrestricted()
+    } else {
+        PagePermissions::kernel_device()
+    }
+}
+
 /// 同一キャッシュ属性で連続する物理アドレス範囲。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AttributedRange {
@@ -33,6 +47,13 @@ pub struct AttributedRange {
     /// 排他的な終端。
     pub end: PhysAddr,
     pub cacheable: bool,
+}
+
+impl AttributedRange {
+    /// この範囲をマップするときの権限（[`permissions_for`]）。
+    pub const fn permissions(&self) -> PagePermissions {
+        permissions_for(self.cacheable)
+    }
 }
 
 /// マップすべき物理アドレス範囲の、ソート済み・隣接結合済みの集合。
@@ -187,6 +208,13 @@ pub struct PageMapping {
     /// `true` なら 2MiB ページ、`false` なら 4KiB ページ。
     pub huge: bool,
     pub cacheable: bool,
+}
+
+impl PageMapping {
+    /// このページをマップするときの権限（[`permissions_for`]）。
+    pub const fn permissions(&self) -> PagePermissions {
+        permissions_for(self.cacheable)
+    }
 }
 
 /// [`MappedRanges`] を、実際にどのページサイズで割り付けるかまで解決し、

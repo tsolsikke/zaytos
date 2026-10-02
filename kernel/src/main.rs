@@ -880,7 +880,7 @@ extern "sysv64" fn kernel_main() -> ! {
         if map_error.is_some() {
             return;
         }
-        if let Err(e) = builder.map_page(m.phys_addr, m.huge, m.cacheable) {
+        if let Err(e) = builder.map_page(m.phys_addr, m.huge, m.permissions()) {
             map_error = Some((m, e));
             return;
         }
@@ -12731,7 +12731,7 @@ fn build_and_switch_direct_map(
         if identity_error.is_some() {
             return;
         }
-        if let Err(e) = builder.map_page(m.phys_addr, m.huge, m.cacheable) {
+        if let Err(e) = builder.map_page(m.phys_addr, m.huge, m.permissions()) {
             identity_error = Some(e);
         }
     });
@@ -12764,7 +12764,7 @@ fn build_and_switch_direct_map(
             cpu::halt_forever();
         };
         let len = r.end.as_u64() - r.start.as_u64();
-        if let Err(e) = builder.map_range(virt, r.start, len, r.cacheable) {
+        if let Err(e) = builder.map_range(virt, r.start, len, r.permissions()) {
             logger.error(format_args!(
                 "direct-map: window map_range at {:#x} (phys {:#x}, len {:#x}) failed: {e:?}",
                 virt.as_u64(),
@@ -13328,7 +13328,12 @@ fn map_kernel_high_half<const CAP: usize>(
     // 既にマップした PT を上書きするだけなので 0 のはずで、それをログで確かめる。base=高位
     // （B-2a-3）では PML4[511] 配下の新規部分木の分だけ増える。
     let frames_before = builder.frames_used();
-    if let Err(e) = builder.map_range(high_start, image_start, image_len, true) {
+    if let Err(e) = builder.map_range(
+        high_start,
+        image_start,
+        image_len,
+        kernel::paging::permissions::PagePermissions::kernel_unrestricted(),
+    ) {
         logger.error(format_args!(
             "higher-half: kernel high mapping ({:#x} -> phys {:#x}, len {:#x}) failed: {e:?}",
             high_start.as_u64(),
@@ -13396,7 +13401,7 @@ fn build_and_verify_high_half(
         if map_error.is_some() {
             return;
         }
-        if let Err(e) = builder.map_page(m.phys_addr, m.huge, m.cacheable) {
+        if let Err(e) = builder.map_page(m.phys_addr, m.huge, m.permissions()) {
             map_error = Some(e);
         }
     });
@@ -13412,7 +13417,12 @@ fn build_and_verify_high_half(
     let image_len = image_end.as_u64() - image_start.as_u64();
     let image_len = image_len.next_multiple_of(frame_allocator::FRAME_SIZE);
     let high_start = kernel::kernel_virt_from_phys(image_start);
-    if let Err(error) = builder.map_range(high_start, image_start, image_len, true) {
+    if let Err(error) = builder.map_range(
+        high_start,
+        image_start,
+        image_len,
+        kernel::paging::permissions::PagePermissions::kernel_unrestricted(),
+    ) {
         logger.error(format_args!(
             "high-half: kernel high mapping failed: {error:?}"
         ));
