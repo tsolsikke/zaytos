@@ -64,13 +64,29 @@ extern "C" {
 // const オペランド（(a)(b)）と、同一 asm へ 1 行挿入するマクロ（(d)）で行う。
 // 検査対象の asm を複製せずに済む。
 
+/// 静的な起動の表の権限。**起動の表は、覆う範囲の全部を、書けて実行もできるメモリとしてマップする**
+/// （カーネルの像と、恒等の 1GiB。区画ごとの権限は、本流の表へ切り替えた後のものである）。
+const BOOT_TABLE_PERMISSIONS: kernel::paging::permissions::PagePermissions =
+    kernel::paging::permissions::PagePermissions::kernel_unrestricted();
+
+/// 起動の表の、途中の項目のビット（P|RW = 0x03）。**権限の変換が決める**（2026-10-02。以前は、アセンブリに
+/// 直書きしていた）。値が今までと同じことは、`entry` のホストのテストが固定している。
+const BOOT_TABLE_FLAGS: u64 =
+    kernel::arch::x86_64::paging::entry::table_flags(BOOT_TABLE_PERMISSIONS);
+
+/// 起動の表の、2MiB の葉のビット（P|RW|PS = 0x83）。**権限の変換が決める**（同上）。
+const BOOT_LEAF_FLAGS: u64 = kernel::arch::x86_64::paging::entry::leaf_flags(
+    BOOT_TABLE_PERMISSIONS,
+    kernel::arch::x86_64::paging::entry::LeafSize::Large,
+);
+
 /// (a) highhalf-no-identity-in-boot-pt: 静的 PML4[0] の存在ビットを落とす。
-/// 既定 0x03（P|RW）/ feature 0x02（P クリア）。恒等 PML4[0] が not-present に
-/// なり、mov cr3 直後の低位命令フェッチ（次命令）が解決できずトリプルフォルトする。
+/// 既定は [`BOOT_TABLE_FLAGS`]（0x03。P|RW）/ feature は、そこから P を落とした値（0x02）。恒等 PML4[0] が
+/// not-present になり、mov cr3 直後の低位命令フェッチ（次命令）が解決できずトリプルフォルトする。
 const BOOT_PML4_0_FLAGS: u64 = if cfg!(feature = "highhalf-no-identity-in-boot-pt") {
-    0x02
+    BOOT_TABLE_FLAGS & !kernel::arch::x86_64::paging::entry::PTE_PRESENT
 } else {
-    0x03
+    BOOT_TABLE_FLAGS
 };
 
 /// (b) highhalf-bad-high-slot: PDPT_high のエントリを 510→509 へずらす。前後の
@@ -148,6 +164,8 @@ core::arch::global_asm!(
 //   PDPT_low[0]   -> PD_shared
 //   PDPT_high[510]-> PD_shared （**同一 PD を共有**）
 //   PD_shared[i]  = (i << 21) | 0x83   物理 i*2MiB、P|RW|PS
+// **ビット（0x03 と 0x83）は、権限の変換が返す値を const で渡す**（`BOOT_TABLE_FLAGS`・`BOOT_LEAF_FLAGS`。
+// 2026-10-02）。権限をビットへ直す所は、起動の表を含めて 1 つである。
 // PD エントリは「物理ターゲット + フラグ」だけを符号化するので、恒等ウィンドウと高位ウィンドウが
 // 1 枚の PD を共有できる。両ウィンドウともフラグが同一（cacheable RW、NX なし）で成立する。
 // フレームバッファ（物理 2GiB）は [0,1GiB) の外なので、キャッシュ属性の別名は
@@ -161,25 +179,27 @@ core::arch::global_asm!(
     "zeikos_boot_pml4:",
     "  .quad zeikos_boot_pdpt_low - {kvb} + {pml4_0}",   // (a) 既定 0x03 / feature 0x02（P クリア）
     "  .fill 510, 8, 0",
-    "  .quad zeikos_boot_pdpt_high - {kvb} + 0x03",
+    "  .quad zeikos_boot_pdpt_high - {kvb} + {table}",
     ".p2align 12",
     "zeikos_boot_pdpt_low:",
-    "  .quad zeikos_boot_pd_shared - {kvb} + 0x03",
+    "  .quad zeikos_boot_pd_shared - {kvb} + {table}",
     "  .fill 511, 8, 0",
     ".p2align 12",
     "zeikos_boot_pdpt_high:",
     "  .fill {hi_before}, 8, 0",                          // (b) 既定 510 / feature 509
-    "  .quad zeikos_boot_pd_shared - {kvb} + 0x03",
+    "  .quad zeikos_boot_pd_shared - {kvb} + {table}",
     "  .fill {hi_after}, 8, 0",                           // (b) 既定 1 / feature 2（合計 512 を保つ）
     ".p2align 12",
     "zeikos_boot_pd_shared:",
     "  .set idx, 0",
     "  .rept 512",
-    "    .quad (idx << 21) | 0x83",
+    "    .quad (idx << 21) | {leaf}",
     "    .set idx, idx + 1",
     "  .endr",
     kvb = const kernel::link_symbols::KERNEL_VIRT_BASE,
     pml4_0 = const BOOT_PML4_0_FLAGS,
+    table = const BOOT_TABLE_FLAGS,
+    leaf = const BOOT_LEAF_FLAGS,
     hi_before = const BOOT_PDPT_HIGH_BEFORE,
     hi_after = const BOOT_PDPT_HIGH_AFTER,
 );
@@ -188,6 +208,10 @@ core::arch::global_asm!(
 // **2MiB ページ 512 枚（`.rept 512`）で 1GiB である。** **ブートローダはこの値の下へ受け渡しを置く**
 // ——**片方だけが動けば、受け渡しが恒等の外へ出る。**
 const _: () = assert!(common::boot_info::BOOT_IDENTITY_REACH == 512 * (2 << 20));
+
+// **起動の表のビットは、変換から来ても、今までの直書きと同じ値である。** 葉を全部書き込み可にする破壊テストは、
+// もともと書ける葉には効かないので、どのビルドでも成り立つ。
+const _: () = assert!(BOOT_TABLE_FLAGS == 0x03 && BOOT_LEAF_FLAGS == 0x83);
 
 /// ブートスタックの大きさ。トランポリンが CR3 切り替え後に RSP をここへ移す。
 ///
