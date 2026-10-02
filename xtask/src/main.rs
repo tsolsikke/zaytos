@@ -23870,6 +23870,11 @@ const COMMON_ITEMS_FOR_HOMES: &[CommonItemsForHomes] = &[
         reason: "UEFI のメモリマップを読む（ACPI の表がどの種別の領域にあるかを出す。破壊テストが写像の無い所を選ぶ）",
     },
     CommonItemsForHomes {
+        module: "kernel::paging::permissions",
+        items: &["Cache", "PagePermissions"],
+        reason: "ページの権限の、CPU に依らない言い方。置き場が、ページテーブルのビットへ直す",
+    },
+    CommonItemsForHomes {
         module: "kernel::quarantine",
         items: &["QUARANTINE_CAPACITY", "Quarantine"],
         reason: "アドレス空間を壊すとき、外したフレームを、変換の控えが消えるまで返さずに置く",

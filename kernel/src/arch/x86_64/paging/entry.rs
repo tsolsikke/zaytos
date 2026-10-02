@@ -33,6 +33,8 @@
 
 use common::addr::{PhysAddr, VirtAddr};
 
+use crate::paging::permissions::{Cache, PagePermissions};
+
 /// Present。
 pub const PTE_PRESENT: u64 = 1 << 0;
 /// 書き込み可能。
@@ -147,6 +149,80 @@ pub const fn is_canonical(addr: u64) -> bool {
     common::addr::is_canonical(addr)
 }
 
+/// 葉の大きさ。**同じ権限でも、大きさでビットが変わる**（2MiB の葉は PD の項目で、PS を立てる）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeafSize {
+    /// 4KiB（PT の項目）。
+    Small,
+    /// 2MiB（PD の項目）。
+    Large,
+}
+
+/// 権限を、葉の項目のビットへ直す（2026-10-02。`ADR-0071` の手順 3）。**番地は含まない。**
+///
+/// **ページの権限をビットへ直すのは、この関数と [`table_flags`] だけである。** 起動の表、起動の途中に組む表、
+/// 稼働中の表へ足す 1 枚、ユーザーの空間へ足す 1 枚が、どれもここを通る。
+///
+/// | 権限の欄 | ビット |
+/// |---|---|
+/// | （常に） | P |
+/// | `write` | W |
+/// | `user` | U |
+/// | `cache` が `Uncached` | PCD |
+/// | `shared` | ビット 9（[`PTE_SHARED`]） |
+/// | 大きさが `Large` | PS |
+/// | `execute` | **まだ読まない** |
+///
+/// **`execute` は手順 4 まで読まない**（実行禁止のビットは、CPU で有効にしてからでないと立てられない。
+/// `crate::paging::permissions` の doc）。G・PWT・PAT は立てない。
+pub const fn leaf_flags(permissions: PagePermissions, size: LeafSize) -> u64 {
+    let mut flags = PTE_PRESENT;
+    if permissions.write() {
+        flags |= PTE_WRITABLE;
+    }
+    if permissions.user() {
+        flags |= PTE_USER;
+    }
+    if matches!(permissions.cache(), Cache::Uncached) {
+        flags |= PTE_PCD;
+    }
+    if permissions.shared() {
+        flags |= PTE_SHARED;
+    }
+    if matches!(size, LeafSize::Large) {
+        flags |= PDE_PAGE_SIZE;
+    }
+    flags
+}
+
+/// 権限を、葉へ降りる途中の項目（下の段の表を指す項目）のビットへ直す。**番地は含まない。**
+///
+/// **P と W は常に立てる。U は、葉がユーザーから届くときだけ立てる。**
+/// CPU は段ごとの W と U を AND で合成するので、途中の段は葉より緩くしておき、実際の権限は葉で決める。
+/// PCD と共有の印は葉だけのもので、途中の項目には立てない（途中の項目の PCD は、表そのものを読むときの
+/// キャッシュの扱いを意味する）。
+pub const fn table_flags(permissions: PagePermissions) -> u64 {
+    let mut flags = PTE_PRESENT | PTE_WRITABLE;
+    if permissions.user() {
+        flags |= PTE_USER;
+    }
+    flags
+}
+
+/// 葉の項目を作る。**番地は、大きさに合ったマスクを通す**（4KiB はビット 12 から、2MiB はビット 21 から）。
+pub const fn leaf_entry(frame: PhysAddr, permissions: PagePermissions, size: LeafSize) -> u64 {
+    let address = match size {
+        LeafSize::Small => frame.as_u64() & ADDR_MASK_4K,
+        LeafSize::Large => frame.as_u64() & ADDR_MASK_2M,
+    };
+    address | leaf_flags(permissions, size)
+}
+
+/// 下の段の表を指す項目を作る。
+pub const fn table_entry(table: PhysAddr, permissions: PagePermissions) -> u64 {
+    (table.as_u64() & ADDR_MASK_TABLE) | table_flags(permissions)
+}
+
 /// 2MiB ページのエントリから、分割後の `index` 番目の 4KiB エントリを作る。
 ///
 /// # PAT の移送
@@ -231,6 +307,179 @@ mod tests {
     /// テスト内で期待値を組み立てるための補助。
     fn p(raw: u64) -> PhysAddr {
         PhysAddr::new(raw).unwrap()
+    }
+
+    /// **今ある組み合わせの全部が、今と同じビットになる**（2026-10-02 に数えた、書く側が作りうる組み合わせ）。
+    /// 期待は、定数の名前ではなく数で書く——定数を取り違えても、ここで落ちるようにする。
+    #[test]
+    fn every_combination_in_use_converts_to_the_bits_it_has_today() {
+        use LeafSize::{Large, Small};
+        const P: u64 = 0x001;
+        const W: u64 = 0x002;
+        const U: u64 = 0x004;
+        const PCD: u64 = 0x010;
+        const PS: u64 = 0x080;
+        const SHARED: u64 = 0x200;
+        let leaves: [(PagePermissions, LeafSize, u64, &str); 12] = [
+            (
+                PagePermissions::kernel_unrestricted(),
+                Large,
+                P | W | PS,
+                "起動の表、組む表の 2MiB",
+            ),
+            (
+                PagePermissions::kernel_device(),
+                Large,
+                P | W | PCD | PS,
+                "組む表の 2MiB の MMIO",
+            ),
+            (
+                PagePermissions::kernel_unrestricted(),
+                Small,
+                P | W,
+                "組む表の 4KiB",
+            ),
+            (
+                PagePermissions::kernel_data(),
+                Small,
+                P | W,
+                "CPU ごとのスタック",
+            ),
+            (
+                PagePermissions::kernel_device(),
+                Small,
+                P | W | PCD,
+                "組む表の 4KiB の MMIO、APIC",
+            ),
+            (
+                PagePermissions::kernel_read_only(),
+                Small,
+                P,
+                "Ring 3 の試しの破壊テスト",
+            ),
+            (
+                PagePermissions::user_data(),
+                Small,
+                P | W | U,
+                "スタック、brk",
+            ),
+            (
+                PagePermissions::user_program(true, false),
+                Small,
+                P | W | U,
+                "書ける区画",
+            ),
+            (
+                PagePermissions::user_program(false, true),
+                Small,
+                P | U,
+                "実行する区画",
+            ),
+            (
+                PagePermissions::user_program(false, false),
+                Small,
+                P | U,
+                "読むだけの区画",
+            ),
+            (
+                PagePermissions::user_shared(true),
+                Small,
+                P | W | U | SHARED,
+                "書ける共有",
+            ),
+            (
+                PagePermissions::user_shared(false),
+                Small,
+                P | U | SHARED,
+                "読むだけの共有",
+            ),
+        ];
+        for (permissions, size, expected, what) in leaves {
+            assert_eq!(
+                leaf_flags(permissions, size),
+                expected,
+                "{what}: {permissions:?}"
+            );
+        }
+        // 途中の項目は、ユーザーから届くかどうかだけで決まる。
+        for permissions in [
+            PagePermissions::kernel_unrestricted(),
+            PagePermissions::kernel_data(),
+            PagePermissions::kernel_read_only(),
+            PagePermissions::kernel_device(),
+        ] {
+            assert_eq!(table_flags(permissions), P | W, "{permissions:?}");
+        }
+        for permissions in [
+            PagePermissions::user_data(),
+            PagePermissions::user_program(false, true),
+            PagePermissions::user_shared(false),
+        ] {
+            assert_eq!(table_flags(permissions), P | W | U, "{permissions:?}");
+        }
+    }
+
+    /// **起動の表が直書きしている 2 つの値と同じである**（`kernel/src/main.rs` の `global_asm!` の `0x83` と `0x03`）。
+    #[test]
+    fn the_boot_table_literals_are_what_the_conversion_gives() {
+        let everything = PagePermissions::kernel_unrestricted();
+        assert_eq!(leaf_flags(everything, LeafSize::Large), 0x83);
+        assert_eq!(table_flags(everything), 0x03);
+    }
+
+    /// **実行の欄は、まだビットにならない**（手順 4 まで）。実行禁止のビット（63）は、どの権限でも立たない。
+    #[test]
+    fn the_execute_field_does_not_reach_the_bits_yet() {
+        for writable in [false, true] {
+            let executable = leaf_flags(
+                PagePermissions::user_program(writable, true),
+                LeafSize::Small,
+            );
+            let not_executable = leaf_flags(
+                PagePermissions::user_program(writable, false),
+                LeafSize::Small,
+            );
+            assert_eq!(executable, not_executable);
+        }
+        for permissions in [
+            PagePermissions::kernel_unrestricted(),
+            PagePermissions::kernel_data(),
+            PagePermissions::kernel_read_only(),
+            PagePermissions::kernel_device(),
+            PagePermissions::user_data(),
+            PagePermissions::user_shared(true),
+        ] {
+            for size in [LeafSize::Small, LeafSize::Large] {
+                assert_eq!(leaf_flags(permissions, size) >> 52, 0, "{permissions:?}");
+            }
+            assert_eq!(table_flags(permissions) >> 52, 0, "{permissions:?}");
+        }
+    }
+
+    /// **項目を作る関数は、番地に、大きさに合ったマスクを通してからビットを足す。** 揃った番地では、番地と
+    /// ビットの OR と同じになる（今の書く側は、マスクする所としない所が在るが、番地が揃っているので同じ値である）。
+    #[test]
+    fn entries_carry_the_masked_address_and_the_flags() {
+        let user = PagePermissions::user_data();
+        let small = p(0x0000_0012_3456_7000);
+        assert_eq!(
+            leaf_entry(small, user, LeafSize::Small),
+            0x0000_0012_3456_7000 | 0x007
+        );
+        let kernel = PagePermissions::kernel_unrestricted();
+        let large = p(0x0000_0000_4020_0000);
+        assert_eq!(
+            leaf_entry(large, kernel, LeafSize::Large),
+            0x0000_0000_4020_0000 | 0x083
+        );
+        // 2MiB の葉では、ビット 12 から 20 を番地として残さない（ビット 12 は PAT、13 から 20 は予約）。
+        let unaligned = p(0x0000_0000_4021_F000);
+        assert_eq!(
+            leaf_entry(unaligned, kernel, LeafSize::Large),
+            0x0000_0000_4020_0000 | 0x083
+        );
+        assert_eq!(table_entry(small, user), 0x0000_0012_3456_7000 | 0x007);
+        assert_eq!(table_entry(small, kernel), 0x0000_0012_3456_7000 | 0x003);
     }
 
     /// 分割の基本。アドレスが 4KiB 刻みで並び、両端が正しいこと。
