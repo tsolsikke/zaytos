@@ -12496,7 +12496,7 @@ fn run_paging_test<const CAP: usize>(
     let pcd_base = pcd_phys.as_u64();
     // SAFETY: 今確保したばかりの、誰も使っていない領域である。PCD を立ててもアクセスが
     // キャッシュされなくなるだけで、内容も配置も変わらない。
-    let before = unsafe { table.add_huge_page_flags(pcd_base_virt, entry::PTE_PCD) };
+    let before = unsafe { table.set_huge_page_uncached(pcd_base_virt) };
     let pcd_set = matches!(
         table.translate(pcd_base_virt),
         Ok(Some(t)) if t.entry & entry::PTE_PCD != 0 && t.page_size == PageSize::Size2MiB

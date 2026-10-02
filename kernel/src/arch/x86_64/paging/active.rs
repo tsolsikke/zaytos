@@ -408,14 +408,13 @@ impl ActivePageTable {
     ///
     /// # Safety
     ///
-    /// [`Self::split_huge_page`] と同じ。加えて `add` が、そのページに
-    /// 付けて安全なフラグであること。
+    /// [`Self::split_huge_page`] と同じ。加えて、そのページをキャッシュしない形にしても
+    /// 安全であること。
+    ///
+    /// **足すビットは `entry` が決める**（[`entry::UNCACHED_LEAF_FLAG`]。2026-10-02）。以前は、呼び出し側が
+    /// 生のビットを渡していた（`add_huge_page_flags`）。
     #[cfg(feature = "paging-test")]
-    pub unsafe fn add_huge_page_flags(
-        &mut self,
-        virt: VirtAddr,
-        add: u64,
-    ) -> Result<u64, MapUpdateError> {
+    pub unsafe fn set_huge_page_uncached(&mut self, virt: VirtAddr) -> Result<u64, MapUpdateError> {
         let _guard = InterruptGuard::enter();
 
         let (pd, pd_index) = self.locate_pd(virt)?;
@@ -428,7 +427,7 @@ impl ActivePageTable {
             return Err(MapUpdateError::AlreadySmall);
         }
         // SAFETY: 同上。フラグを足すだけでアドレスは変えない。
-        unsafe { self.write(pd, pd_index, pde | add) };
+        unsafe { self.write(pd, pd_index, pde | entry::UNCACHED_LEAF_FLAG) };
         // SAFETY: CR3 の値をそのまま書き戻す。指す先は変えていない。
         unsafe { switch::set_active_page_table_root(switch::active_page_table_root()) };
         Ok(pde)

@@ -210,12 +210,25 @@ pub const fn leaf_flags(permissions: PagePermissions, size: LeafSize) -> u64 {
 /// PCD と共有の印は葉だけのもので、途中の項目には立てない（途中の項目の PCD は、表そのものを読むときの
 /// キャッシュの扱いを意味する）。
 pub const fn table_flags(permissions: PagePermissions) -> u64 {
+    table_flags_for(permissions.user())
+}
+
+/// 途中の項目のビット。**決めるのは「下の葉がユーザーから届くか」だけである。**
+///
+/// 権限から作るとき（[`table_flags`]）と、2MiB の葉を分割して途中の項目に置き換えるとき
+/// （[`table_entry_for_split`]。元の葉の U を引き継ぐ）の両方が、ここを通る。
+const fn table_flags_for(user: bool) -> u64 {
     let mut flags = PTE_PRESENT | PTE_WRITABLE;
-    if permissions.user() {
+    if user {
         flags |= PTE_USER;
     }
     flags
 }
+
+/// 2MiB の葉を、キャッシュしない葉にするときに足すビット。**試し専用の
+/// `ActivePageTable::set_huge_page_uncached` だけが使う**（既に在る葉の権限を変える、ただ 1 つの所である）。
+#[cfg(feature = "paging-test")]
+pub const UNCACHED_LEAF_FLAG: u64 = PTE_PCD;
 
 /// 葉の項目を作る。**番地は、大きさに合ったマスクを通す**（4KiB はビット 12 から、2MiB はビット 21 から）。
 pub const fn leaf_entry(frame: PhysAddr, permissions: PagePermissions, size: LeafSize) -> u64 {
@@ -287,11 +300,7 @@ pub const fn split_child_entry(huge_entry: u64, index: usize) -> u64 {
 ///
 /// **Accessed / Dirty も引き継がない。** CPU が立てるものである。
 pub const fn table_entry_for_split(huge_entry: u64, table_phys: PhysAddr) -> u64 {
-    let mut flags = PTE_PRESENT | PTE_WRITABLE;
-    if huge_entry & PTE_USER != 0 {
-        flags |= PTE_USER;
-    }
-    (table_phys.as_u64() & ADDR_MASK_TABLE) | flags
+    (table_phys.as_u64() & ADDR_MASK_TABLE) | table_flags_for(huge_entry & PTE_USER != 0)
 }
 
 /// 分割後の PT に書き込む 512 エントリを組み立てる。
