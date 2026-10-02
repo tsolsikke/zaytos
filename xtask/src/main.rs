@@ -1745,7 +1745,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 fn main() -> Result<()> {
     const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask full [<commit>] | --status | --select   (全検査をメインの作業ツリーの隣の <名前>-full-check で実行する。--select は HEAD の族の選びを出す)\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gtk] [--gfx-test] [--kvm] [--no-limit] [--manual] [--key-probe] [--keep-disk | --rebuild-disk]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
        cargo xtask run --shell-test [--drop-arrows | --drop-esc]\n       cargo xtask run --ansi-test [--sabotage FEATURE]\n       cargo xtask run --zi-test [--sabotage FEATURE]\n       cargo xtask run --view-test [--sabotage FEATURE]
-       cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --boot-marker-sabotage FEATURE   (起動の判定行の値で捕まる破壊を 1 つ回す)\n       cargo xtask run --page-permissions [--update-reference | --sabotage FEATURE]   (ページの権限の一覧を採って、参照と比べる)\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
+       cargo xtask run --fs-extract [--sabotage FEATURE]\n       cargo xtask run --boot-marker-sabotage FEATURE   (起動の判定行の値で捕まる破壊を 1 つ回す)\n       cargo xtask run --page-permissions [--scene boot|heap|screen] [--update-reference | --sabotage FEATURE]   (ページの権限の一覧を採って、参照と比べる)\n       cargo xtask run --pci-test [--sabotage FEATURE]\n       cargo xtask run --virtio-test [--sabotage FEATURE]\n       cargo xtask run --virtio-irq-test [--sabotage FEATURE]
        cargo xtask run --persist-test [--rebuild-between]
        cargo xtask run --persist-zi-test [--rebuild-between]
        cargo xtask run --persist-env-test [--rebuild-between]
@@ -1899,7 +1899,15 @@ fn main() -> Result<()> {
                     None => Vec::new(),
                 };
                 let update_reference = rest.iter().any(|a| a == "--update-reference");
-                return cmd_page_permissions(&sabotage, update_reference);
+                // **`--scene` は、どこまで走らせて採るかを選ぶ**（2026-10-02。無ければ起動の場面）。
+                let scene = match rest.iter().position(|a| a == "--scene") {
+                    Some(index) => page_permissions_scene(
+                        rest.get(index + 1)
+                            .with_context(|| format!("--scene needs a name\n\n{USAGE}"))?,
+                    )?,
+                    None => &PAGE_PERMISSIONS_SCENES[0],
+                };
+                return cmd_page_permissions(scene, &sabotage, update_reference);
             }
             if let Some(index) = rest.iter().position(|a| a == "--boot-marker-sabotage") {
                 let Some(feature) = rest.get(index + 1) else {
@@ -4985,25 +4993,102 @@ fn cmd_boot_with_features(features: &[&str], marker: &str, wanted: &str) -> Resu
     }
 }
 
-/// ページの権限の一覧の参照（`cargo xtask run --page-permissions --update-reference` が書く）。
-const REFERENCE_PAGE_PERMISSIONS: &str = "xtask/reference/page-permissions.txt";
-
 /// カーネルに、ページの権限の一覧の全部の行を出させる feature（`kernel/src/page_survey.rs`）。
 const PAGE_PERMISSIONS_FEATURE: &str = "page-permissions-dump";
 
+/// 一覧を採る場面（2026-10-02）。**どこまで走らせて採るかと、比べる参照を決める。**
+///
+/// **起動の場面だけでは、ユーザーのページを足す経路の全部は見えない。** シェルのプロンプトまでに走るプログラムには、
+/// `brk` で伸ばしたままのページも、画面の `mmap` のページも無い（共有メモリの `mmap` は、起動時の `syscall-test` の
+/// 行に出る）。**既に在る検査の走らせ方を借りて、その 2 つが行に出る場面を足した。**
+struct PagePermissionsScene {
+    /// 場面の名前（`--scene` に渡す）。
+    name: &'static str,
+    /// 一覧を出す feature に足す feature。
+    features: &'static [&'static str],
+    /// どこまで走らせるか。
+    until: SceneEnd,
+    /// 比べる参照。
+    reference: &'static str,
+    /// この場面で見えるもの（使い方の文に出す）。
+    shows: &'static str,
+}
+
+/// 場面の終わり方。
+enum SceneEnd {
+    /// シェルのプロンプトが出るまで。
+    ShellPrompt,
+    /// 台本が終わるまで（`script-done:` の行）。
+    ScriptDone,
+    /// `gfxd` が打鍵を待つ所まで走らせ、打鍵を送って、終わりの計測の行が出るまで（`--screen-test` と同じ駆動）。
+    ScreenKey,
+}
+
+/// 一覧を採る場面の表。**最初の行が既定である。**
+const PAGE_PERMISSIONS_SCENES: &[PagePermissionsScene] = &[
+    PagePermissionsScene {
+        name: "boot",
+        features: &[],
+        until: SceneEnd::ShellPrompt,
+        reference: "xtask/reference/page-permissions.txt",
+        shows: "起動の途中の時点と、起動時のプログラム（共有メモリの mmap を含む）",
+    },
+    PagePermissionsScene {
+        name: "heap",
+        features: &["ttf-test"],
+        until: SceneEnd::ScriptDone,
+        reference: "xtask/reference/page-permissions-heap.txt",
+        shows: "brk で伸ばしたままのページ（/bin/ttfglyph の heap の行）",
+    },
+    PagePermissionsScene {
+        name: "screen",
+        features: &["screen-test"],
+        until: SceneEnd::ScreenKey,
+        reference: "xtask/reference/page-permissions-screen.txt",
+        shows: "画面の mmap のページ（/bin/gfxd の mapped by request の行）",
+    },
+];
+
+/// 名前から場面を引く。
+fn page_permissions_scene(name: &str) -> Result<&'static PagePermissionsScene> {
+    PAGE_PERMISSIONS_SCENES
+        .iter()
+        .find(|scene| scene.name == name)
+        .with_context(|| {
+            format!(
+                "page permissions: no scene named {name:?} (the scenes are: {})",
+                PAGE_PERMISSIONS_SCENES
+                    .iter()
+                    .map(|scene| format!("{} = {}", scene.name, scene.shows))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        })
+}
+
 /// ページの権限の一覧を採って、参照と比べる（2026-10-01。`ADR-0071` の手順 3 の道具）。
 ///
-/// **一覧を出す feature を付けたカーネルを `-smp 2` で起動し**、シェルのプロンプトが出るまで（破壊テストなら
-/// カーネルが止まるまで）のシリアルから、一覧の行を取り出す。**比べるのは [`page_permissions::differences`] で、
+/// **一覧を出す feature を付けたカーネルを `-smp 2` で起動し**、場面の終わりまで（破壊テストならカーネルが止まるまで）の
+/// シリアルから、一覧の行を取り出す。**比べるのは [`page_permissions::differences`] で、
 /// 違いは「時点 | 領域 | 大きさ: 欄 前 -> 後」の形で 1 行ずつ出す。** 違いが在れば `Err` を返す。
 ///
+/// - `scene` は、どこまで走らせて採るかと、比べる参照を決める（[`PAGE_PERMISSIONS_SCENES`]）。
 /// - `sabotage` に feature を渡すと、その feature も付けてビルドする（わざと権限を変えた形で、違いが名前つきで
 ///   出ることを見る。全検査の破壊テストの項目が使う）。
 /// - `update_reference` なら、採った一覧を参照として書く（`sabotage` とは併せられない）。
 ///
 /// **採った一覧は `target/page-permissions/` に残す**（権限の設定を触る前に採って、後で見比べられる）。
-fn cmd_page_permissions(sabotage: &[&str], update_reference: bool) -> Result<()> {
-    let context = "page permissions";
+fn cmd_page_permissions(
+    scene: &PagePermissionsScene,
+    sabotage: &[&str],
+    update_reference: bool,
+) -> Result<()> {
+    let context = if scene.name == PAGE_PERMISSIONS_SCENES[0].name {
+        "page permissions".to_string()
+    } else {
+        format!("page permissions ({})", scene.name)
+    };
+    let context = context.as_str();
     if update_reference && !sabotage.is_empty() {
         bail!("{context}: --update-reference cannot be combined with --sabotage");
     }
@@ -5012,6 +5097,7 @@ fn cmd_page_permissions(sabotage: &[&str], update_reference: bool) -> Result<()>
     let ovmf_vars = prepare_ovmf_vars(&run)?;
     let bootloader_efi = build_bootloader(&workspace_root, false)?;
     let mut features = vec![PAGE_PERMISSIONS_FEATURE];
+    features.extend_from_slice(scene.features);
     features.extend_from_slice(sabotage);
     let kernel_elf = build_kernel_with_features(&workspace_root, &features)?;
     let esp_dir = stage_esp(&run, &bootloader_efi, &kernel_elf)?;
@@ -5020,6 +5106,16 @@ fn cmd_page_permissions(sabotage: &[&str], update_reference: bool) -> Result<()>
     let _ = fs::remove_file(&serial_log);
     let debug_log = run.debug_log();
     let _ = fs::remove_file(&debug_log);
+    // **打鍵を送る場面だけ、monitor のソケットを開ける。**
+    let monitor_socket = match scene.until {
+        SceneEnd::ScreenKey => {
+            let socket = run.monitor_socket("page-permissions");
+            let _ = fs::remove_file(&socket);
+            ensure_socket_path_fits(&socket)?;
+            Some(socket)
+        }
+        SceneEnd::ShellPrompt | SceneEnd::ScriptDone => None,
+    };
 
     let mut qemu_args = qemu_launch_args(&QemuLaunchOptions {
         ovmf_code: Path::new(OVMF_CODE_PATH),
@@ -5029,7 +5125,7 @@ fn cmd_page_permissions(sabotage: &[&str], update_reference: bool) -> Result<()>
         serial: &SerialSink::File(serial_log.clone()),
         debug_log: &debug_log,
         display: DisplayMode::None,
-        monitor_socket: None,
+        monitor_socket: monitor_socket.as_deref(),
         accelerator: Accelerator::Tcg,
         debug_events: DebugEvents::IntAndCpuReset,
     });
@@ -5037,30 +5133,67 @@ fn cmd_page_permissions(sabotage: &[&str], update_reference: bool) -> Result<()>
     qemu_args.push("-smp".into());
     qemu_args.push("2".into());
 
+    // **場面ごとの上限。** 起動だけなら起動の上限、その後に台本や打鍵が在る場面は、その分を足す。
+    let limit = match scene.until {
+        SceneEnd::ShellPrompt => BOOT_READY_TIMEOUT,
+        SceneEnd::ScriptDone => BOOT_READY_TIMEOUT + ZI_TEST_TIMEOUT,
+        SceneEnd::ScreenKey => BOOT_READY_TIMEOUT + SCREEN_TEST_TIMEOUT,
+    };
     // **起動の入口から起動する**（`launch`）——書く側の上限と、組ごとの停止。
     let outputs = [serial_log.as_path(), debug_log.as_path()];
     let mut child = launch::spawn(&launch::Spec::new(
         &qemu_args,
         &outputs,
         "page-permissions",
-        BOOT_READY_TIMEOUT,
+        limit,
         launch::Deadline::Failure,
     ))?;
-    // **シェルのプロンプトが出るか、カーネルが止まったら取り終える。** 上限は付ける。
+    // **場面の終わりが来るか、カーネルが止まったら取り終える。** 上限は付ける。
     // **止まった合図は [`stop_sign_in`] で見る**——起動の中の検査が止めると `…; halting` の形で止まり、
     // パニックの形（`halting (cli + hlt loop)`）にはならない。パニックの形だけを見ていたときは、
     // `user-run-writable-text` の実行が上限の 90 秒まで待って、全検査で時間切れになった（2026-10-01）。
-    let deadline = Instant::now() + BOOT_READY_TIMEOUT;
+    let deadline = Instant::now() + limit;
     let mut stop = StopWatch::default();
+    let mut key_sent = false;
     while Instant::now() < deadline && !child.was_cut() {
         let text = read_lossy(&serial_log);
-        if shell_prompt_follows_ready(&text) || stop.settled(stop_sign_in(&text, "")).is_some() {
+        if stop.settled(stop_sign_in(&text, "")).is_some() {
+            break;
+        }
+        let ended = match scene.until {
+            SceneEnd::ShellPrompt => shell_prompt_follows_ready(&text),
+            SceneEnd::ScriptDone => strip_ansi(&text).contains("script-done:"),
+            SceneEnd::ScreenKey => {
+                // **`gfxd` が打鍵を待ち始めたら、1 度だけ打鍵を送る**（`--screen-test` と同じ）。
+                if !key_sent && text.contains(SCREEN_TEST_READY_MARKER) {
+                    key_sent = true;
+                    if let Some(socket) = &monitor_socket {
+                        match connect_monitor_with_retry(socket) {
+                            Ok(mut stream) => {
+                                for _ in 0..3 {
+                                    if writeln!(stream, "sendkey {INPUT_TEST_KEY}").is_err() {
+                                        break;
+                                    }
+                                    metrics::sleep_fixed(SHELL_TEST_KEY_INTERVAL);
+                                }
+                            }
+                            Err(e) => println!("{context}: could not reach the QEMU monitor: {e}"),
+                        }
+                    }
+                }
+                text.contains(SCREEN_TEST_DONE_MARKER)
+            }
+        };
+        if ended {
             break;
         }
         metrics::sleep_poll(PANIC_TEST_POLL_INTERVAL);
     }
     let _ = child.kill();
     let _ = child.wait();
+    if let Some(socket) = &monitor_socket {
+        let _ = fs::remove_file(socket);
+    }
 
     let serial = read_lossy(&serial_log);
     let rows = page_permissions::rows_in_serial(&serial);
@@ -5075,14 +5208,17 @@ fn cmd_page_permissions(sabotage: &[&str], update_reference: bool) -> Result<()>
     let kept_dir = workspace_root.join("target").join("page-permissions");
     fs::create_dir_all(&kept_dir)
         .with_context(|| format!("could not create {}", kept_dir.display()))?;
-    let kept = kept_dir.join(format!(
-        "{}.txt",
-        if sabotage.is_empty() {
-            "default".to_string()
-        } else {
-            sabotage.join("+")
-        }
-    ));
+    // **残す名前**——起動の場面は今までどおり（`default` か、破壊テストの名前）。ほかの場面は、場面の名前を頭に付ける。
+    let kept_name = match (
+        scene.name == PAGE_PERMISSIONS_SCENES[0].name,
+        sabotage.is_empty(),
+    ) {
+        (true, true) => "default".to_string(),
+        (true, false) => sabotage.join("+"),
+        (false, true) => scene.name.to_string(),
+        (false, false) => format!("{}+{}", scene.name, sabotage.join("+")),
+    };
+    let kept = kept_dir.join(format!("{kept_name}.txt"));
     fs::write(&kept, &listing).with_context(|| format!("could not write {}", kept.display()))?;
     let after = page_permissions::parse(&listing)
         .map_err(|problem| anyhow::anyhow!("{context}: the listing just taken: {problem}"))?;
@@ -5092,24 +5228,26 @@ fn cmd_page_permissions(sabotage: &[&str], update_reference: bool) -> Result<()>
         kept.display()
     );
 
-    let reference_path = workspace_root.join(REFERENCE_PAGE_PERMISSIONS);
+    let reference_name = scene.reference;
+    let reference_path = workspace_root.join(reference_name);
     if update_reference {
         fs::write(&reference_path, &listing)
             .with_context(|| format!("could not write {}", reference_path.display()))?;
         println!(
-            "{context}: reference updated ({} row(s)) at {REFERENCE_PAGE_PERMISSIONS}",
+            "{context}: reference updated ({} row(s)) at {reference_name}",
             after.len()
         );
         return Ok(());
     }
     let reference = fs::read_to_string(&reference_path).with_context(|| {
         format!(
-            "failed to read {REFERENCE_PAGE_PERMISSIONS}; record it with `cargo xtask run \
-             --page-permissions --update-reference`"
+            "failed to read {reference_name}; record it with `cargo xtask run \
+             --page-permissions --scene {} --update-reference`",
+            scene.name
         )
     })?;
     let before = page_permissions::parse(&reference)
-        .map_err(|problem| anyhow::anyhow!("{context}: {REFERENCE_PAGE_PERMISSIONS}: {problem}"))?;
+        .map_err(|problem| anyhow::anyhow!("{context}: {reference_name}: {problem}"))?;
     let found = page_permissions::differences(&before, &after);
     for line in &found {
         println!("{context}: {line}");
@@ -27844,11 +27982,43 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             Family::Memory,
             "the page permissions at each moment of the boot match the recorded listing",
         );
-        match cmd_page_permissions(&[], false) {
+        match cmd_page_permissions(&PAGE_PERMISSIONS_SCENES[0], &[], false) {
             Ok(()) => println!("--- page permissions: OK"),
             Err(error) => {
                 println!("--- page permissions: FAILED ({error})");
                 failed.push("page permissions".to_string());
+            }
+        }
+
+        // **起動の場面で見えない 2 つの経路**（2026-10-02）。`brk` で伸ばしたままのページ（`sys_brk` の
+        // `map_4kib`）と、画面の `mmap` のページ（`mmap_screen_from_ring3` の `map_4kib`）の権限が、記録した
+        // 参照と同じであること。
+        total += 1;
+        begin_item(
+            Family::Memory,
+            "the page permissions of a heap grown with brk match the recorded listing",
+        );
+        match page_permissions_scene("heap")
+            .and_then(|scene| cmd_page_permissions(scene, &[], false))
+        {
+            Ok(()) => println!("--- page permissions (heap): OK"),
+            Err(error) => {
+                println!("--- page permissions (heap): FAILED ({error})");
+                failed.push("page permissions (heap)".to_string());
+            }
+        }
+        total += 1;
+        begin_item(
+            Family::Memory,
+            "the page permissions of the screen mapped into a program match the recorded listing",
+        );
+        match page_permissions_scene("screen")
+            .and_then(|scene| cmd_page_permissions(scene, &[], false))
+        {
+            Ok(()) => println!("--- page permissions (screen): OK"),
+            Err(error) => {
+                println!("--- page permissions (screen): FAILED ({error})");
+                failed.push("page permissions (screen)".to_string());
             }
         }
 
@@ -27859,7 +28029,11 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             Family::Memory,
             "the page permissions listing names a user segment that was mapped writable",
         );
-        let result = cmd_page_permissions(&["user-run-writable-text"], false);
+        let result = cmd_page_permissions(
+            &PAGE_PERMISSIONS_SCENES[0],
+            &["user-run-writable-text"],
+            false,
+        );
         report_sabotage_verdict(
             "page permissions",
             "writable text",
@@ -27874,7 +28048,11 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
             Family::Memory,
             "the page permissions listing names the per-CPU stacks that were mapped uncached",
         );
-        let result = cmd_page_permissions(&["ap-stacks-uncached-test"], false);
+        let result = cmd_page_permissions(
+            &PAGE_PERMISSIONS_SCENES[0],
+            &["ap-stacks-uncached-test"],
+            false,
+        );
         report_sabotage_verdict(
             "page permissions",
             "uncached stacks",
@@ -29953,7 +30131,7 @@ fn count_elements(text: &str) -> usize {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 60,
-    full: 436,
+    full: 438,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。

@@ -341,6 +341,8 @@ pub const PATH_RULES: &[PathRule] = &[
         patterns: &[
             "xtask/src/page_permissions.rs",
             "xtask/reference/page-permissions.txt",
+            "xtask/reference/page-permissions-heap.txt",
+            "xtask/reference/page-permissions-screen.txt",
         ],
         reach: Reach::Families(&[Family::Memory]),
     },
