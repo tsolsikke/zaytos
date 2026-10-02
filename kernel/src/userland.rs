@@ -1449,7 +1449,9 @@ fn load_user_program_into(
         let writable = ph.p_flags & common::elf::PF_W != 0;
         // **実行できるかも、区画のフラグから取る**（2026-10-02）。実行しない区画の葉には、実行禁止のビットが付く
         // （2026-10-03）。**書けて実行もできる区画は、ここへ来る前に、並びの確かめが断っている。**
-        let executable = ph.p_flags & common::elf::PF_X != 0;
+        // 破壊テスト (2026-10-03, user-load-ignores-execute): 書けない区画を、フラグに依らず実行できる形で写す。
+        let executable = ph.p_flags & common::elf::PF_X != 0
+            || (cfg!(feature = "user-load-ignores-execute-test") && !writable);
         let first_page = ph.p_vaddr & !(PAGE_SIZE - 1);
         // 破壊テスト (ADR-0039, user-load-filesz-only): `memsz` ではなく `filesz` で
         // 最終ページを出す。**`.bss` がマップされない**——`/bin/bss-test` が

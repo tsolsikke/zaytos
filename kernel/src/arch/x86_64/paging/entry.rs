@@ -231,7 +231,11 @@ pub const fn leaf_flags(permissions: PagePermissions, size: LeafSize) -> u64 {
     if matches!(size, LeafSize::Large) {
         flags |= PDE_PAGE_SIZE;
     }
-    if !permissions.execute() && LEAVES_CARRY_EXECUTE_DISABLE {
+    // 破壊テスト (2026-10-03, user-leaf-ignores-execute): ユーザーの側の葉には、実行の欄を無視して、実行禁止の
+    // ビットを立てない（ユーザーの写像に入れる前の形）。実行できないはずのページへ跳ぶ試しのプログラムが、
+    // 跳んだ先を実行してしまい、判定が落ちる。
+    let ignored = permissions.user() && cfg!(feature = "user-leaf-ignores-execute-test");
+    if !permissions.execute() && LEAVES_CARRY_EXECUTE_DISABLE && !ignored {
         flags |= PTE_NO_EXECUTE;
     }
     // 試しの形 (user-leaf-high-bit-test): ユーザーから届く葉に、番地より上の位置のビットを立てる。

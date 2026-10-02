@@ -1159,6 +1159,35 @@ const RING3_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // **権限の変換が、ユーザーの側の葉に実行禁止のビットを立てない形**（2026-10-03。ユーザーの写像の W^X を
+    // 入れる前の形）。起動時の Ring 3 の試しで、読むだけのページへ跳ぶと、跳んだ先の `ud2` が実行されて、
+    // ベクタが 14 ではなく 6 になる。
+    CriticalTest {
+        name: "user-leaf-ignores-execute",
+        feature: "user-leaf-ignores-execute-test",
+        expected_markers: &[
+            "ring3-vectors: #PF-exec-ro folded with vector=6, expected 14",
+            "halting",
+        ],
+        forbidden_markers: &["ring3-vectors: all eight Ring 3 faults"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // **ローダーが、書けない区画を、フラグに依らず実行できる形で写す形**（2026-10-03）。自分の `.rodata` へ跳ぶ
+    // プログラムが、跳んだ先の `ud2` を実行して、ベクタ 6 で終わる。**起動時の Ring 3 の試しは通る**（あちらは
+    // ローダーを通らない）ので、止めるのは、プログラムの終わり方の判定である。
+    CriticalTest {
+        name: "user-load-ignores-execute",
+        feature: "user-load-ignores-execute-test",
+        expected_markers: &[
+            "ring3-vectors: all eight Ring 3 faults",
+            "user-run: nx-rodata left Ring 3 (exited=false status=0 folded=true vector=6 rip=0x401000",
+            "user-run: nx-rodata did not stop fetching an instruction at 0x401000",
+        ],
+        forbidden_markers: &["user-load: nx-rodata ran as a process"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     // **ユーザーのページを足す入口が、書けて実行もできる権限を断らない形**（2026-10-03）。起動時の
     // 「断ること」の確かめが落ちる。
     CriticalTest {
@@ -30421,7 +30450,7 @@ fn count_elements(text: &str) -> usize {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 60,
-    full: 455,
+    full: 457,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。

@@ -5497,6 +5497,12 @@ static HELLO_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.elf"))
 /// 出所は [`HELLO_ELF`] と同じで、`kernel/userland/fault-test.rs` をビルドしたものである。
 static FAULT_TEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fault-test.elf"));
 
+/// 埋め込んだユーザープログラム `nx-stack`・`nx-data`・`nx-rodata` の ELF（2026-10-03）。
+/// **実行できないページへ跳んで、終了させられる**（`kernel/userland/nx-stack.rs` ほか）。
+static NX_STACK_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/nx-stack.elf"));
+static NX_DATA_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/nx-data.elf"));
+static NX_RODATA_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/nx-rodata.elf"));
+
 /// 埋め込んだユーザープログラム `syscall-test` の ELF（S9-b-3-2a）。
 static SYSCALL_TEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/syscall-test.elf"));
 
@@ -8741,6 +8747,13 @@ const SYSCALL_TEST_STATUS: &[(u64, &str)] = &[
 /// 同じ区別である。**
 const FAULT_TEST_ERROR_CODE: u64 = 0b111;
 
+/// `nx-stack` が跳ぶ先（スタックのページの先頭。2026-10-03）。**ローダーが置くスタックの番地と、`nx-stack.rs` の
+/// 即値と対になっている。** 食い違えば、止まった番地の突き合わせが落ちる。
+const NX_STACK_TARGET: u64 = 0x007f_f000;
+
+/// `nx-data` と `nx-rodata` が跳ぶ先（`.text` の次のページ。`kernel/userland/user.ld` の並び）。
+const NX_SECOND_PAGE_TARGET: u64 = 0x0040_1000;
+
 /// プロセスの終わり方（S9-b-3-2a）。**期待する側の記述である。**
 ///
 /// # なぜ表に持たせるか
@@ -8767,6 +8780,14 @@ enum UserProgramOutcome {
         cr2: u64,
         /// 期待するエラーコード。
         error_code: u64,
+    },
+    /// 実行できないページへ跳んで、そこから命令を取り出そうとした所で終了させられる（2026-10-03）。
+    ///
+    /// **判定は CPU の置き場が持つ**（`kernel::arch::x86_64::ring3::stopped_fetching_instruction_at`）。ここに
+    /// 書くのは、跳ぶ先の番地だけである。
+    StopsFetchingAt {
+        /// 跳ぶ先の番地。**止まる番地でもある。**
+        target: u64,
     },
 }
 
@@ -8831,6 +8852,54 @@ const USER_PROGRAMS: &[UserProgram] = &[
         probes_abi: false,
         status_meanings: &[],
         argv: &[b"hello"],
+        enters_with_direction_flag: None,
+    },
+    // **自分のスタックのページへ跳ぶ**（2026-10-03。ユーザーの写像の W^X）。**止まった番地と CR2 は、跳んだ先の番地である。**
+    // 実行できてしまえば、跳んだ先の `ud2` でベクタが 6 になり、判定行が食い違いとして止める。
+    UserProgram {
+        name: "nx-stack",
+        image: NX_STACK_ELF,
+        outcome: UserProgramOutcome::StopsFetchingAt {
+            target: NX_STACK_TARGET,
+        },
+        // 使わない（受け皿の `ud2` は、跳ぶ先そのものに置いてある）。
+        receiver_offset: 0,
+        expected_write: None,
+        probes_abi: false,
+        status_meanings: &[],
+        argv: &[b"nx-stack"],
+        enters_with_direction_flag: None,
+    },
+    // **自分の `.data` へ跳ぶ**（2026-10-03。ユーザーの写像の W^X）。**止まった番地と CR2 は、跳んだ先の番地である。**
+    // 実行できてしまえば、跳んだ先の `ud2` でベクタが 6 になり、判定行が食い違いとして止める。
+    UserProgram {
+        name: "nx-data",
+        image: NX_DATA_ELF,
+        outcome: UserProgramOutcome::StopsFetchingAt {
+            target: NX_SECOND_PAGE_TARGET,
+        },
+        // 使わない（受け皿の `ud2` は、跳ぶ先そのものに置いてある）。
+        receiver_offset: 0,
+        expected_write: None,
+        probes_abi: false,
+        status_meanings: &[],
+        argv: &[b"nx-data"],
+        enters_with_direction_flag: None,
+    },
+    // **自分の `.rodata` へ跳ぶ**（2026-10-03。ユーザーの写像の W^X）。**止まった番地と CR2 は、跳んだ先の番地である。**
+    // 実行できてしまえば、跳んだ先の `ud2` でベクタが 6 になり、判定行が食い違いとして止める。
+    UserProgram {
+        name: "nx-rodata",
+        image: NX_RODATA_ELF,
+        outcome: UserProgramOutcome::StopsFetchingAt {
+            target: NX_SECOND_PAGE_TARGET,
+        },
+        // 使わない（受け皿の `ud2` は、跳ぶ先そのものに置いてある）。
+        receiver_offset: 0,
+        expected_write: None,
+        probes_abi: false,
+        status_meanings: &[],
+        argv: &[b"nx-rodata"],
         enters_with_direction_flag: None,
     },
     UserProgram {
@@ -8935,6 +9004,19 @@ fn free_range_count_now(logger: &mut Logger<Serial>) -> usize {
 fn load_embedded_user_program(logger: &mut Logger<Serial>) -> Result<(), UserLoadError> {
     for program in USER_PROGRAMS {
         let name = program.name;
+        // **変換が実行禁止のビットを立てない破壊テストのビルドでは、実行できないページへ跳ぶプログラムを走らせない**
+        // （`entry::LEAVES_CARRY_EXECUTE_DISABLE`。2026-10-03）。その形では、跳んだ先が実行されるのが当たり前で、
+        // ここで止まると、そのビルドが見たい所（試しのページの読み戻しや、NXE を落とした読み）まで届かない。
+        let jumps_to_a_page_that_is_not_executable =
+            matches!(program.outcome, UserProgramOutcome::StopsFetchingAt { .. });
+        if jumps_to_a_page_that_is_not_executable
+            && !kernel::arch::x86_64::paging::entry::LEAVES_CARRY_EXECUTE_DISABLE
+        {
+            logger.info(format_args!(
+                "user-load: {name} was skipped: this build does not mark leaves as not executable"
+            ));
+            continue;
+        }
         // **会計のために短く借りる（S11-3）。** 読むだけなので、すぐ返す。
         let free_before = frame_count_now(logger);
         // **子の会計を 0 に戻す（S11-5）。** このプログラムが `spawn` で起動した
@@ -9312,6 +9394,17 @@ fn check_user_program_outcome(
                      sits at {receiver_rip:#x}, so landing there means the violation never \
                      happened",
                     receiver_rip = entry + program.receiver_offset
+                ));
+                return Err(UserLoadError::FoldMismatch);
+            }
+        }
+        UserProgramOutcome::StopsFetchingAt { target } => {
+            // **止まり方は、上の `left Ring 3` の行に出ている。** 判定は CPU の置き場が持つ。
+            if !kernel::arch::x86_64::ring3::stopped_fetching_instruction_at(target) {
+                logger.error(format_args!(
+                    "user-run: {name} did not stop fetching an instruction at {target:#x}; it ended \
+                     some other way (the line above has how). A `ud2` sits at that address, so ending \
+                     there with an invalid-opcode fault means the page was executable"
                 ));
                 return Err(UserLoadError::FoldMismatch);
             }
@@ -12250,6 +12343,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "kernel-rodata-page-writable-test",
         cfg!(feature = "kernel-rodata-page-writable-test"),
         "カーネルの像の読むだけの区画の最初の 1 ページを、書き込み可で写す",
+    ),
+    (
+        "user-leaf-ignores-execute-test",
+        cfg!(feature = "user-leaf-ignores-execute-test"),
+        "権限の変換が、ユーザーの側の葉には、実行禁止のビットを立てない",
+    ),
+    (
+        "user-load-ignores-execute-test",
+        cfg!(feature = "user-load-ignores-execute-test"),
+        "ローダーが、書けない区画を、フラグに依らず実行できる形で写す",
     ),
     (
         "user-map-allows-writable-executable-test",

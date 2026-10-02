@@ -732,6 +732,12 @@ kernel-executes-stack-test = ["wx-violation-test"]
 # カーネルの像の読むだけの区画の最初の 1 ページを、書き込み可で写す（2026-10-02）。起動は通る。
 # ページの権限の一覧が、違いを名前つきで示す。`cargo xtask run --page-permissions --sabotage kernel-rodata-page-writable-test`。
 kernel-rodata-page-writable-test = []
+# 権限の変換が、ユーザーの側の葉には、実行の欄を無視して、実行禁止のビットを立てない（2026-10-03。入れる前の形）。
+# 起動時の Ring 3 の試しで、実行できないはずのページへ跳ぶと、跳んだ先が実行されて、判定が落ちる。
+user-leaf-ignores-execute-test = []
+# ローダーが、書けない区画を、区画のフラグに依らず実行できる形で写す（2026-10-03）。
+# 読むだけの区画へ跳ぶ試しのプログラム（nx-rodata）が、跳んだ先を実行してしまい、判定が落ちる。
+user-load-ignores-execute-test = []
 # ユーザーのページを足す入口が、書けて実行もできる権限を断らない（2026-10-03）。
 # 起動時の「断ること」の確かめが落ちる。
 user-map-allows-writable-executable-test = []

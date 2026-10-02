@@ -1182,3 +1182,29 @@ pub fn fault_cr2() -> u64 {
 pub fn fault_error_code() -> u64 {
     state().fault_error_code.load(Ordering::SeqCst)
 }
+
+/// 実行できないページから命令を取り出そうとしたときの、#PF のエラーコード（2026-10-03）。
+///
+/// `P`（bit 0）| `U`（bit 2）| `I/D`（bit 4）= 0x15。**ページは在り（`P=1`）、ユーザーから届くが、命令の取り出しが
+/// 許されていない。** 「不在」（`P=0`）とも、「書きの違反」（`W=1`）とも違う。
+pub const INSTRUCTION_FETCH_REFUSED: u64 = 0b1_0101;
+
+/// 直前の遠征が、`target` の番地から命令を取り出そうとして止められたか（2026-10-03。純粋な読み）。
+///
+/// **見るのは 5 つである**——例外で終了させられたこと、ベクタが 14（#PF）であること、止まった番地と CR2 の両方が
+/// `target` であること（命令の取り出しの違反は、取り出そうとした番地で起きる）、エラーコードが
+/// [`INSTRUCTION_FETCH_REFUSED`] であること、Ring 3 から来たこと。
+///
+/// # 契約（境界の関数）
+///
+/// - 遠征から戻った後に呼ぶ。読むだけで、何も変えない。
+/// - 共通の側は、実行できないページへ跳ぶプログラムの終わり方を、これで判定する（CPU に固有の値を、共通の側に
+///   書かないため）。
+pub fn stopped_fetching_instruction_at(target: u64) -> bool {
+    folded()
+        && excursion_fault_number() == 14
+        && fault_rip() == target
+        && fault_cr2() == target
+        && fault_error_code() == INSTRUCTION_FETCH_REFUSED
+        && (fault_cs() & 0b11) == 3
+}
