@@ -78,6 +78,11 @@ pub const ADDR_MASK_4K: u64 = 0x000F_FFFF_FFFF_F000;
 /// **ビット 12-20 を含めてはならない。** ビット 12 は PAT、13-20 は予約である。
 pub const ADDR_MASK_2M: u64 = 0x000F_FFFF_FFE0_0000;
 
+/// 2MiB ページの項目のうち、4KiB ならアドレスになるが、2MiB ではアドレスでないビット（12-20）。
+///
+/// ビット 12 は PAT、13-20 は予約である。分割するとき、これらを 4KiB の項目へ持ち込まない。
+pub const PDE_HUGE_BELOW_ADDRESS: u64 = ADDR_MASK_4K & !ADDR_MASK_2M;
+
 /// 2MiB ページの大きさ。
 pub const PAGE_SIZE_2M: u64 = 2 * 1024 * 1024;
 /// 4KiB ページの大きさ。
@@ -245,7 +250,7 @@ pub const fn split_child_entry(huge_entry: u64, index: usize) -> u64 {
         huge_entry & !(PDE_PAGE_SIZE | PDE_HUGE_PAT | PTE_ACCESSED | PTE_DIRTY | ADDR_MASK_2M);
     // 2MiB では予約だったビット 13-20 も落としておく（本来 0 のはずだが、
     // 万一立っていたら 4KiB ではアドレスの一部として解釈されてしまう）。
-    flags &= !0x1F_F000;
+    flags &= !PDE_HUGE_BELOW_ADDRESS;
 
     // **PAT をビット 12 からビット 7 へ移す。**
     if huge_entry & PDE_HUGE_PAT != 0 {
@@ -417,6 +422,12 @@ mod tests {
         ] {
             assert_eq!(table_flags(permissions), P | W | U, "{permissions:?}");
         }
+    }
+
+    /// **名前を付けたマスクは、以前の直書きの値と同じである**（`0x1F_F000`。ビット 12 から 20）。
+    #[test]
+    fn the_bits_below_a_huge_page_address_are_twelve_to_twenty() {
+        assert_eq!(PDE_HUGE_BELOW_ADDRESS, 0x1F_F000);
     }
 
     /// **起動の表が直書きしている 2 つの値と同じである**（`kernel/src/main.rs` の `global_asm!` の `0x83` と `0x03`）。

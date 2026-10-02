@@ -23,7 +23,7 @@ use common::arch::x86_64::cpu;
 use common::log::Logger;
 use common::machine::pc::serial::Serial;
 
-use super::{switch, table, verify};
+use super::{entry, switch, table, verify};
 
 /// 恒等除去で walk する必須領域。名前と高位 VA の対。
 ///
@@ -140,7 +140,6 @@ pub unsafe fn remove_identity(
     high_mapped: &[RequiredRegion],
 ) {
     const IDENTITY_INDEX: usize = 0;
-    const PRESENT: u64 = 1 << 0;
 
     // (1) 稼働 PML4 と PML4[0] を控える。
     let cr3 = switch::active_page_table_root();
@@ -220,7 +219,7 @@ pub unsafe fn remove_identity(
     // PML4[0] が空になったこと。
     // SAFETY: cr3 は稼働テーブル、direct_map で読める。読み取りのみ。
     let pml4_0_after = unsafe { verify::read_top_level_entry(cr3, direct_map, IDENTITY_INDEX) };
-    let pml4_0_empty = pml4_0_after & PRESENT == 0;
+    let pml4_0_empty = pml4_0_after & entry::PTE_PRESENT == 0;
     logger.info(format_args!(
         "identity-removal: PML4[0] after clear = {pml4_0_after:#x} (empty={pml4_0_empty})"
     ));

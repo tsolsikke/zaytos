@@ -105,7 +105,7 @@ pub const fn kernel_top_write_is_refused(index: usize, frozen: bool) -> bool {
 pub fn kernel_top_digest(entries: impl IntoIterator<Item = (usize, u64)>) -> u64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
-    const SET_BY_THE_CPU: u64 = (1 << 5) | (1 << 6);
+    const SET_BY_THE_CPU: u64 = super::entry::PTE_ACCESSED | super::entry::PTE_DIRTY;
     let mut hash = OFFSET;
     for (index, value) in entries {
         let value = value & !SET_BY_THE_CPU;
@@ -141,7 +141,7 @@ pub unsafe fn freeze_kernel_top(direct_map: DirectMap, current_pml4: PhysAddr) -
     let digest = kernel_top_digest((KERNEL_PML4_FIRST_INDEX..PML4_ENTRY_COUNT).map(|index| {
         // SAFETY: direct map 越しの稼働中 PML4 の読み。覆いは上で確かめ、添字は 512 未満。
         let value = unsafe { table.add(index).read_volatile() };
-        if value & 1 != 0 {
+        if value & super::entry::PTE_PRESENT != 0 {
             present += 1;
         }
         (index, value)

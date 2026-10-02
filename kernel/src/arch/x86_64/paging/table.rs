@@ -19,17 +19,10 @@ use common::addr::{DirectMap, PhysAddr, VirtAddr};
 
 use crate::frame_allocator::{FrameAllocator, FRAME_SIZE};
 
-use super::entry::PAGE_SIZE_2M;
-
-const PTE_PRESENT: u64 = 1 << 0;
-const PTE_WRITABLE: u64 = 1 << 1;
-const PTE_PCD: u64 = 1 << 4;
-/// PD レベルでのみ設定する（2MiB ページ）。PDPT レベルで設定すると
-/// 1GiB ページの意味になるため、このモジュールでは PDPT レベルには
-/// 絶対に立てない。
-const PTE_PS: u64 = 1 << 7;
-/// エントリからアドレス部分（ビット12〜51）を取り出すマスク。
-const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+// **ビットの定数は `entry` の 1 組を使う**（2026-10-02。以前は、このファイルが同じ値の写しを持っていた）。
+// `PDE_PAGE_SIZE` は PD レベルでのみ設定する（2MiB ページ）。PDPT レベルで設定すると 1GiB ページの意味に
+// なるため、このモジュールでは PDPT レベルには絶対に立てない。
+use super::entry::{ADDR_MASK_4K, PAGE_SIZE_2M, PDE_PAGE_SIZE, PTE_PCD, PTE_PRESENT, PTE_WRITABLE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageTableError {
@@ -254,13 +247,13 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
         // が `& 0x1FF` で 512 未満に制限している。
         let existing = unsafe { read_entry(self.direct_map, table_phys, index) };
         if existing & PTE_PRESENT != 0 {
-            if existing & PTE_PS != 0 {
+            if existing & PDE_PAGE_SIZE != 0 {
                 // 本来ここに到達しないはず（huge page として使われている
                 // スロットを中間テーブルとして扱おうとしている）。
                 // 黙って上書きせず fail-fast する。
                 return Err(PageTableError::UnexpectedHugePageEntry);
             }
-            return Ok(PhysAddr::new_const(existing & ADDR_MASK));
+            return Ok(PhysAddr::new_const(existing & ADDR_MASK_4K));
         }
         let child_phys = Self::alloc_zeroed_table(self.frames, self.direct_map, self.reach)?;
         self.frames_used += 1;
@@ -354,7 +347,7 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
                     self.direct_map,
                     pd,
                     virt.middle_index(),
-                    (phys.as_u64() & ADDR_MASK) | flags | PTE_PS,
+                    (phys.as_u64() & ADDR_MASK_4K) | flags | PDE_PAGE_SIZE,
                 );
             }
         } else {
@@ -365,7 +358,7 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
                     self.direct_map,
                     pt,
                     virt.leaf_index(),
-                    (phys.as_u64() & ADDR_MASK) | flags,
+                    (phys.as_u64() & ADDR_MASK_4K) | flags,
                 );
             }
         }
@@ -374,7 +367,7 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
 
     /// 恒等マッピング（仮想 = 物理）で 1 ページを割り付ける。
     ///
-    /// `huge` が真なら 2MiB ページ（PD レベルに `PTE_PS` を立てる）、
+    /// `huge` が真なら 2MiB ページ（PD レベルに `PDE_PAGE_SIZE` を立てる）、
     /// 偽なら 4KiB ページ（PT レベルまで辿る）。NX ビット（bit 63）は
     /// 意図的に立てない: **カーネルは EFER.NXE を立てていない**（BSP ではファームウェアが
     /// 立てて渡すことがあるが、それに依らない。2026-09-24 の実測で OVMF と VirtualBox の EFI は
@@ -409,7 +402,7 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
                     self.direct_map,
                     pd,
                     virt.middle_index(),
-                    (phys_addr.as_u64() & ADDR_MASK) | flags | PTE_PS,
+                    (phys_addr.as_u64() & ADDR_MASK_4K) | flags | PDE_PAGE_SIZE,
                 );
             }
         } else {
@@ -420,7 +413,7 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
                     self.direct_map,
                     pt,
                     virt.leaf_index(),
-                    (phys_addr.as_u64() & ADDR_MASK) | flags,
+                    (phys_addr.as_u64() & ADDR_MASK_4K) | flags,
                 );
             }
         }
