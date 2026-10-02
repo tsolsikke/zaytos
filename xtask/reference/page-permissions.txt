@@ -33,42 +33,43 @@ the table with the direct map | kernel bss | 4K | w=1 u=0 x=0 cache=0 g=0 shared
 user program corrupt | segment 0 | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
 
 user program hello | segment 0 | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program hello | segment 1 | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program hello | stack | 4K | w=1 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program hello | segment 1 | 4K | w=0 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program hello | stack | 4K | w=1 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
 
 user program fault-test | segment 0 | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program fault-test | stack | 4K | w=1 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program fault-test | stack | 4K | w=1 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
 
 user program /bin/hello | segment 0 | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program /bin/hello | segment 1 | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program /bin/hello | stack | 4K | w=1 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program /bin/hello | segment 1 | 4K | w=0 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program /bin/hello | stack | 4K | w=1 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
 
 user program /bin/spawn-test | segment 0 | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=2
-user program /bin/spawn-test | segment 1 | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program /bin/spawn-test | stack | 4K | w=1 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program /bin/spawn-test | segment 1 | 4K | w=0 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program /bin/spawn-test | stack | 4K | w=1 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
 
 user program /bin/ls | segment 0 | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program /bin/ls | segment 1 | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program /bin/ls | segment 2 | 4K | w=1 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program /bin/ls | stack | 4K | w=1 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program /bin/ls | segment 1 | 4K | w=0 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program /bin/ls | segment 2 | 4K | w=1 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program /bin/ls | stack | 4K | w=1 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
 
 user program /bin/cat | segment 0 | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program /bin/cat | segment 1 | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program /bin/cat | segment 2 | 4K | w=1 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program /bin/cat | stack | 4K | w=1 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program /bin/cat | segment 1 | 4K | w=0 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program /bin/cat | segment 2 | 4K | w=1 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program /bin/cat | stack | 4K | w=1 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
 
 user program /bin/cat | segment 0 | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program /bin/cat | segment 1 | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program /bin/cat | segment 2 | 4K | w=1 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program /bin/cat | stack | 4K | w=1 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program /bin/cat | segment 1 | 4K | w=0 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program /bin/cat | segment 2 | 4K | w=1 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program /bin/cat | stack | 4K | w=1 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
 
 user program syscall-test | segment 0 | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=2
-user program syscall-test | segment 1 | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program syscall-test | stack | 4K | w=1 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program syscall-test | mapped by request | 4K | w=1 u=1 x=1 cache=0 g=0 shared=1 tables(w=1 u=1 x=1) | pages=1
+user program syscall-test | segment 1 | 4K | w=0 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program syscall-test | stack | 4K | w=1 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program syscall-test | mapped by request | 4K | w=1 u=1 x=0 cache=0 g=0 shared=1 tables(w=1 u=1 x=1) | pages=1
 
-before interrupts are enabled | ring 3 trial pages | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=2
-before interrupts are enabled | ring 3 trial pages | 4K | w=1 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+before interrupts are enabled | ring 3 trial pages | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+before interrupts are enabled | ring 3 trial pages | 4K | w=0 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+before interrupts are enabled | ring 3 trial pages | 4K | w=1 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
 before interrupts are enabled | direct map | 4K | w=1 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~1310
 before interrupts are enabled | direct map | 2M | w=1 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~64000
 before interrupts are enabled | framebuffer (direct map) | 2M | w=1 u=0 x=0 cache=2 g=0 shared=0 tables(w=1 u=0 x=1) | pages=512
@@ -85,8 +86,9 @@ before interrupts are enabled | identity | absent | nothing is mapped here, as i
 before interrupts are enabled | framebuffer (identity) | absent | nothing is mapped here, as it should be | pages=0
 before interrupts are enabled | guard pages below the stacks | absent | nothing is mapped here, as it should be | pages=0
 
-after the application processors started | ring 3 trial pages | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=2
-after the application processors started | ring 3 trial pages | 4K | w=1 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+after the application processors started | ring 3 trial pages | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+after the application processors started | ring 3 trial pages | 4K | w=0 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+after the application processors started | ring 3 trial pages | 4K | w=1 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
 after the application processors started | direct map | 4K | w=1 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~1310
 after the application processors started | direct map | 2M | w=1 u=0 x=0 cache=0 g=0 shared=0 tables(w=1 u=0 x=1) | pages=~64000
 after the application processors started | framebuffer (direct map) | 2M | w=1 u=0 x=0 cache=2 g=0 shared=0 tables(w=1 u=0 x=1) | pages=512
@@ -104,8 +106,8 @@ after the application processors started | framebuffer (identity) | absent | not
 after the application processors started | guard pages below the stacks | absent | nothing is mapped here, as it should be | pages=0
 
 user program /bin/bss-test | segment 0 | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program /bin/bss-test | segment 1 | 4K | w=0 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program /bin/bss-test | segment 2 | 4K | w=1 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
-user program /bin/bss-test | segment 3 | 4K | w=1 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=2
-user program /bin/bss-test | stack | 4K | w=1 u=1 x=1 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program /bin/bss-test | segment 1 | 4K | w=0 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program /bin/bss-test | segment 2 | 4K | w=1 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
+user program /bin/bss-test | segment 3 | 4K | w=1 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=2
+user program /bin/bss-test | stack | 4K | w=1 u=1 x=0 cache=0 g=0 shared=0 tables(w=1 u=1 x=1) | pages=1
 

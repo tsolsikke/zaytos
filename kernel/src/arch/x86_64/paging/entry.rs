@@ -72,7 +72,8 @@ pub const PTE_SHARED: u64 = 1 << 9;
 
 /// 実行の禁止（ビット 63。XD）。**`EFER.NXE` が 0 の CPU では予約のビットで、立てた項目を引くと `#PF` になる。**
 ///
-/// **立てるのは、権限の変換（[`leaf_flags`]）である**——カーネルの側の、実行しない権限の葉に付く（2026-10-02）。
+/// **立てるのは、権限の変換（[`leaf_flags`]）である**——実行しない権限の葉に付く（カーネルの側は 2026-10-02、
+/// ユーザーの側は 2026-10-03）。
 /// **途中の項目には立てない**（CPU は段ごとの実行禁止を OR で合成するので、途中に立てると、その下の全部が
 /// 実行できなくなる）。どの CPU でもこのビットを持つ項目を引けることは、試し専用のページ
 /// （`crate::arch::x86_64::execute_disable_probe`）で確かめている。
@@ -206,10 +207,10 @@ pub enum LeafSize {
 /// | `cache` が `Uncached` | PCD |
 /// | `shared` | ビット 9（[`PTE_SHARED`]） |
 /// | 大きさが `Large` | PS |
-/// | `execute` でなく、`user` でもない | 実行禁止（ビット 63。[`PTE_NO_EXECUTE`]） |
+/// | `execute` でない | 実行禁止（ビット 63。[`PTE_NO_EXECUTE`]） |
 ///
-/// **`execute` を読むのは、カーネルの側の権限だけである**（2026-10-02。`ADR-0071` の手順 4）。ユーザーの側の葉には、
-/// まだ実行禁止のビットを立てない（ユーザーの写像に入れるときに、`user` の条件を外す）。G・PWT・PAT は立てない。
+/// **カーネルの側でも、ユーザーの側でも、実行しない権限の葉に実行禁止のビットを立てる**（`ADR-0071` の手順 4。
+/// カーネルの側は 2026-10-02、ユーザーの側は 2026-10-03）。G・PWT・PAT は立てない。
 pub const fn leaf_flags(permissions: PagePermissions, size: LeafSize) -> u64 {
     let mut flags = PTE_PRESENT;
     // 破壊テスト (S9-a, map-force-writable): 書けるかの欄を無視して、葉を常に W=1 にする。
@@ -230,7 +231,7 @@ pub const fn leaf_flags(permissions: PagePermissions, size: LeafSize) -> u64 {
     if matches!(size, LeafSize::Large) {
         flags |= PDE_PAGE_SIZE;
     }
-    if !permissions.execute() && !permissions.user() && LEAVES_CARRY_EXECUTE_DISABLE {
+    if !permissions.execute() && LEAVES_CARRY_EXECUTE_DISABLE {
         flags |= PTE_NO_EXECUTE;
     }
     // 試しの形 (user-leaf-high-bit-test): ユーザーから届く葉に、番地より上の位置のビットを立てる。
@@ -436,13 +437,13 @@ mod tests {
             (
                 PagePermissions::user_data(),
                 Small,
-                P | W | U,
+                P | W | U | XD,
                 "スタック、brk",
             ),
             (
                 PagePermissions::user_program(true, false),
                 Small,
-                P | W | U,
+                P | W | U | XD,
                 "書ける区画",
             ),
             (
@@ -454,19 +455,19 @@ mod tests {
             (
                 PagePermissions::user_program(false, false),
                 Small,
-                P | U,
+                P | U | XD,
                 "読むだけの区画",
             ),
             (
                 PagePermissions::user_shared(true),
                 Small,
-                P | W | U | SHARED,
+                P | W | U | SHARED | XD,
                 "書ける共有",
             ),
             (
                 PagePermissions::user_shared(false),
                 Small,
-                P | U | SHARED,
+                P | U | SHARED | XD,
                 "読むだけの共有",
             ),
         ];
@@ -512,11 +513,11 @@ mod tests {
         assert_eq!(table_flags(everything), 0x03);
     }
 
-    /// **実行の欄がビットになるのは、カーネルの側の権限だけである**（2026-10-02）。カーネルの側は、実行しない権限の
-    /// 葉に実行禁止のビット（63）が立ち、実行する権限の葉には立たない。**ユーザーの側は、実行の欄に依らず、
-    /// まだ立たない。** 途中の項目には、どの権限でも立たない。
+    /// **実行の欄は、カーネルの側でもユーザーの側でも、そのままビットになる**（カーネルの側は 2026-10-02、
+    /// ユーザーの側は 2026-10-03）。実行しない権限の葉に実行禁止のビット（63）が立ち、実行する権限の葉には
+    /// 立たない。途中の項目には、どの権限でも立たない。
     #[test]
-    fn the_execute_field_reaches_the_bits_on_the_kernel_side_only() {
+    fn the_execute_field_reaches_the_bits_on_both_sides() {
         for writable in [false, true] {
             let executable = leaf_flags(
                 PagePermissions::user_program(writable, true),
@@ -526,14 +527,14 @@ mod tests {
                 PagePermissions::user_program(writable, false),
                 LeafSize::Small,
             );
-            assert_eq!(executable, not_executable);
+            assert_eq!(executable >> 52, 0);
+            assert_eq!(not_executable >> 52, 0x800);
+            assert_eq!(executable, not_executable & !PTE_NO_EXECUTE);
         }
         for permissions in [
             PagePermissions::boot_table_unrestricted(),
             PagePermissions::kernel_code(),
-            PagePermissions::user_data(),
-            PagePermissions::user_program(true, false),
-            PagePermissions::user_shared(true),
+            PagePermissions::user_program(false, true),
         ] {
             for size in [LeafSize::Small, LeafSize::Large] {
                 assert_eq!(leaf_flags(permissions, size) >> 52, 0, "{permissions:?}");
@@ -543,6 +544,11 @@ mod tests {
             PagePermissions::kernel_data(),
             PagePermissions::kernel_read_only(),
             PagePermissions::kernel_device(),
+            PagePermissions::user_data(),
+            PagePermissions::user_program(true, false),
+            PagePermissions::user_program(false, false),
+            PagePermissions::user_shared(true),
+            PagePermissions::user_shared(false),
         ] {
             for size in [LeafSize::Small, LeafSize::Large] {
                 assert_eq!(
@@ -559,6 +565,7 @@ mod tests {
             PagePermissions::kernel_read_only(),
             PagePermissions::kernel_device(),
             PagePermissions::user_data(),
+            PagePermissions::user_program(false, true),
             PagePermissions::user_shared(true),
         ] {
             assert_eq!(table_flags(permissions) >> 52, 0, "{permissions:?}");
@@ -601,7 +608,7 @@ mod tests {
         let small = p(0x0000_0012_3456_7000);
         assert_eq!(
             leaf_entry(small, user, LeafSize::Small),
-            0x0000_0012_3456_7000 | 0x007
+            0x8000_0012_3456_7000 | 0x007
         );
         let kernel = PagePermissions::boot_table_unrestricted();
         let large = p(0x0000_0000_4020_0000);

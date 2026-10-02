@@ -10440,13 +10440,20 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<Serial>) {
         Load,
         /// 書く（`mov [rax], al`）。
         Store,
+        /// 跳ぶ（`jmp rax`）。**止まる番地は、命令列の中ではなく、跳んだ先である。**
+        Jump,
     }
+
+    // 実行できないページの 2 つ（2026-10-03）。読むだけのページと、スタックのページである。どちらも、
+    // `verify_ring3_excursion` が、稼働中の表へ 1 枚ずつ足す入口（`ActivePageTable::map_4kib`）で写した。
+    // **`brk` と `mmap` のページを足すのと同じ入口である。**
+    const STACK_USER_VIRT: u64 = ring3::USER_STACK_VIRT;
 
     /// 1 本の遠征の記述。名前 / 期待ベクタ / 命令列（#PF は空でアクセス列を生成） /
     /// フォルトする命令のオフセット / #PF のアクセス先（0 = #PF でない） /
     /// 期待するエラーコード（#PF のみ意味を持つ） / 的の触り方。
     type FaultCase = (&'static str, u8, &'static [u8], u64, u64, u64, Touch);
-    let cases: [FaultCase; 6] = [
+    let cases: [FaultCase; 8] = [
         // #DE: xor edx,edx / xor ecx,ecx / div ecx。0 除算。落ちるのは div（+4）。
         (
             "#DE",
@@ -10494,13 +10501,58 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<Serial>) {
             0x7,
             Touch::Store,
         ),
+        // #PF-exec-ro: movabs rax, <跳ぶ先>/ jmp rax。跳ぶ先は、読むだけでマップしたユーザーページ。
+        // エラーコード 0x15 = 存在・ユーザー・**命令の取り出し**。**止まる番地は、跳んだ先である。**
+        //
+        // **跳ぶ先には、カーネルが `ud2` を置いておく**（破壊テストの受け皿）。実行禁止が効いていなければ、
+        // そこで #UD になり、ベクタが 14 ではなく 6 になる。
+        (
+            "#PF-exec-ro",
+            14,
+            &[],
+            0,
+            READONLY_USER_VIRT,
+            0x15,
+            Touch::Jump,
+        ),
+        // #PF-exec-stack: 同じ命令列で、跳ぶ先だけスタックのページ（書けて実行しないページ）。
+        (
+            "#PF-exec-stack",
+            14,
+            &[],
+            0,
+            STACK_USER_VIRT,
+            0x15,
+            Touch::Jump,
+        ),
     ];
+
+    // **跳ぶ先の 2 枚の先頭に、受け皿の `ud2` を置く。** 読むだけのページにも、カーネルは直接マッピングの側から
+    // 書ける。スタックのページの先頭は、遠征が使わない（スタックは上端から使う。遠征の命令列は積まない）。
+    for page in [READONLY_USER_VIRT, STACK_USER_VIRT] {
+        let alias = ring3_trial_page_alias(logger, page);
+        // SAFETY: `verify_ring3_excursion` がマップしたページのフレームを、直接マッピング越しに書く。先頭の 2 バイトだけ。
+        unsafe {
+            core::ptr::write_volatile(alias, 0x0F);
+            core::ptr::write_volatile(alias.add(1), 0x0B);
+        }
+    }
 
     let main_rsp0_top = gdt::active_kernel_entry_stack_top();
     // **命令を書くのは、直接マッピングの側の番地からである**（ユーザーの側の番地は、書けない権限でマップしてある）。
     let code_ptr = ring3_trial_code_alias(logger);
 
+    // **変換が実行禁止のビットを立てない破壊テストのビルドでは、跳ぶ 2 本を走らせない**（上の `USER_PROGRAMS` の
+    // 走らせ方と同じ理由。`entry::LEAVES_CARRY_EXECUTE_DISABLE`）。
+    let jumps_run = kernel::arch::x86_64::paging::entry::LEAVES_CARRY_EXECUTE_DISABLE;
+
     for (name, expected_vector, bytes, fault_offset, load_target, expected_error, touch) in cases {
+        if touch == Touch::Jump && !jumps_run {
+            logger.info(format_args!(
+                "ring3-vectors: {name} was skipped: this build does not mark leaves as not executable"
+            ));
+            continue;
+        }
         // ユーザーコードページの先頭を、この遠征の命令列で埋める。
         // SAFETY: verify_ring3_excursion がマップしたユーザーのコードのページのフレームを、直接マッピング越しに
         // 書く。書くのは先頭の数バイトだけで、4KiB に収まる。
@@ -10513,10 +10565,19 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<Serial>) {
                     let byte = ((load_target >> (i * 8)) & 0xFF) as u8;
                     core::ptr::write_volatile(code_ptr.add(2 + i as usize), byte);
                 }
-                // mov al,[rax]（読み）か mov [rax],al（書き）。1 バイトしか違わない。
-                let opcode = if touch == Touch::Store { 0x88 } else { 0x8A };
-                core::ptr::write_volatile(code_ptr.add(10), opcode);
-                core::ptr::write_volatile(code_ptr.add(11), 0x00);
+                match touch {
+                    // mov al,[rax]（読み）か mov [rax],al（書き）。1 バイトしか違わない。
+                    Touch::Load | Touch::Store => {
+                        let opcode = if touch == Touch::Store { 0x88 } else { 0x8A };
+                        core::ptr::write_volatile(code_ptr.add(10), opcode);
+                        core::ptr::write_volatile(code_ptr.add(11), 0x00);
+                    }
+                    // jmp rax。
+                    Touch::Jump => {
+                        core::ptr::write_volatile(code_ptr.add(10), 0xFF);
+                        core::ptr::write_volatile(code_ptr.add(11), 0xE0);
+                    }
+                }
                 if touch == Touch::Store {
                     // 書きが通ってしまった場合の受け皿（ud2）。
                     core::ptr::write_volatile(code_ptr.add(12), 0x0F);
@@ -10548,7 +10609,12 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<Serial>) {
         let vector = ring3::excursion_fault_number();
         let rip = ring3::fault_rip();
         let cs = ring3::fault_cs();
-        let expected_rip = ring3::USER_CODE_VIRT + fault_offset;
+        // **跳ぶ形は、跳んだ先で止まる**（命令の取り出しの違反は、取り出そうとした番地で起きる）。
+        let expected_rip = if touch == Touch::Jump {
+            load_target
+        } else {
+            ring3::USER_CODE_VIRT + fault_offset
+        };
 
         // 判定行。**ベクタごとに 1 行**にする。
         if expected_vector == 14 {
@@ -10624,10 +10690,26 @@ fn verify_ring3_fault_vectors(logger: &mut Logger<Serial>) {
          CR0.WP on every core)"
     ));
 
+    if !jumps_run {
+        logger.info(format_args!(
+            "ring3-vectors: six Ring 3 faults interrupted only the Ring 3 run; the two jumps to pages \
+             that are not executable were skipped in this build"
+        ));
+        return;
+    }
+
+    // 2026-10-03。ここまで来たなら 7 本目と 8 本目が通っている。
     logger.info(format_args!(
-        "ring3-vectors: all six Ring 3 faults (#DE, #UD, #GP, #PF unmapped, #PF kernel, \
-         #PF write to a read-only page) interrupted only the Ring 3 run; the kernel ran on \
-         after each one"
+        "ring3-vectors: execute-disable observed from Ring 3: jumping to the read-only page \
+         {READONLY_USER_VIRT:#x} and to the stack page {STACK_USER_VIRT:#x} faulted at the target \
+         with error code 0x15 (present+user+instruction fetch), so those leaves really are not \
+         executable"
+    ));
+
+    logger.info(format_args!(
+        "ring3-vectors: all eight Ring 3 faults (#DE, #UD, #GP, #PF unmapped, #PF kernel, \
+         #PF write to a read-only page, #PF jump to a read-only page, #PF jump to the stack page) \
+         interrupted only the Ring 3 run; the kernel ran on after each one"
     ));
 }
 

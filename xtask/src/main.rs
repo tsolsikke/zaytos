@@ -799,7 +799,7 @@ const PAGING_TESTS: &[CriticalTest] = &[
         name: "map-force-writable",
         feature: "map-force-writable",
         expected_markers: &["#PF-write-ro folded with vector=6", "halting"],
-        forbidden_markers: &["ring3-vectors: all six Ring 3 faults"],
+        forbidden_markers: &["ring3-vectors: all eight Ring 3 faults"],
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
