@@ -4712,7 +4712,6 @@ fn demo_address_space_switch(
         kernel::arch::x86_64::paging::address_space::AddressSpace::new(
             allocator,
             direct_map,
-            production,
             DEMO_USER_PML4_INDEX,
         )
     } {
@@ -4799,8 +4798,7 @@ fn demo_two_address_spaces(
 
     // SAFETY: 稼働中の PML4 を読み、direct map が覆う新しいフレームへコピーするだけ。
     let mut space_b =
-        match unsafe { AddressSpace::new(allocator, direct_map, production, DEMO_USER_PML4_INDEX) }
-        {
+        match unsafe { AddressSpace::new(allocator, direct_map, DEMO_USER_PML4_INDEX) } {
             Ok(space) => space,
             Err(error) => {
                 logger.error(format_args!(
@@ -4979,7 +4977,9 @@ fn demo_two_address_spaces(
     let (held, leaked) = {
         let guard = kernel::bkl::acquire(kernel::bkl::KernelEntry::SteadyLoop);
         // SAFETY: A はいま稼働していない（本番へ戻してある）。BKL を保持している。
-        unsafe { space_a.destroy(direct_map, &mut quarantine, &guard) }
+        unsafe {
+            kernel::quarantine::retire_address_space(space_a, direct_map, &mut quarantine, &guard)
+        }
     };
     let free_after_destroy = allocator.free_frame_count();
     logger.info(format_args!(
@@ -5005,7 +5005,9 @@ fn demo_two_address_spaces(
     let (held_b, leaked_b) = {
         let guard = kernel::bkl::acquire(kernel::bkl::KernelEntry::SteadyLoop);
         // SAFETY: B も稼働していない。BKL を保持している。
-        unsafe { space_b.destroy(direct_map, &mut quarantine, &guard) }
+        unsafe {
+            kernel::quarantine::retire_address_space(space_b, direct_map, &mut quarantine, &guard)
+        }
     };
     drop(kernel::bkl::acquire(kernel::bkl::KernelEntry::SteadyLoop));
     let released_b = quarantine.release_retired(allocator, kernel::bkl::generation_is_retired);

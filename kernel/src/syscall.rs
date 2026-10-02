@@ -1518,7 +1518,7 @@ pub fn screen_pages_mapped() -> u64 {
 ///
 /// # 共有メモリと同じマップの仕方である
 ///
-/// **葉に `PTE_SHARED` の目印を立てる**（`ADR-0065`）——**`destroy` は目印の在る葉を集めない**ので、
+/// **葉に `PTE_SHARED` の目印を立てる**（`ADR-0065`）——**`AddressSpace::detach` は目印の在る葉を集めない**ので、
 /// **プロセスが終わっても裏バッファのフレームはアロケータへ返らない。** **返すのはコンソールで、
 /// 返さない**（起動時に取って、ずっと持つ）。**参照数は使わない**（Q1。カーネル常駐）。
 ///
@@ -1547,7 +1547,7 @@ unsafe fn mmap_screen_from_ring3(len: u64, prot: u64, direct_map: DirectMap) -> 
     let slot = crate::arch::x86_64::current_excursion_slot();
     let base = MMAP_NEXT[slot].fetch_add(pages * PAGE, Ordering::SeqCst);
     // **裏バッファは普通の RAM である**（MMIO ではない。`BackBuffer` の doc）ので、キャッシュしてよい。
-    // **共有の印が付く**——**`destroy` が集めない**（この関数の doc）。
+    // **共有の印が付く**——**`AddressSpace::detach` が集めない**（この関数の doc）。
     let attributes = PagePermissions::user_shared(prot & PROT_WRITE != 0);
     // SAFETY: 遠征の中なので CR3 はこのプロセスの表である。
     let mut table = unsafe { ActivePageTable::current(direct_map) };
@@ -2169,7 +2169,7 @@ unsafe fn mmap_from_ring3(len: u64, prot: u64, fd: u64, offset: u64, direct_map:
         (want_pages * crate::shm::PAGE_SIZE) as u64,
         core::sync::atomic::Ordering::SeqCst,
     );
-    // **共有メモリの葉に目印を立てる（`ADR-0065`）。** **`destroy` が集めず、`crate::shm` が
+    // **共有メモリの葉に目印を立てる（`ADR-0065`）。** **`AddressSpace::detach` が集めず、`crate::shm` が
     // 参照数で返す。**
     let attributes = PagePermissions::user_shared(prot & PROT_WRITE != 0);
     // SAFETY: 遠征の中なので CR3 はこのプロセスの表である。

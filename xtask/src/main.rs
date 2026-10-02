@@ -23846,11 +23846,6 @@ const COMMON_ITEMS_FOR_HOMES: &[CommonItemsForHomes] = &[
         reason: "カーネルの仮想番地から物理番地を得る（AP のトランポリンが、静的な起動のページテーブルの物理番地を渡す）",
     },
     CommonItemsForHomes {
-        module: "kernel::bkl",
-        items: &["BklGuard", "note_mapping_changed", "tlb_generation"],
-        reason: "アドレス空間を壊すときに BKL を持っていることの証しと、変換の控え（TLB）の世代",
-    },
-    CommonItemsForHomes {
         module: "kernel::frame_allocator",
         items: &["FRAME_SIZE", "FrameAllocator"],
         reason: "物理のフレームを取る（ページテーブル・スタック・ACPI と Local APIC の窓）",
@@ -23890,11 +23885,6 @@ const COMMON_ITEMS_FOR_HOMES: &[CommonItemsForHomes] = &[
         module: "kernel::paging::permissions",
         items: &["Cache", "PagePermissions"],
         reason: "ページの権限の、CPU に依らない言い方。置き場が、ページテーブルのビットへ直す",
-    },
-    CommonItemsForHomes {
-        module: "kernel::quarantine",
-        items: &["QUARANTINE_CAPACITY", "Quarantine"],
-        reason: "アドレス空間を壊すとき、外したフレームを、変換の控えが消えるまで返さずに置く",
     },
     CommonItemsForHomes {
         module: "kernel::syscall",

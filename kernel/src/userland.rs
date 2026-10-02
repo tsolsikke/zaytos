@@ -962,7 +962,6 @@ pub fn load_user_program(
     use crate::arch::x86_64::AddressSpace;
 
     let direct_map = common::addr::direct_map();
-    let production = crate::arch::x86_64::active_page_table_root();
 
     // **アロケータを借りる（S11-3。`ADR-0030`）。** マッピングの間だけ持ち、
     // **Ring 3 へ落ちる前に返す。**
@@ -984,26 +983,20 @@ pub fn load_user_program(
         }
     }
 
-    // SAFETY: production は稼働中の PML4、direct_map は登録済みのウィンドウ。**起動の後なので、カーネル側の
+    // SAFETY: direct_map は登録済みのウィンドウ（コピー元は、`new` が稼働中の表を自分で読む）。**起動の後なので、カーネル側の
     // PML4 の項目は誰も変えない**（`AddressSpace::new` の前提。起動の終わりの指紋と突き合わせる）。BKL は持っていない。
-    let space = match unsafe {
-        AddressSpace::new(
-            allocator,
-            direct_map,
-            production,
-            USER_PROGRAM_SUBTREE_INDEX,
-        )
-    } {
-        Ok(space) => space,
-        Err(e) => {
-            // **失敗の経路でも返す（S11-3）。** ここで持ったまま抜けると、
-            // 以後の確保がすべて `None` になる。**S9-b-2 で「失敗の途中で取った
-            // フレームは呼び出し側が返す」と決めた場所と同じ関数で、
-            // 今度はアロケータ自体を返す。**
-            crate::frame_allocator::give_back(allocator);
-            return (Err(UserLoadError::AddressSpace(e)), 0, 0, 0);
-        }
-    };
+    let space =
+        match unsafe { AddressSpace::new(allocator, direct_map, USER_PROGRAM_SUBTREE_INDEX) } {
+            Ok(space) => space,
+            Err(e) => {
+                // **失敗の経路でも返す（S11-3）。** ここで持ったまま抜けると、
+                // 以後の確保がすべて `None` になる。**S9-b-2 で「失敗の途中で取った
+                // フレームは呼び出し側が返す」と決めた場所と同じ関数で、
+                // 今度はアロケータ自体を返す。**
+                crate::frame_allocator::give_back(allocator);
+                return (Err(UserLoadError::AddressSpace(e)), 0, 0, 0);
+            }
+        };
 
     // **ここからプロセスである。** stack_top はマップする前から決まっているが、entry は
     // イメージを読むまで分からないので、0 で作り load_user_program_into が埋める。
@@ -1098,7 +1091,7 @@ pub fn load_user_program(
     // なく、そちらまで飛ばすと**あちらの会計が先に落ちて、終了の側を観測できない。**
     // **実測で踏んだ**——先に落ちるほうだけを見ていた。
     // **破棄の前に、この空間が取った本数を聞く（`ADR-0063` の (b1)）。**
-    // **`destroy` は自分を取るので、後からは聞けない。**
+    // **`AddressSpace::detach` は自分を取るので、後からは聞けない。**
     // **載せた後に `mmap` が取った PT を足す（`ADR-0065` の (a)）。** **`frames_taken` は
     // 載せた時点の分だけなので、これを足さないと `collected > taken` になる。**
     let taken = process.space.frames_taken()
@@ -1123,7 +1116,9 @@ pub fn load_user_program(
         // 載せる形は静かに効くので、黙って直さない。**
         forget_task_root_before_destroy(logger, &process);
         // SAFETY: この空間はどのコアでも稼働していない。direct map は覆っている。
-        unsafe { process.space.destroy(direct_map, quarantine, &guard) }
+        unsafe {
+            crate::quarantine::retire_address_space(process.space, direct_map, quarantine, &guard)
+        }
     };
 
     // **空間ごとの会計（`ADR-0063` の (b1)）。** **取った本数と、破棄が集めた本数が
@@ -1551,7 +1546,7 @@ fn load_user_program_into(
                     .map_user_4kib(allocator, direct_map, virt, frame, attributes)
             } {
                 // **マップできなかったフレームは、ここで返す。** 空間へ繋がっていないので
-                // `AddressSpace::destroy` からは見えず、返さないと誰にも戻らない。
+                // `AddressSpace::detach` からは見えず、返さないと誰にも戻らない。
                 // **実測で気づいた**——失敗の経路で空きフレームが 7 枚減るのに、
                 // 隔離へ入ったのは 6 枚だった。差の 1 枚がこれである。
                 let _ = allocator.deallocate_frame(frame);
@@ -2517,7 +2512,7 @@ pub fn spawn(
     }
 
     // **共有フレームを `consumed` から除く（`ADR-0065` の (A-3)）。** **ウィンドウの間にアロケータから
-    // 取ったまま返っていない共有フレームは、`consumed` に入るが `destroy` が飛ばして
+    // 取ったまま返っていない共有フレームは、`consumed` に入るが `AddressSpace::detach` が飛ばして
     // `quarantined` に入らない**——**その差を消す。** **(E) では 0**（プールはアロケータの外）。
     // **失うもの**——**`consumed == quarantined` の素の等式（共有分について）。**
     // **覆う判定**——**`shm` の created==released（フレームは参照数で返る。`shm:` の計測）。**

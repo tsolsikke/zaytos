@@ -597,7 +597,7 @@ impl ActivePageTable {
         }
 
         // **葉のビットは `entry::leaf_entry` が決める**（書けるか・ユーザーから届くか・キャッシュ・共有の印）。
-        // 共有の印（`ADR-0065`）は、`destroy` が集めないための目印で、立てるのは `crate::syscall` の `mmap` の
+        // 共有の印（`ADR-0065`）は、`AddressSpace::detach` が集めないための目印で、立てるのは `crate::syscall` の `mmap` の
         // 2 つだけである。破壊テスト `map-force-writable` は、変換の中に在る。
         // SAFETY: pt/添字は上記の契約。書く値は 4KiB ページを指す正しい PTE。
         unsafe {

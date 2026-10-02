@@ -161,14 +161,15 @@ pub unsafe fn freeze_kernel_top(direct_map: DirectMap, current_pml4: PhysAddr) -
 
 /// プロセス 1 つ分のアドレス空間。
 ///
-/// **まだ破棄を持たない。** 破棄は S7-d である。**持たせないのは、破棄が隔離
-/// （[`crate::quarantine`]）と一体だからで、片方だけ先に作ると「返してよい」判断が
-/// 無いまま返す形が書けてしまう。**
-///
-/// # 契約（境界の型。2026-09-30）
+/// # 契約（境界の型。2026-09-30。2026-10-02 に壊す入口を分けた）
 ///
 /// - プロセス 1 つ分のアドレス空間である。作るのはプログラムを読み込む所（`crate::userland`）である。
-/// - 壊すときは、BKL を持っていることを引数で示す（[`crate::bkl::BklGuard`]）。
+/// - **この型が持つのは、ページテーブルの操作だけである**——作る（[`AddressSpace::new`]）、ユーザーのページを
+///   1 枚足す（[`AddressSpace::map_user_4kib`]）、ユーザーの側の項目を外してフレームを集める
+///   （[`AddressSpace::detach`]）。
+/// - **壊す順序（外す → 変換の控えの世代を上げる → その世代で隔離へ入れる）は、共通の側が持つ**
+///   （`crate::quarantine` の `retire_address_space`。BKL を持っていることも、そちらが引数で示す）。
+///   この型は、BKL も隔離も知らない。
 pub struct AddressSpace {
     pml4: PhysAddr,
     /// **この空間のユーザーサブツリーの添字（S7-e）。**
@@ -193,7 +194,7 @@ pub struct AddressSpace {
     /// 取るが、マップしたときに数えるので、呼び出し側は数えなくてよい**——**取ったのに
     /// マップしなかったフレームは、この空間のものにならない**（呼び出し側が戻す）。
     ///
-    /// **[`AddressSpace::destroy`] が集める本数と突き合わせる**——**あちらは
+    /// **[`AddressSpace::detach`] が集める本数と突き合わせる**——**あちらは
     /// ページテーブルから辿れるものを集めるので、「取ったのに繋がっていない」が差になる。**
     frames_taken: usize,
 }
@@ -201,10 +202,14 @@ pub struct AddressSpace {
 impl AddressSpace {
     /// 稼働中のテーブルからカーネル部分をコピーして、新しいアドレス空間を作る。
     ///
+    /// **コピー元は、いま稼働している表である**（この関数が自分で読む。2026-10-02。以前は、呼ぶ側が根を渡していた。
+    /// 呼ぶ側は 3 か所とも、稼働中の根を読んで渡していただけである）。
+    ///
+    /// `user_window` は、この空間がユーザーのページを置く枝の番号である（x86_64 では、最上位の表の下位半分の添字）。
+    ///
     /// # Safety
     ///
-    /// - `current_pml4` が稼働中の PML4 を指していること。
-    /// - `direct_map` がその PML4 と、これから取るフレームの両方を覆っていること。
+    /// - `direct_map` が、稼働中の最上位の表と、これから取るフレームの両方を覆っていること。
     /// - **呼び出しの間に、カーネル側の PML4 の項目（添字 256〜511）が変わらないこと。**
     ///   **起動の後（`run_init` から）は誰も変えない**——**書く経路は起動の間だけである**（AP の per-CPU の
     ///   置き場と AP スタック〔添字 258〕と、試しの feature `smp-tlb-shootdown-probe` のときだけ作る探り用の
@@ -216,16 +221,17 @@ impl AddressSpace {
     pub unsafe fn new(
         allocator: &mut FrameAllocator,
         direct_map: DirectMap,
-        current_pml4: PhysAddr,
-        user_pml4_index: usize,
+        user_window: usize,
     ) -> Result<Self, AddressSpaceError> {
+        let user_pml4_index = user_window;
         if is_shared_kernel_index(user_pml4_index) {
             return Err(AddressSpaceError::NotPrivate);
         }
+        let current_pml4 = crate::arch::x86_64::paging::switch::active_page_table_root();
         let pml4 = allocator
             .allocate_frame()
             .ok_or(AddressSpaceError::OutOfFrames)?;
-        // **PML4 も破棄が集める**（`collect(self.pml4, ...)`）ので、ここで 1 本数える。
+        // **PML4 も、外すときに集める**（[`AddressSpace::detach`]）ので、ここで 1 本数える。
 
         // **direct map が覆っているかを先に見る。** `phys_to_virt` は覆いを検査せず
         // 加算するだけなので、**覆いの外を渡すと黙って別のアドレスを返す。**
@@ -334,34 +340,6 @@ impl AddressSpace {
 
 /// 下位（ユーザー側）の PML4 添字の範囲。**破棄が触ってよいのはここだけである。**
 const PRIVATE_INDEX_RANGE: core::ops::Range<usize> = 0..KERNEL_PML4_FIRST_INDEX;
-
-/// 1 回の破棄で集められるフレームの本数。
-///
-/// **集めてから世代を上げるので、一時的に置く場所が要る。** 溢れたら漏らす
-/// （返すより安全である）。**隔離の容量と同じ桁にしてある。**
-const MAX_FRAMES_PER_DESTROY: usize = crate::quarantine::QUARANTINE_CAPACITY;
-
-/// 集めたフレームを一時的に置く場所（B-d で静的へ移した）。
-///
-/// # なぜスタックに置かないか
-///
-/// **`Option<PhysAddr>` は 16 バイトで、容量に比例してスタックを食う。**
-/// **B-d で隔離の容量を 64 から 256 へ上げたとき、これが 1 KiB から 4 KiB へ
-/// 育ち、遠征スタックの高水位が半分を越えて起動が止まった**（実測。
-/// **「半分を越えたらガードページを張るか、測って容量を上げるかを決める」と
-/// いう持ち越しの行が発火した**）。
-///
-/// **持ち越しの行は発火させない**——**育てたのはこちらの都合であって、
-/// 遠征スタックの要件が変わったわけではない。** **静的へ移せば、容量を
-/// いくつにしても遠征スタックは 1 バイトも増えない。**
-///
-/// # 同時に 2 つ走らない
-///
-/// **[`AddressSpace::destroy`] は BKL の内側でしか呼べない**（`_guard` が
-/// それを型で示している）。**入れ子にもならない**——**破棄は他の破棄を
-/// 呼ばない。**
-static mut COLLECTED_FRAMES: [Option<PhysAddr>; MAX_FRAMES_PER_DESTROY] =
-    [None; MAX_FRAMES_PER_DESTROY];
 
 impl AddressSpace {
     /// 4KiB のユーザーページを 1 枚マップする（S7-d）。
@@ -474,7 +452,7 @@ impl AddressSpace {
         // **既にマップされている葉は上書きしない（S9-b-3-2b）。**
         //
         // **重なる区画を持つイメージがここへ来る。** 上書きすると、前の葉が指していた
-        // フレームがマッピングから外れ、`destroy` から見えなくなって 1 枚漏れる
+        // フレームがマッピングから外れ、`detach` から見えなくなって 1 枚漏れる
         // （実測で 14 枚消えて隔離へ 13 枚）。**漏れは会計に出てカーネルが
         // 止まるので、S9 の「いかなる入力でもカーネルを fail-fast させない」に
         // 反していた。**
@@ -502,52 +480,46 @@ impl AddressSpace {
 
     /// この空間のために取ったフレームの本数（`ADR-0063` の (b1)）。
     ///
-    /// **破棄の前に聞く。** [`AddressSpace::destroy`] は自分を取るので、後からは聞けない。
+    /// **破棄の前に聞く。** [`AddressSpace::detach`] は自分を取るので、後からは聞けない。
     pub fn frames_taken(&self) -> usize {
         self.frames_taken
     }
 
-    /// この空間を破棄し、**下位で使っていたフレームをすべて隔離へ入れる**（S7-d）。
+    /// この空間のユーザーの側の項目を全部外し、外したフレームを `into` へ集める（S7-d。2026-10-02 に、
+    /// 壊す入口のうちページテーブルを触る分だけにした）。
     ///
-    /// **アロケータへ直接は返さない。** 他コアの TLB に古い翻訳が残りうるので、
-    /// **ADR-0027 の Addendum の不変条件どおり、世代が退くまで隔離する。**
+    /// 集めるのは、下位で使っていた葉のフレーム（共有の印の付いた葉を除く）、途中の表、最上位の表そのものである。
+    /// **触るのは下位だけである**（[`PRIVATE_INDEX_RANGE`]）。上位は共有なので、ここで返したら他のアドレス空間の
+    /// マッピングを壊す。
     ///
-    /// **触るのは下位だけである**（[`PRIVATE_INDEX_RANGE`]）。上位は共有なので、
-    /// ここで返したら他のアドレス空間のマッピングを壊す。
+    /// 返すのは（`into` へ集めた本数, 入り切らなかった本数）。**入り切らなかったフレームは、どこにも返らない**
+    /// （漏れる。早く返すより、漏らすほうが安全である）。
     ///
-    /// 返すのは (隔離へ入れた本数, 隔離が溢れて漏らした本数)。
+    /// **集めたフレームを、すぐにアロケータへ返してはならない。** ほかのコアの変換の控え（TLB）に、古い翻訳が
+    /// 残りうる。**外した後に世代を上げ、その世代で隔離へ入れる順序は、呼ぶ側が持つ**
+    /// （`crate::quarantine` の `retire_address_space`。`ADR-0027` の Addendum の不変条件）。
     ///
     /// # Safety
     ///
-    /// - **この空間がどのコアでも稼働していないこと。** 稼働中の CR3 を破棄すると、
-    ///   そのコアは次の翻訳で死ぬ。
-    /// - `guard` が示すとおり BKL を保持していること。**マッピングの変更と世代の更新は
-    ///   BKL の内側でしか行わない**（ADR-0027 の Addendum の失効条件）。
-    pub unsafe fn destroy(
+    /// - **この空間がどのコアでも稼働していないこと。** 稼働中の表を外すと、そのコアは次の翻訳で死ぬ。
+    /// - **BKL を持って呼ぶこと。** マッピングの変更は BKL の内側でしか行わない（`ADR-0027` の Addendum の
+    ///   失効条件）。呼ぶのは `crate::quarantine` の `retire_address_space` だけで、BKL を持っていることは、
+    ///   そちらが引数（`BklGuard`）で受けて示す。
+    /// - `direct_map` が、この空間の表を覆っていること。
+    pub unsafe fn detach(
         self,
         direct_map: DirectMap,
-        quarantine: &mut crate::quarantine::Quarantine,
-        _guard: &crate::bkl::BklGuard,
+        into: &mut [Option<PhysAddr>],
     ) -> (usize, usize) {
         use crate::arch::x86_64::paging::entry;
 
-        // **順序が要である。** (1) マッピングを外し、(2) 集め終えてから世代を上げ、
-        // (3) その世代で隔離へ入れる。
-        //
-        // **上げてから外すと、上げた直後にフラッシュしたコアが、まだ生きている
-        // マッピングを読み直しうる。** **外し終えてから上げれば、その世代以降に
-        // フラッシュしたコアは、外れた後の状態しか見ていない。**
-        // **判定が `>=` で足りるのはこの順序による**（[`crate::bkl::generation_is_retired`]）。
-        // SAFETY: BKL を保持している（`_guard`）。**破棄は入れ子にならないので、
-        // この参照が生きている間、他に触る者は居ない**（[`COLLECTED_FRAMES`] の doc）。
-        let collected: &mut [Option<PhysAddr>; MAX_FRAMES_PER_DESTROY] =
-            unsafe { &mut *core::ptr::addr_of_mut!(COLLECTED_FRAMES) };
+        let capacity = into.len();
         let mut count = 0usize;
         let mut leaked = 0usize;
 
         let mut collect = |frame: PhysAddr, count: &mut usize, leaked: &mut usize| {
-            if *count < MAX_FRAMES_PER_DESTROY {
-                collected[*count] = Some(frame);
+            if *count < capacity {
+                into[*count] = Some(frame);
                 *count += 1;
             } else {
                 // **入れ物が足りなければ漏らす。** 早く返すより漏らすほうが安全である。
@@ -602,21 +574,7 @@ impl AddressSpace {
         }
 
         collect(self.pml4, &mut count, &mut leaked);
-
-        // (2) ここまででマッピングは外れている。**外し終えてから上げる。**
-        crate::bkl::note_mapping_changed();
-        let generation = crate::bkl::tlb_generation();
-
-        // (3) その世代で隔離へ入れる。
-        let mut held = 0usize;
-        for frame in collected.iter().take(count).flatten() {
-            if quarantine.push(*frame, generation) {
-                held += 1;
-            } else {
-                leaked += 1;
-            }
-        }
-        (held, leaked)
+        (count, leaked)
     }
 }
 

@@ -65,7 +65,7 @@ pub const PDE_HUGE_PAT: u64 = 1 << 12;
 pub const PTE_GLOBAL: u64 = 1 << 8;
 
 /// 共有メモリの目印（ソフトウェア用の空きビット 9。`ADR-0065`）。**CPU は無視する。**
-/// **`AddressSpace::destroy` が「この葉はアロケータのものではない（`crate::shm` が
+/// **`AddressSpace::detach` が「この葉はアロケータのものではない（`crate::shm` が
 /// 参照数で返す）」を見分けるのに使う。** **Linux も `struct page` 相当の管理に空きビットを
 /// 使う思想である**（`docs/architecture.md` の「ABIの形は合わせる」）。
 pub const PTE_SHARED: u64 = 1 << 9;

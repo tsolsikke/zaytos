@@ -12,7 +12,7 @@
 //!
 //! **フレームは通常どおりアロケータから取る**（`ftruncate`）。**共有であることは
 //! 葉の PTE の空きビット 9 で目印を付ける**（`mmap` が `map_4kib` に `shared: true` で頼む）。
-//! **`AddressSpace::destroy` は目印の立った葉を集めない**——**Linux が `struct page` 相当の
+//! **`AddressSpace::detach` は目印の立った葉を集めない**——**Linux が `struct page` 相当の
 //! 管理で空きビットを使うのと同じ思想である**（規模が合わないので `struct page` 相当の表は
 //! 持たず、ここが参照数を持つ）。**最後の fd が閉じたときにアロケータへ返す。** **`spawn` の
 //! 会計は共有フレームを除く**（(A-3)。ウィンドウの間に取ったまま返っていない分を `consumed` から引く）。
@@ -73,7 +73,7 @@ static FDS_RECEIVED: AtomicU64 = AtomicU64::new(0);
 /// **いまアロケータから取ったままの共有フレームの数（`ADR-0065` の (A-3)）。**
 ///
 /// **`spawn` の会計がウィンドウの差で読む**——**共有フレームはアロケータから出る（`consumed` に入る）
-/// が `destroy` が飛ばす（`quarantined` に入らない）ので、ウィンドウの間に増えた分を `consumed` から引く。**
+/// が `AddressSpace::detach` が飛ばす（`quarantined` に入らない）ので、ウィンドウの間に増えた分を `consumed` から引く。**
 static SHARED_FRAMES_HELD: AtomicU64 = AtomicU64::new(0);
 
 macro_rules! gauge {
