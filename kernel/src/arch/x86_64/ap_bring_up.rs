@@ -112,11 +112,12 @@ pub unsafe fn bring_up_application_processor(
     entry: extern "C" fn(usize) -> !,
 ) -> ! {
     // 0. **BSP の CR0・CR4・EFER をコピーする**（2026-09-24。`kernel::arch::x86_64::cpu_state`）。**トランポリンは INIT の直後の
-    //    値に PAE・LME・PG と PE しか足さない**——**CD と NW が 1（キャッシュが効かない）で、WP と NE が 0 の
+    //    値に PAE・LME・NXE・PG と PE しか足さない**——**CD と NW が 1（キャッシュが効かない）で、WP と NE が 0 の
     //    まま走っていた**（実測）。**何より先にコピーする**——この先のコードをキャッシュと WP の下で走らせる。
+    //    **コピーする前に、トランポリンを出た直後の EFER を自分のスロットへ控える**（2026-10-02。NXE の確かめ）。
     // SAFETY: AP の起動の途中で、長モードに居て、割り込みは禁止のままである。
     unsafe {
-        crate::arch::x86_64::cpu_state::adopt_bsp_state_on_this_ap();
+        crate::arch::x86_64::cpu_state::adopt_bsp_state_on_this_ap(info.slot);
     }
 
     // 1. 自分の GDT / TSS を載せる。索引は引数で受け取ったものである

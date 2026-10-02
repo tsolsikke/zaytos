@@ -12,9 +12,11 @@ Hello, ZeikOS!
 [INFO] ZeikOS kernel: entered _start
 [INFO] build: 2 cargo feature(s) enabled: default,heap-poison
 [INFO] cpu-state: the kernel set the CR0 bits it needs on the BSP (WP and NE set, CD and NW clear): CR0 0x80010033 -> 0x80010033 [read back]
+[INFO] cpu-state: the CPU supports execute-disable: CPUID leaf 0x80000001 EDX bit 20 = 1 (expected 1), max extended leaf 0x8000000a
+[INFO] cpu-state: EFER.NXE=1 (expected 1) on the BSP [read back]; it was already set when the kernel was entered, so the kernel did not write EFER: EFER 0xd00 -> 0xd00
 [INFO] fp: SSE is enabled on the bootstrap processor: CR0=0x80010033 (MP=true, EM=false),              CR4=0x668 (OSFXSR=true, OSXMMEXCPT=true), as intended = true [read back from the registers]
 [INFO] boot stack: 688 of 16384 bytes used (high-water; 15696 bytes poison intact)
-[INFO] higher-half: arrived at high VA. RIP=0xffffffff801f97f8 in [0xffffffff80100000, 0xffffffff804d29b0)=true, RSP=0xffffffff804bc030 high=true, CR3=0x271000 == bootstrap PML4 0x271000 = true, identity alive (phys 0x100000 read via low==high) = true
+[INFO] higher-half: arrived at high VA. RIP=0xffffffff801fa498 in [0xffffffff80100000, 0xffffffff804d29b0)=true, RSP=0xffffffff804bc030 high=true, CR3=0x271000 == bootstrap PML4 0x271000 = true, identity alive (phys 0x100000 read via low==high) = true
 [INFO] percpu: cpu_id() now derives the slot from GDTR: base=0xffffffff8043f150 first slot=0xffffffff8043f150 stride=64 offset=0 index=0 (reader installed: false -> true, cpu_id() 0 -> 0)
 [INFO] interrupts: RFLAGS.IF before cli = false (raw RFLAGS=0x2)
 [INFO] interrupts: RFLAGS.IF after cli = false (raw RFLAGS=0x2)
@@ -43,7 +45,7 @@ Hello, ZeikOS!
 [INFO] idt: base=0xffffffff804d0919 limit=4095 (expected base=0xffffffff804d0919 limit=4095)
 [INFO] idt: 256 entries, all present=true, all interrupt gates=true, DPL layout ok=true (syscall vector 0x80 DPL=Some(3), others DPL 0)
 [INFO] idt: #DF (vector 8) IST index=Some(1), #DE (vector 0) IST index=None
-[INFO] idt: stub table 0xffffffff801eaee0..0xffffffff801ebee0 size=4096 (expected 4096), stride=OK, entries=OK
+[INFO] idt: stub table 0xffffffff801ebb80..0xffffffff801ecb80 size=4096 (expected 4096), stride=OK, entries=OK
 [INFO] idt: dedicated stubs outside the exception table: 7 checked, every gate points at its own stub=true
 [INFO] idt: loaded (exceptions now reach our handlers; interrupts stay disabled until M4-d)
 [INFO] critical: IF before any guard = false
@@ -77,7 +79,7 @@ Hello, ZeikOS!
 [INFO] paging: required range [framebuffer] 0x80000000..0x803e8000: OK
 [INFO] paging: required range [new page tables (PML4)] 0x3000..0x4000: OK
 [INFO] paging: required range [current RSP] 0x4bc290..0x4bc291: OK
-[INFO] paging: required range [current RIP] 0x1f97f8..0x1f97f9: OK
+[INFO] paging: required range [current RIP] 0x1fa498..0x1fa499: OK
 [INFO] paging: all required ranges mapped. proceeding to CR3 switch (d-2).
 [INFO] paging: current CR3 = 0x271000
 [INFO] paging: CR3 switch instruction executed
@@ -110,10 +112,10 @@ Hello, ZeikOS!
 [INFO] direct-map A-2: framebuffer rehomed to 0xffff800080000000; wrote a proof pixel, read 0xc04080/0xc04080 via high/identity = true
 [INFO] page-perms: the table with the direct map: 16 row(s), 0 unnamed, 0 mapped where nothing should be, 0 dropped, digest=39ed27f995d54c32
 [INFO] console: ready (160x50 cells), back buffer 0x1780000..0x1b68000 (1000 frames)
-[INFO] console: 108 log line(s) were emitted before the console existed (serial only)
+[INFO] console: 110 log line(s) were emitted before the console existed (serial only)
 [INFO] heap: arena 0x4d3000..0x5d3000 (256 frames, 1 MiB), mapped=true
 [INFO] heap: initialized (1048576 bytes free, 1 block(s))
-[INFO] granularity: executing code (RIP) 0xffffffff801f97f8 -> phys 0x1f97f8, mapped by a 4KiB page at 0xffffffff801f9000 (entry=0x1f9023)
+[INFO] granularity: executing code (RIP) 0xffffffff801fa498 -> phys 0x1fa498, mapped by a 4KiB page at 0xffffffff801fa000 (entry=0x1fa023)
 [INFO] granularity: kernel stack (RSP) 0xffffffff804bbd10 -> phys 0x4bbd10, mapped by a 4KiB page at 0xffffffff804bb000 (entry=0x4bb063)
 [INFO] granularity: heap arena 0x4d3000 -> phys 0x4d3000, mapped by a 2MiB page at 0x400000 (entry=0x400083)
 [INFO] granularity: framebuffer 0x80000000 -> phys 0x80000000, mapped by a 2MiB page at 0x80000000 (entry=0x800000b3)
@@ -261,7 +263,7 @@ Hello, ZeikOS!
 [INFO] percpu: 2 usable CPU(s) enumerated, 2 per-CPU slot(s) available, every CPU has a slot=true (a CPU without a slot is not started, so no slot is indexed out of range)
 [INFO] identity-removal: begin. live PML4=0xf000, saved PML4[0]=0x10023
 [INFO] identity-removal: PML4[0] subtree table frames = 7 (28 KiB) become unreachable; intentional leak. subtree frames [256]=10 [511]=4. disjoint(0,256)=true disjoint(0,511)=true disjoint(256,511)=true
-[INFO] identity-removal: required [RIP] 0xffffffff801f97f8 -> phys 0x1f97f8 (huge=false): OK
+[INFO] identity-removal: required [RIP] 0xffffffff801fa498 -> phys 0x1fa498 (huge=false): OK
 [INFO] identity-removal: required [RSP] 0xffffffff804bbb60 -> phys 0x4bbb60 (huge=false): OK
 [INFO] identity-removal: required [direct map window] 0xffff80000000f000 -> phys 0xf000 (huge=false): OK
 [INFO] identity-removal: required [kernel image] 0xffffffff80100000 -> phys 0x100000 (huge=false): OK
@@ -392,7 +394,7 @@ task: cooperative switch verified
 [INFO] frame-allocator: lent out 9 time(s), given back 9 time(s), balanced=true, present=true
 [INFO] cpu-state: the CPU vendor is AuthenticAMD (CPUID leaf 0), so CR0, CR4 and EFER are judged by the AMD table (APM Vol.2, 24593 Rev. 3.45)
 [INFO] cpu-state: CR0=0x80010033 CR4=0x668 EFER=0xd00; the inventory of user-changeable CPU state (ADR-0018 Addendum 9) rests on CR0.AM, CR4.SMAP, CR4.FSGSBASE, CR4.PKE, CR4.OSXSAVE, CR4.PVI and EFER.SCE being 0
-[INFO] cpu-state: the 22 bit(s) the kernel needs hold (CR0.PE, MP, NE, WP, PG set; EM, TS, NW, CD clear; CR4.PAE, MCE, OSFXSR, OSXMMEXCPT set; LA57, PCIDE, CET clear; EFER.LME, LMA set; LMSLE, FFXSR, TCE, UAIE clear)
+[INFO] cpu-state: the 23 bit(s) the kernel needs hold (CR0.PE, MP, NE, WP, PG set; EM, TS, NW, CD clear; CR4.PAE, MCE, OSFXSR, OSXMMEXCPT set; LA57, PCIDE, CET clear; EFER.LME, LMA, NXE set; LMSLE, FFXSR, TCE, UAIE clear)
 [INFO] user-load: hello mapped PT_LOAD 0x400000..0x400042 (filesz=0x42 memsz=0x42 w=false) pages 0x400000..0x400000
 [INFO] user-load: hello mapped PT_LOAD 0x401000..0x401012 (filesz=0x12 memsz=0x12 w=false) pages 0x401000..0x401000
 [INFO] user-load: hello PT_LOAD segments: declared=2 mapped=2 (they must match; a gap means a segment was skipped), pages shared with the previous segment=0
@@ -530,7 +532,7 @@ syscall-test wrote this
 [INFO] ioapic: virtio IRQ 11 routed: vector=0x44 (expected 0x44), level=true active-low=false masked=false; matches the platform's declaration = true [read back from hardware]
 [INFO] sti-check 1: GDT base=0xffffffff8043f150 (expected 0xffffffff8043f150), CS=0x0008 (expected 0x0008), DS=0x0010 SS=0x0010 (expected 0x0010)
 [INFO] sti-check 2: TR=0x0030 (expected 0x0030), IST1 top=0xffffffff804cb000, #DF gate IST index=Some(1)
-[INFO] sti-check 3: IDT base=0xffffffff804d0919 limit=4095, first 32 gates ok=true, exception stub table ok=true, irq stub table ok=true (0xffffffff801ebf10..0xffffffff801ec120, size=528 expected=528)
+[INFO] sti-check 3: IDT base=0xffffffff804d0919 limit=4095, first 32 gates ok=true, exception stub table ok=true, irq stub table ok=true (0xffffffff801ecbb0..0xffffffff801ecdc0, size=528 expected=528)
 [INFO] sti-check 3b: all 256 IDT gate(s) lead to one of the 3 common entries = true (exception 216, irq 39, syscall 1)
 [INFO] sti-check 5: PIC IMR master=0xfe slave=0xff (expected 0xfe/0xff) [read back from hardware]
 [INFO] sti-check 4: cannot be verified at this point; the timer still goes through the 8259 here (calibration needs PIT ticks, so the move to the local APIC timer happens after sti), and the 8259 ICW2 is write-only. Proceeding is safe only because check 5 holds: with every IRQ masked, a wrong offset delivers nothing. Proof arrives when the first timer IRQ shows up as vector 0x20. The other two paths are read back where they are set up: the I/O APIC redirection entry (IRQ1) and the LVT timer
@@ -553,7 +555,7 @@ syscall-test wrote this
 [INFO] lapic-timer: the timer now arrives as vector 0xfe, which the 8259 cannot produce
 task: starting preemptive demo with 2 busy-loop workers for 200 ticks
 [INFO] smp: the installed AP trampoline matches the template outside the patched fields: 4048 byte(s) compared, 48 excluded (gdtr base at 0xf22, far jump target at 0x3b, data block 0xf40..0xf68), mismatches=0
-[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x271000, rust entry 0xffffffff801a83a0
+[INFO] smp: AP trampoline installed at 0x1000 (4096 of 4096 bytes used, fits in one page=true), gdt at 0x1f00, 64-bit entry at 0x1100, cr3 0x271000, rust entry 0xffffffff801a9040
 [INFO] smp: starting application processor apic id 1 as slot 1 (trampoline at 0x1000, vector 0x01, stack top 0x3000 identity-mapped, cr3 0x271000 = the static boot page table)
 [INFO] smp: application processor 1 started (long mode reached, running on the static boot page table; no per-CPU GDT/TSS/IDT yet, so cpu_id() is not used here)
 [INFO] fp: SSE is enabled on ap 1: CR0=0x80010033 CR4=0x668, as intended = true [read back from the registers]
@@ -562,6 +564,7 @@ task: starting preemptive demo with 2 busy-loop workers for 200 ticks
 [INFO] smp: ap 1 is up with its own per-CPU state (own GDT/TSS/IDT, own stacks in PML4[258], production CR3); it now takes part in scheduling on its own idle task
 [INFO] smp: ap 1 wrote its own SVR: spurious vector 0xff, software_enabled=true (the BSP's write only reached the BSP's local APIC)
 [INFO] smp: application processors: 2 usable CPU(s) reported, 1 AP(s) attempted, 1 started, 0 skipped for lack of a per-CPU slot (MAX_CPUS=2)
+[INFO] cpu-state: ap 1 left the trampoline with EFER=0xd00, EFER.NXE=1 (expected 1) [read by the AP before it copied the BSP]
 [INFO] cpu-state: ap 1 CR0=0x80010033 CR4=0x668 EFER=0xd00 matches the BSP
 [INFO] cpu-state: 1 started AP(s) match the BSP's CR0, CR4 and EFER
 [INFO] page-perms: after the application processors started: 15 row(s), 0 unnamed, 0 mapped where nothing should be, 0 dropped, digest=a033dec55c4c4b2b

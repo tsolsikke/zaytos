@@ -332,6 +332,20 @@ const CRITICAL_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // **実行禁止を有効にする見張り（2026-10-02）。** **ファームウェアが EFER.NXE を落として渡し、カーネルが
+    // 立てない形を BSP で作る**（OVMF は立てて渡す）。**立てた後の読み戻しが EFER.NXE を名指しして、
+    // 自分のページテーブルを組むより前に止まる。**
+    CriticalTest {
+        name: "bsp-leaves-nxe-clear",
+        feature: "bsp-leaves-nxe-clear-test",
+        expected_markers: &[
+            "cpu-state: EFER.NXE is 0 on the BSP after the kernel set the bits it needs (EFER 0x500 -> 0x500)",
+            "cpu-state: halting",
+        ],
+        forbidden_markers: &["EFER.NXE=1 (expected 1) on the BSP", "user-run: hello"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     CriticalTest {
         name: "cpu-state-sees-sce",
         feature: "cpu-state-sees-sce-test",
@@ -22868,6 +22882,21 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // **AP のトランポリンが NXE を立てない**（2026-10-02。直す前の形）。**AP は Rust の入口で BSP の EFER を
+    // コピーするので、起動の終わりの突き合わせは通る**——**止めるのは、トランポリンを出た直後（コピーする前）の
+    // EFER の確かめである。** 測ってあった値（0x500）そのもので見る。
+    CriticalTest {
+        name: "ap-trampoline-without-nxe",
+        feature: "ap-trampoline-without-nxe-test",
+        expected_markers: &[
+            "cpu-state: ap 1 left the trampoline with EFER.NXE clear (EFER=0x500",
+            "cpu-state: ap 1 CR0=0x80010033 CR4=0x668 EFER=0xd00 matches the BSP",
+            "cpu-state: halting",
+        ],
+        forbidden_markers: &["started AP(s) match the BSP's CR0, CR4 and EFER"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     CriticalTest {
         name: "ap-touch-scheduler",
         feature: "smp-ap-touch-scheduler-test",
@@ -30143,7 +30172,7 @@ fn count_elements(text: &str) -> usize {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 60,
-    full: 439,
+    full: 441,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。

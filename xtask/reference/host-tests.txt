@@ -265,8 +265,11 @@ kernel::arch::x86_64::cpu_state::tests::another_vendor_is_judged_only_by_the_bit
 kernel::arch::x86_64::cpu_state::tests::each_inventory_bit_is_named_when_set
 kernel::arch::x86_64::cpu_state::tests::every_bit_of_every_register_is_classified_exactly_once_for_each_vendor
 kernel::arch::x86_64::cpu_state::tests::every_table_name_matches_the_bit_name
+kernel::arch::x86_64::cpu_state::tests::execute_disable_support_is_read_from_the_extended_leaf
 kernel::arch::x86_64::cpu_state::tests::ffxsr_must_be_clear_on_amd_and_is_reserved_on_intel
+kernel::arch::x86_64::cpu_state::tests::nxe_must_be_set_for_every_vendor
 kernel::arch::x86_64::cpu_state::tests::smep_and_umip_do_not_break_the_inventory
+kernel::arch::x86_64::cpu_state::tests::the_bsp_writes_efer_only_when_nxe_is_supported_and_clear
 kernel::arch::x86_64::cpu_state::tests::the_first_unclassified_bit_is_what_the_sabotage_sets
 kernel::arch::x86_64::cpu_state::tests::the_measured_ap_before_the_fix_breaks_the_required_bits
 kernel::arch::x86_64::cpu_state::tests::the_measured_ap_differences_are_named

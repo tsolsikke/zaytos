@@ -248,6 +248,23 @@ macro_rules! ap_entry_sabotage {
     };
 }
 
+/// トランポリンが EFER に立てるビット——**LME（長モード）と NXE（実行禁止）**（2026-10-02 に NXE を足した）。
+///
+/// **NXE をここで立てるのは、AP が実行禁止のビットを立てた項目を引くより、必ず先に立っているようにするためである。**
+/// この後に載るのは起動の表（実行禁止のビットを立てた項目は無い）で、本番の表へ移るのは Rust の入口の後である。
+/// Rust の入口は BSP の EFER をコピーするが、その順序に頼らない形にする。**対応していない CPU で NXE を立てる
+/// 書き込みは `#GP` になる**が、AP を起こすのは、BSP が CPUID で対応を確かめた後である
+/// （`cpu_state::report_established_bits` が、対応していなければ起動を止める）。
+///
+/// 破壊テスト（`ap-trampoline-without-nxe-test`。2026-10-02）: LME だけを立てる（直す前の形）。AP がトランポリンを
+/// 出た直後の EFER を BSP が確かめ、NXE が落ちていることを名指しして止まる。**定数の値が変わるだけで、命令の
+/// 長さは変わらない。** **雛形そのものを変えるので、設置の照合（コピーと雛形の突き合わせ）は通る。**
+const TRAMPOLINE_EFER_BITS: u32 = if cfg!(feature = "ap-trampoline-without-nxe-test") {
+    cpu::Efer::LONG_MODE_ENABLE as u32
+} else {
+    (cpu::Efer::LONG_MODE_ENABLE | cpu::Efer::NO_EXECUTE_ENABLE) as u32
+};
+
 core::arch::global_asm!(
     ".section .rodata.aptramp,\"a\",@progbits",
     ".p2align 12",
@@ -272,10 +289,10 @@ core::arch::global_asm!(
     // CR3 に静的初期テーブルの物理を載せる（BSP が書き込んだ値）。
     "  mov eax, [{data} + {d_cr3}]",
     "  mov cr3, eax",
-    // IA32_EFER.LME を立てる。
+    // IA32_EFER の LME と NXE を立てる（`TRAMPOLINE_EFER_BITS`）。
     "  mov ecx, {efer}",
     "  rdmsr",
-    "  or eax, {efer_lme}",
+    "  or eax, {efer_bits}",
     "  wrmsr",
     // CR0.PG と PE を同時に立てて long mode へ入る。
     "  mov eax, cr0",
@@ -355,7 +372,7 @@ core::arch::global_asm!(
     d_cr3 = const layout::DATA_CR3,
     cr4_pae = const 1u32 << 5,
     efer = const 0xC000_0080u32,
-    efer_lme = const 1u32 << 8,
+    efer_bits = const TRAMPOLINE_EFER_BITS,
     cr0_pg_pe = const (1u32 << 31) | 1,
 );
 

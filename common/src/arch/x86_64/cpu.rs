@@ -513,6 +513,14 @@ impl Efer {
     /// SCE（bit 0）。**`syscall` と `sysret` を許す。** **0 なら `syscall` 命令は `#UD` になる。**
     pub const SYSCALL_ENABLE: u64 = 1 << 0;
 
+    /// LME（bit 8）。**長モードを許す。** AP のトランポリンが、ページングを有効にする前に立てる。
+    pub const LONG_MODE_ENABLE: u64 = 1 << 8;
+
+    /// NXE（bit 11）。**ページテーブルの項目の実行禁止のビット（63 番）を有効にする。** **0 の間は、その
+    /// ビットは予約で、立てた項目を引くと `#PF` になる。** **対応していない CPU で立てる書き込みは `#GP` になる**
+    /// ——立てる前に `CPUID.80000001H:EDX[20]` を見ること（Intel SDM Vol.3A 5.13.1、AMD APM Vol.2 の EFER の節）。
+    pub const NO_EXECUTE_ENABLE: u64 = 1 << 11;
+
     /// 生の値（起動ログへ出すため）。
     pub fn raw(self) -> u64 {
         self.0

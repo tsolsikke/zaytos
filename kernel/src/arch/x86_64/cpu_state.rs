@@ -11,9 +11,9 @@
 //! # AP も見る（2026-09-24。レビューの足す1点）
 //!
 //! **AP の CR0・CR4・EFER は、BSP とは別の経路（トランポリン）で作られる。** **INIT の直後の値から
-//! 始まり、トランポリンは PAE・LME・PG と PE しか立てない**——**実測で、AP は CD と NW が 1（キャッシュが
-//! 効かない形）で、WP と NE が 0 のまま走っていた**（`docs/troubleshooting.md`）。**棚卸しの結論は全 CPU に
-//! ついてなので、監視も全 CPU に要る。**
+//! 始まり、トランポリンは PAE・LME・NXE・PG と PE しか立てない**（NXE は 2026-10-02 に足した）——**実測で、AP は
+//! CD と NW が 1（キャッシュが効かない形）で、WP と NE が 0 のまま走っていた**（`docs/troubleshooting.md`）。
+//! **棚卸しの結論は全 CPU についてなので、監視も全 CPU に要る。**
 //!
 //! **AP は起動した直後に BSP の値をコピーし**（[`adopt_bsp_state_on_this_ap`]）、**起動の終わりに自分の値を
 //! 読んで控える**（[`record_this_ap`]）。**BSP は、起動した AP の値が自分の値と一致することを確かめ、
@@ -173,15 +173,24 @@ impl Scope {
 ///   ——**OVMF と VirtualBox の EFI は同じ値で渡すので、2 台の機械では見えない。**
 /// - **MP・EM・OSFXSR・OSXMMEXCPT は `fp::enable_on_this_cpu` が持つ**（`ADR-0058`）。
 /// - **PE・PG・PAE・LME・LMA は、長モードで走っている時点で立っている**（ブートローダとトランポリン）。
+/// - **EFER の NXE も [`establish_required_bits_on_bsp`] が持つ**（BSP。下の「NXE」）。
 /// - **「0 であるべき」の残りは、カーネルが立てないビットである**——**ファームウェアが立てて渡したら止まる。**
-/// - **AP は BSP を丸ごとコピーする**（[`adopt_bsp_state_on_this_ap`]）。
+/// - **AP は BSP を丸ごとコピーする**（[`adopt_bsp_state_on_this_ap`]）。**NXE だけは、その前にトランポリンが
+///   LME と一緒に立てる。**
 ///
-/// # NXE を入れていない理由
+/// # NXE（2026-10-02 に「1 であるべき」へ移した）
 ///
-/// **カーネルのページテーブルは実行禁止のビット（XD。63 番）を使っていない**（`kernel/src/paging`）。
-/// **NXE が 0 なら XD は予約のビットになる**（Intel SDM Vol.3A）が、**立てていないので落ちない。**
-/// **実行禁止の保護を入れる段階で「1 であるべき」に移す**（`docs/deferred-decisions.md`）。
-pub const REQUIRED_BITS: [(Register, u32, &str, bool, Scope, &str); 24] = [
+/// **NXE が 0 の間、ページテーブルの項目の実行禁止のビット（XD。63 番）は予約で、立てた項目を引くと `#PF` になる**
+/// （Intel SDM Vol.3A 5.13.1、AMD APM Vol.2 の EFER の節）。**実行禁止のビットを立てる項目はまだ無い**が、
+/// **立てる段階より先に、どの CPU でも NXE が立っていることを確かめておく。**
+///
+/// - **BSP**: CPUID で対応を確かめてから立てる（[`establish_required_bits_on_bsp`]）。**対応していない CPU では
+///   止める**（[`report_established_bits`]）。**実測では、OVMF も VirtualBox の EFI も立てたまま渡していて、
+///   カーネルは自分では立てていなかった**（2026-10-02。QEMU と VirtualBox の両方で EFER=0xd00）。
+/// - **AP**: トランポリンが、ページングを有効にする前に LME と一緒に立てる。**直す前は、トランポリンを出た
+///   直後の EFER は 0x500（NXE が 0）で、BSP の値をコピーして初めて 1 になっていた**（同じ日の実測）。
+///   **トランポリンを出た直後の値を AP が控え、BSP が確かめる**（[`check_aps_match_bsp`]）。
+pub const REQUIRED_BITS: [(Register, u32, &str, bool, Scope, &str); 25] = [
     (
         Register::Cr0,
         0,
@@ -285,6 +294,17 @@ pub const REQUIRED_BITS: [(Register, u32, &str, bool, Scope, &str); 24] = [
         true,
         Scope::Both,
         "the kernel runs in long mode",
+    ),
+    // **実行禁止を有効にする段階で、「どちらでもよい」から移した**（2026-10-02）。**Intel と AMD が同じ 11 番に
+    // 同じ意味で置く**（SDM Vol.3A 2.2.1 の IA32_EFER、APM Vol.2 3.1.7 の EFER）。
+    (
+        Register::Efer,
+        11,
+        "EFER.NXE",
+        true,
+        Scope::Both,
+        "the execute-disable bit of a page table entry is reserved while NXE is clear, so an entry \
+         that sets it would raise #PF",
     ),
     // **全ビットの分類で足した**（2026-09-24）。
     (
@@ -420,7 +440,7 @@ pub enum Other {
 /// **CR0・CR4・EFER の全ビットは、製造元ごとに、[`INVENTORY_BITS`]・[`REQUIRED_BITS`]・この表・予約
 /// （[`RESERVED_INTEL`]・[`RESERVED_AMD`]）のちょうど 1 つに入る**（ホストのテストが守る）。**出所は Intel SDM
 /// Vol.3A（253668-082US）の 2.5 節と 2.2.1 節、AMD APM Vol.2（24593 Rev. 3.45）の 3.1 節である。**
-pub const OTHER_BITS: [(Register, u32, &str, Other, Scope, &str); 18] = [
+pub const OTHER_BITS: [(Register, u32, &str, Other, Scope, &str); 17] = [
     (
         Register::Cr0,
         4,
@@ -516,14 +536,6 @@ pub const OTHER_BITS: [(Register, u32, &str, Other, Scope, &str); 18] = [
         Other::Either,
         Scope::Both,
         "a protection candidate, not turned on yet",
-    ),
-    (
-        Register::Efer,
-        11,
-        "EFER.NXE",
-        Other::Either,
-        Scope::Both,
-        "no page table entry sets XD yet",
     ),
     // **SVME——VMRUN・VMLOAD・VMSAVE は CPL 0 だけで、VMMCALL は仮想機械の外では #UD になる**（APM Vol.2
     // 15.5・15.18）。**CLGI と INVLPGA の CPL の決まりは APM Vol.3（命令の本文）にあり、取得できなかった。**
@@ -755,17 +767,94 @@ impl fmt::Display for BitName {
 
 /// [`establish_required_bits_on_bsp`] の前後の CR0（起動ログへ出すため）。
 static ESTABLISHED_CR0: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+/// [`establish_required_bits_on_bsp`] の前後の EFER（起動ログへ出すため）。
+static ESTABLISHED_EFER: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+/// [`establish_required_bits_on_bsp`] が読んだ CPUID（拡張の葉の最大と、葉 0x8000_0001 の EDX）。
+static NO_EXECUTE_CPUID: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
-/// **BSP で、カーネルが要る CR0 のビットを自分で立てる・落とす**（2026-09-24）——**WP と NE を立て、
+/// CPUID が示す、実行禁止（NX）への対応（2026-10-02）。**Intel と AMD で、葉もビットも同じである**
+/// ——`CPUID.80000001H:EDX[20]`（Intel SDM Vol.3A 5.13.1、AMD APM Vol.2 の EFER の節）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct NoExecuteCpuid {
+    /// 拡張の葉の最大（葉 0x8000_0000 の EAX）。
+    pub max_extended_leaf: u32,
+    /// 葉 0x8000_0001 の EDX。**葉が無ければ読まず、0 にする。**
+    pub extended_features_edx: u32,
+}
+
+impl NoExecuteCpuid {
+    /// 対応を示すビットが在る葉。
+    pub const LEAF: u32 = 0x8000_0001;
+    /// 葉の EDX の中の、対応を示すビット。
+    pub const EDX_BIT: u32 = 20;
+
+    /// この CPU の値を読む。**葉が無い CPU では、葉を読まない**（無い葉は、決まっていない値を返す）。
+    pub fn read() -> Self {
+        // **`unsafe` は要らない**——**`__cpuid` は x86_64 では safe fn である**（[`read_vendor_signature`] と同じ）。
+        let max_extended_leaf = core::arch::x86_64::__cpuid(0x8000_0000).eax;
+        let extended_features_edx = if max_extended_leaf >= Self::LEAF {
+            core::arch::x86_64::__cpuid(Self::LEAF).edx
+        } else {
+            0
+        };
+        NoExecuteCpuid {
+            max_extended_leaf,
+            extended_features_edx,
+        }
+    }
+
+    /// 対応を示すビットの値（0 か 1。葉が無ければ 0）。
+    pub fn bit(self) -> u32 {
+        if self.max_extended_leaf >= Self::LEAF {
+            (self.extended_features_edx >> Self::EDX_BIT) & 1
+        } else {
+            0
+        }
+    }
+
+    /// CPU が実行禁止に対応しているか（純粋ロジック）。
+    pub fn supported(self) -> bool {
+        self.bit() == 1
+    }
+}
+
+/// BSP が EFER.NXE をどう扱うか（2026-10-02。純粋ロジックの結果）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NxeOnBsp {
+    /// **CPU が対応していない。** **EFER には書かない**（立てる書き込みは `#GP` になる）。起動は止める。
+    Unsupported,
+    /// カーネルへ入った時点で、既に立っていた。書かない。
+    AlreadySet,
+    /// カーネルへ入った時点では落ちていた。カーネルが立てる。
+    SetByKernel,
+}
+
+/// CPUID の対応と、カーネルへ入った時点の EFER から、NXE の扱いを決める（純粋ロジック）。
+pub fn plan_nxe_on_bsp(supported: bool, efer_at_entry: u64) -> NxeOnBsp {
+    use common::arch::x86_64::cpu::Efer;
+    if !supported {
+        NxeOnBsp::Unsupported
+    } else if efer_at_entry & Efer::NO_EXECUTE_ENABLE != 0 {
+        NxeOnBsp::AlreadySet
+    } else {
+        NxeOnBsp::SetByKernel
+    }
+}
+
+/// **BSP で、カーネルが要るビットを自分で立てる・落とす**（2026-09-24）——**CR0 の WP と NE を立て、
 /// CD と NW を落とす。** **FP のビットは触らない**（`fp::enable_on_this_cpu` が持つ）。
+/// **EFER の NXE を、CPUID で対応を確かめてから立てる**（2026-10-02。既に立っていれば書かない。対応していない
+/// CPU では書かず、[`report_established_bits`] が止める）。
 ///
 /// # Safety
 ///
 /// **起動の最初期に、BSP で 1 回だけ呼ぶこと。** **PE と PG には触れない。** **CD と NW は同時に落とす**
-/// （CD が 0 で NW が 1 の組は `#GP` になる）。
+/// （CD が 0 で NW が 1 の組は `#GP` になる）。**EFER は NXE だけを変える**（LME を落とさない）。
+/// **載っているページテーブルは起動の表で、実行禁止のビットを立てた項目が無いこと**（NXE の値に依らず引ける）。
 pub unsafe fn establish_required_bits_on_bsp() {
     use common::arch::x86_64::cpu::{
-        read_cr0, CR0_CACHE_DISABLE, CR0_NOT_WRITE_THROUGH, CR0_NUMERIC_ERROR, CR0_WRITE_PROTECT,
+        read_cr0, read_efer, write_efer, Efer, CR0_CACHE_DISABLE, CR0_NOT_WRITE_THROUGH,
+        CR0_NUMERIC_ERROR, CR0_WRITE_PROTECT,
     };
     let before = read_cr0();
     let after = (before | CR0_WRITE_PROTECT | CR0_NUMERIC_ERROR)
@@ -781,15 +870,90 @@ pub unsafe fn establish_required_bits_on_bsp() {
     }
     ESTABLISHED_CR0[0].store(before, Ordering::SeqCst);
     ESTABLISHED_CR0[1].store(common::arch::x86_64::cpu::read_cr0(), Ordering::SeqCst);
+
+    // **EFER の NXE**（2026-10-02）。**CPUID が対応を示すときだけ書く。**
+    let cpuid = NoExecuteCpuid::read();
+    let efer_at_entry = read_efer().raw();
+    // 破壊テスト (2026-10-02, bsp-leaves-nxe-clear): **ファームウェアが NXE を落として渡し、カーネルが立てない形**を
+    // 作る。**OVMF と VirtualBox の EFI は NXE を立てて渡すので、落として作る。** **立てた後の読み戻しが
+    // EFER.NXE を名指しして止まる。** 載っているのは起動の表で、実行禁止のビットを立てた項目は無い。
+    #[cfg(feature = "bsp-leaves-nxe-clear-test")]
+    let efer_at_entry = {
+        let cleared = efer_at_entry & !Efer::NO_EXECUTE_ENABLE;
+        // SAFETY: 呼び出し側の契約。NXE だけを落とす（LME はそのまま）。
+        unsafe { write_efer(Efer::from_raw(cleared)) };
+        cleared
+    };
+    if plan_nxe_on_bsp(cpuid.supported(), efer_at_entry) == NxeOnBsp::SetByKernel
+        && !cfg!(feature = "bsp-leaves-nxe-clear-test")
+    {
+        // SAFETY: 呼び出し側の契約。CPUID が対応を示しているので `#GP` にならない。NXE だけを立てる。
+        unsafe { write_efer(Efer::from_raw(efer_at_entry | Efer::NO_EXECUTE_ENABLE)) };
+    }
+    NO_EXECUTE_CPUID[0].store(u64::from(cpuid.max_extended_leaf), Ordering::SeqCst);
+    NO_EXECUTE_CPUID[1].store(u64::from(cpuid.extended_features_edx), Ordering::SeqCst);
+    ESTABLISHED_EFER[0].store(efer_at_entry, Ordering::SeqCst);
+    ESTABLISHED_EFER[1].store(read_efer().raw(), Ordering::SeqCst);
 }
 
-/// [`establish_required_bits_on_bsp`] の前後の CR0 を 1 行出す（ロガーが使えるようになってから）。
+/// [`establish_required_bits_on_bsp`] の前後の CR0 と、実行禁止の対応と EFER.NXE を出す（ロガーが使えるように
+/// なってから）。**CPU が実行禁止に対応していないか、立てた後の読み戻しで NXE が立っていなければ、止める**
+/// （2026-10-02）——**実行禁止のビットを立てた項目を持つ表を組むより、ずっと前である。**
 pub fn report_established_bits(logger: &mut Logger<Serial>) {
     let before = ESTABLISHED_CR0[0].load(Ordering::SeqCst);
     let after = ESTABLISHED_CR0[1].load(Ordering::SeqCst);
     logger.info(format_args!(
         "cpu-state: the kernel set the CR0 bits it needs on the BSP (WP and NE set, CD and NW \
          clear): CR0 {before:#x} -> {after:#x} [read back]"
+    ));
+
+    let cpuid = NoExecuteCpuid {
+        max_extended_leaf: NO_EXECUTE_CPUID[0].load(Ordering::SeqCst) as u32,
+        extended_features_edx: NO_EXECUTE_CPUID[1].load(Ordering::SeqCst) as u32,
+    };
+    let efer_at_entry = ESTABLISHED_EFER[0].load(Ordering::SeqCst);
+    let efer_now = ESTABLISHED_EFER[1].load(Ordering::SeqCst);
+    let plan = plan_nxe_on_bsp(cpuid.supported(), efer_at_entry);
+    if plan == NxeOnBsp::Unsupported {
+        logger.error(format_args!(
+            "cpu-state: this CPU does not support execute-disable (CPUID leaf {:#x} EDX bit {} is {}, \
+             max extended leaf {:#x}); the kernel needs it to keep data pages from being executed, and \
+             setting EFER.NXE on such a CPU raises #GP, so the kernel did not write EFER ({efer_now:#x})",
+            NoExecuteCpuid::LEAF,
+            NoExecuteCpuid::EDX_BIT,
+            cpuid.bit(),
+            cpuid.max_extended_leaf
+        ));
+        logger.error(format_args!("cpu-state: halting"));
+        common::arch::x86_64::cpu::halt_forever();
+    }
+    logger.info(format_args!(
+        "cpu-state: the CPU supports execute-disable: CPUID leaf {:#x} EDX bit {} = {} (expected 1), max \
+         extended leaf {:#x}",
+        NoExecuteCpuid::LEAF,
+        NoExecuteCpuid::EDX_BIT,
+        cpuid.bit(),
+        cpuid.max_extended_leaf
+    ));
+    let nxe_now = u8::from(efer_now & common::arch::x86_64::cpu::Efer::NO_EXECUTE_ENABLE != 0);
+    if nxe_now != 1 {
+        logger.error(format_args!(
+            "cpu-state: EFER.NXE is 0 on the BSP after the kernel set the bits it needs (EFER \
+             {efer_at_entry:#x} -> {efer_now:#x}), but the kernel needs it to be 1 before any page table \
+             entry sets the execute-disable bit; it is set by \
+             cpu_state::establish_required_bits_on_bsp"
+        ));
+        logger.error(format_args!("cpu-state: halting"));
+        common::arch::x86_64::cpu::halt_forever();
+    }
+    logger.info(format_args!(
+        "cpu-state: EFER.NXE={nxe_now} (expected 1) on the BSP [read back]; {}: EFER {efer_at_entry:#x} -> \
+         {efer_now:#x}",
+        match plan {
+            NxeOnBsp::SetByKernel =>
+                "it was clear when the kernel was entered, so the kernel set it",
+            _ => "it was already set when the kernel was entered, so the kernel did not write EFER",
+        }
     ));
 }
 
@@ -812,6 +976,11 @@ static AP_STATE: [[AtomicU64; 3]; MAX_CPUS] =
     [const { [const { AtomicU64::new(0) }; 3] }; MAX_CPUS];
 /// AP ごとに控えたか。
 static AP_RECORDED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+/// AP がトランポリンを出た直後（BSP の値をコピーする前）に読んだ EFER（添字はスロット。2026-10-02）。
+static AP_EFER_FROM_TRAMPOLINE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// AP ごとに、トランポリンを出た直後の EFER を控えたか。
+static AP_EFER_FROM_TRAMPOLINE_RECORDED: [AtomicBool; MAX_CPUS] =
+    [const { AtomicBool::new(false) }; MAX_CPUS];
 /// BSP が AP の控えを待つ上限（ティック。1 ティック = 10ms）。
 const AP_RECORD_WAIT_TICKS: u64 = 200;
 
@@ -926,6 +1095,10 @@ pub fn check_and_report(logger: &mut Logger<Serial>) {
 
 /// AP が BSP の CR0・CR4・EFER をコピーする（2026-09-24）。**AP の Rust の入口の最初で 1 回だけ呼ぶ。**
 ///
+/// **コピーする前に、トランポリンを出た直後の EFER を読んで、自分のスロット（`slot`）へ控える**（2026-10-02）
+/// ——**NXE は、トランポリンが LME と一緒に立てているはずである。** **コピーした後では、トランポリンが立てたのか
+/// コピーで立ったのかが分からない。** 確かめるのは BSP である（[`check_aps_match_bsp`]）。
+///
 /// **コピーする順は CR4 → EFER → CR0 である**——**CR0 で CD と NW を落とし（キャッシュが効く）、WP を立てる**
 /// のを最後にする。**BSP の値が控えられていなければ何もしない**（突き合わせが、控えが無いことで止まる）。
 ///
@@ -933,7 +1106,14 @@ pub fn check_and_report(logger: &mut Logger<Serial>) {
 ///
 /// **AP の起動の途中で、長モードに居て、割り込みが禁止されていること。** **BSP の値は同じカーネルの
 /// 同じ長モードの値である**（PG・PE・PAE・LME は BSP でも立っている）。
-pub unsafe fn adopt_bsp_state_on_this_ap() {
+pub unsafe fn adopt_bsp_state_on_this_ap(slot: usize) {
+    if slot < MAX_CPUS {
+        AP_EFER_FROM_TRAMPOLINE[slot].store(
+            common::arch::x86_64::cpu::read_efer().raw(),
+            Ordering::SeqCst,
+        );
+        AP_EFER_FROM_TRAMPOLINE_RECORDED[slot].store(true, Ordering::SeqCst);
+    }
     // 破壊テスト (2026-09-24, ap-keeps-its-own-control-registers): コピーしない。**直す前の形である**——
     // **AP は INIT の直後の CR0（CD・NW が 1、WP・NE が 0）のまま走り、突き合わせで止まる。**
     if cfg!(feature = "ap-keeps-its-own-control-registers-test") {
@@ -1130,6 +1310,30 @@ pub fn check_aps_match_bsp(logger: &mut Logger<Serial>, started: usize) {
             failed = true;
             continue;
         }
+        // **AP がトランポリンを出た直後（BSP の値をコピーする前）の EFER.NXE**（2026-10-02）。**控えが在るのは、
+        // 上の控え（起動の終わり）より前である。**
+        let from_trampoline = AP_EFER_FROM_TRAMPOLINE[slot].load(Ordering::SeqCst);
+        let nxe_from_trampoline =
+            u8::from(from_trampoline & common::arch::x86_64::cpu::Efer::NO_EXECUTE_ENABLE != 0);
+        if !AP_EFER_FROM_TRAMPOLINE_RECORDED[slot].load(Ordering::SeqCst) {
+            logger.error(format_args!(
+                "cpu-state: ap {slot} did not record the EFER it left the trampoline with"
+            ));
+            failed = true;
+        } else if nxe_from_trampoline != 1 {
+            logger.error(format_args!(
+                "cpu-state: ap {slot} left the trampoline with EFER.NXE clear (EFER={from_trampoline:#x}, \
+                 read by the AP before it copied the BSP); the trampoline must set NXE together with \
+                 LME, so that no AP meets a page table entry with the execute-disable bit while NXE is \
+                 clear"
+            ));
+            failed = true;
+        } else {
+            logger.info(format_args!(
+                "cpu-state: ap {slot} left the trampoline with EFER={from_trampoline:#x}, \
+                 EFER.NXE={nxe_from_trampoline} (expected 1) [read by the AP before it copied the BSP]"
+            ));
+        }
         let ap = [0, 1, 2].map(|index| AP_STATE[slot][index].load(Ordering::SeqCst));
         if ap == bsp {
             logger.info(format_args!(
@@ -1251,19 +1455,19 @@ mod tests {
                       OSXMMEXCPT set; LA57, PCIDE, CET";
         assert_eq!(
             format!("{}", RequiredSummary(Vendor::Intel)),
-            format!("{common}, PKS, UINTR clear; EFER.LME, LMA set")
+            format!("{common}, PKS, UINTR clear; EFER.LME, LMA, NXE set")
         );
         assert_eq!(
             format!("{}", RequiredSummary(Vendor::Amd)),
-            format!("{common} clear; EFER.LME, LMA set; LMSLE, FFXSR, TCE, UAIE clear")
+            format!("{common} clear; EFER.LME, LMA, NXE set; LMSLE, FFXSR, TCE, UAIE clear")
         );
         assert_eq!(
             format!("{}", RequiredSummary(Vendor::Other)),
-            format!("{common} clear; EFER.LME, LMA set")
+            format!("{common} clear; EFER.LME, LMA, NXE set")
         );
         assert_eq!(
             VENDORS.map(required_count),
-            [20, 22, 18],
+            [21, 23, 19],
             "Intel, AMD, other"
         );
     }
@@ -1279,7 +1483,8 @@ mod tests {
         }
     }
 
-    /// **直す前の AP の値**（2026-09-24 の実測）で、崩れていたビットを名前で拾う。
+    /// **直す前の AP の値**（2026-09-24 の実測）で、崩れていたビットを名前で拾う。**EFER の 0x500 は NXE が 0 で
+    /// ある**（2026-10-02 に、トランポリンを出た直後の値として測り直した。QEMU と VirtualBox で同じ）。
     #[test]
     fn the_measured_ap_before_the_fix_breaks_the_required_bits() {
         for vendor in VENDORS {
@@ -1288,10 +1493,56 @@ mod tests {
                 .collect();
             assert_eq!(
                 names,
-                vec!["CR0.NE", "CR0.WP", "CR0.NW", "CR0.CD", "CR4.MCE"],
+                vec!["CR0.NE", "CR0.WP", "CR0.NW", "CR0.CD", "EFER.NXE", "CR4.MCE"],
                 "{vendor:?}"
             );
         }
+    }
+
+    /// **NXE は、Intel でも AMD でも、どちらでもない製造元でも「1 であるべき」である**（2026-10-02）。
+    #[test]
+    fn nxe_must_be_set_for_every_vendor() {
+        for vendor in VENDORS {
+            assert_eq!(
+                classify(vendor, Register::Efer, 11),
+                Class::MustBeSet,
+                "{vendor:?}"
+            );
+            let names: Vec<&str> = required_violations(vendor, [CR0, CR4, EFER & !(1 << 11)])
+                .map(|(_, _, name, _, _, _)| *name)
+                .collect();
+            assert_eq!(names, vec!["EFER.NXE"], "{vendor:?}");
+        }
+    }
+
+    /// **実行禁止の対応は、拡張の葉 0x8000_0001 が在って、その EDX のビット 20 が 1 のときだけである。**
+    /// 値は 2026-10-02 の実測（QEMU は 0x8000_000a と 0x2193_fbfd、VirtualBox は 0x8000_0008 と 0x2810_0800）。
+    #[test]
+    fn execute_disable_support_is_read_from_the_extended_leaf() {
+        let cpuid = |max_extended_leaf, extended_features_edx| NoExecuteCpuid {
+            max_extended_leaf,
+            extended_features_edx,
+        };
+        assert!(cpuid(0x8000_000a, 0x2193_fbfd).supported());
+        assert!(cpuid(0x8000_0008, 0x2810_0800).supported());
+        // ビット 20 だけを落とした値。
+        assert!(!cpuid(0x8000_000a, 0x2193_fbfd & !(1 << 20)).supported());
+        // **葉が無い CPU では、EDX に何が入っていても対応していない。**
+        assert!(!cpuid(0x8000_0000, u32::MAX).supported());
+        assert!(!cpuid(0x0000_0007, u32::MAX).supported());
+        assert_eq!(cpuid(0x8000_0001, 1 << 20).bit(), 1);
+        assert_eq!(cpuid(0x8000_0000, 1 << 20).bit(), 0);
+    }
+
+    /// **BSP は、対応していなければ書かず、既に立っていれば書かず、落ちていれば立てる。**
+    #[test]
+    fn the_bsp_writes_efer_only_when_nxe_is_supported_and_clear() {
+        // 2026-10-02 の実測: QEMU も VirtualBox も、カーネルへ入った時点で 0xd00（NXE が 1）だった。
+        assert_eq!(plan_nxe_on_bsp(true, EFER), NxeOnBsp::AlreadySet);
+        assert_eq!(plan_nxe_on_bsp(true, 0x500), NxeOnBsp::SetByKernel);
+        // **対応していない CPU では、EFER の値に依らず書かない**（立てる書き込みは #GP になる）。
+        assert_eq!(plan_nxe_on_bsp(false, 0x500), NxeOnBsp::Unsupported);
+        assert_eq!(plan_nxe_on_bsp(false, EFER), NxeOnBsp::Unsupported);
     }
 
     /// **製造元ごとに、全ビットが棚卸し・要るビット・その他・予約のちょうど 1 つに入る**（2026-09-24。

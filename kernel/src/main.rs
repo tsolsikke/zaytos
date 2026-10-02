@@ -11294,6 +11294,16 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "ファームウェアが CD を立てて渡し、カーネルが落とさない形を BSP で作る",
     ),
     (
+        "bsp-leaves-nxe-clear-test",
+        cfg!(feature = "bsp-leaves-nxe-clear-test"),
+        "ファームウェアが EFER.NXE を落として渡し、カーネルが立てない形を BSP で作る",
+    ),
+    (
+        "ap-trampoline-without-nxe-test",
+        cfg!(feature = "ap-trampoline-without-nxe-test"),
+        "AP のトランポリンが LME だけを立て、NXE を立てない（直す前の形）",
+    ),
+    (
         "cpu-state-sees-an-unclassified-bit-test",
         cfg!(feature = "cpu-state-sees-an-unclassified-bit-test"),
         "その製造元で分類していない最初のビットが立っているものとして判定する",
