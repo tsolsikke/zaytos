@@ -79,6 +79,14 @@ SECTIONS
         *(.rodata .rodata.*)
     }
 
+    /* 大域の番地の表（2026-10-02 に明示した。それまでは、置き場をリンカに任せていた）。
+     * 中身はリンクのときに決まった番地だけで、実行時の再配置は無い（非 PIE。readelf -r が 0 件）。
+     * 読むだけの範囲（__rodata_start から __data_start まで）の中に置く——カーネルの像を区画ごとの権限で
+     * 写すとき、ここは読むだけになる。書ける区画（.data.bootpt から後ろ）より前に置くこと。 */
+    .got : AT(ADDR(.got) - KERNEL_VIRT_BASE) {
+        *(.got .got.*)
+    }
+
     /* higher-half の静的初期ページテーブル（B-2a）。リンク時計算で全エントリを
      * 確定する。フレームアロケータより前、CR3 切り替えの瞬間に使う。KEEP で守る。 */
     .data.bootpt : AT(ADDR(.data.bootpt) - KERNEL_VIRT_BASE) ALIGN(4K) {
@@ -108,7 +116,7 @@ SECTIONS
     /* 区画の境（2026-10-01）。ページの権限の一覧（kernel/src/page_survey.rs）が、範囲に区画の名前を付けるために
      * 使う。区画はどれも 4KiB の境から始まるので、境はページの境である。記号を置くだけで、配置は変えない。
      *   読みと実行: __kernel_start（.text.trampoline の先頭）から __rodata_start まで
-     *   読みだけ:   __rodata_start（.rodata.aptramp の先頭）から __data_start まで
+     *   読みだけ:   __rodata_start（.rodata.aptramp の先頭）から __data_start まで（.rodata と .got を含む）
      *   読み書き:   __data_start（.data.bootpt の先頭）から __bss_start まで、__bss_start から __kernel_end まで */
     __rodata_start = ADDR(.rodata.aptramp);
     __data_start = ADDR(.data.bootpt);

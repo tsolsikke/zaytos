@@ -264,13 +264,14 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
         // `child_phys` を Present + Writable な中間エントリとして書く
         // （中間テーブル自体はキャッシュ属性を特別扱いしない）。
         // **途中の項目は、葉の権限に依らず、常にカーネルの側のものとして書く**（このビルダーが組むのは
-        // カーネルの表だけである。ユーザーから届く項目は作らない）。
+        // カーネルの表だけである。ユーザーから届く項目は作らない）。**途中の項目のビットを決めるのは、
+        // 「下の葉がユーザーから届くか」だけである**（`entry::table_flags`）。書けるかと実行できるかは葉で決める。
         unsafe {
             write_entry(
                 self.direct_map,
                 table_phys,
                 index,
-                entry::table_entry(child_phys, PagePermissions::kernel_unrestricted()),
+                entry::table_entry(child_phys, PagePermissions::kernel_data()),
             );
         }
         Ok(child_phys)
@@ -368,11 +369,9 @@ impl<'a, const CAP: usize> PageTableBuilder<'a, CAP> {
     /// 恒等マッピング（仮想 = 物理）で 1 ページを割り付ける。
     ///
     /// `huge` が真なら 2MiB ページ（PD レベルに `PDE_PAGE_SIZE` を立てる）、
-    /// 偽なら 4KiB ページ（PT レベルまで辿る）。NX ビット（bit 63）は
-    /// 意図的に立てない: **カーネルは EFER.NXE を立てていない**（BSP ではファームウェアが
-    /// 立てて渡すことがあるが、それに依らない。2026-09-24 の実測で OVMF と VirtualBox の EFI は
-    /// 立てていた）。**NXE が 0 のコアで立てると予約ビット違反のページフォルトになる。**
-    /// 権限の細分化は次の独立したステップに送る。**ビットを決めるのは `entry` の変換である。**
+    /// 偽なら 4KiB ページ（PT レベルまで辿る）。**ビットを決めるのは `entry` の変換である**——実行しない権限
+    /// なら、実行禁止のビット（bit 63）が付く（2026-10-02。カーネルが EFER.NXE を自分で立て、どの CPU でも
+    /// 確かめてから入れた。`crate::arch::x86_64::cpu_state`）。
     pub fn map_page(
         &mut self,
         phys_addr: PhysAddr,

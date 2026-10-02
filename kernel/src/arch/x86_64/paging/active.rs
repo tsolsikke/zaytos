@@ -447,6 +447,45 @@ impl ActivePageTable {
         Ok(pde)
     }
 
+    /// 既に在る 4KiB の葉に、実行禁止のビットを足す（**破壊テスト専用**。`nx-probe-only-leaf-test`）。
+    ///
+    /// そのビルドでは、権限の変換が実行禁止のビットを立てない（[`entry::LEAVES_CARRY_EXECUTE_DISABLE`]）。
+    /// 試しのページ（`crate::arch::x86_64::execute_disable_probe`）の葉にだけ、ここで足す。**既定のビルドには
+    /// 無い**——既に在る葉の権限を変える所は、既定のビルドには 1 つも無い。
+    ///
+    /// # Safety
+    ///
+    /// [`Self::unmap_4kib`] と同じ。加えて、`virt` が 4KiB の葉でマップされていて、実行されないページであること。
+    #[cfg(feature = "nx-probe-only-leaf-test")]
+    pub unsafe fn mark_leaf_execute_disable(
+        &mut self,
+        virt: VirtAddr,
+    ) -> Result<(), MapUpdateError> {
+        let _guard = InterruptGuard::enter();
+
+        let (pd, pd_index) = self.locate_pd(virt)?;
+        // SAFETY: `locate_pd` の契約による。
+        let pde = unsafe { self.read(pd, pd_index) };
+        if !entry::is_present(pde) {
+            return Err(MapUpdateError::NotMapped);
+        }
+        if entry::is_huge(pde) {
+            return Err(MapUpdateError::AlreadySmall);
+        }
+        let pt = entry::table_address(pde);
+        let pt_index = entry::pt_index(virt);
+        // SAFETY: `pt` は PD が指す有効な PT で、添字は 512 未満。
+        let pte = unsafe { self.read(pt, pt_index) };
+        if !entry::is_present(pte) {
+            return Err(MapUpdateError::NotMapped);
+        }
+        // SAFETY: 同上。ビットを足すだけで、番地もほかの権限も変えない。
+        unsafe { self.write(pt, pt_index, pte | entry::PTE_NO_EXECUTE) };
+        // SAFETY: テーブルの書き換えが終わってから、変えた 1 本を落とす。
+        unsafe { cpu::invalidate_tlb_entry(virt.as_u64()) };
+        Ok(())
+    }
+
     /// `virt` を含む 4KiB ページをアンマップする。外した葉（[`UnmappedPage`]）を返す。
     ///
     /// # 物理フレームは解放しない
@@ -537,8 +576,8 @@ impl ActivePageTable {
     /// **権限は [`PagePermissions`] で受け、ビットへ直すのは `entry` の変換である**
     /// （[`entry::leaf_entry`] と [`entry::table_entry`]。2026-10-02）。
     /// G は立てない（TLB を CR3 リロード / `invlpg` で管理する前提。
-    /// `tlb_flush_precondition` の G=0 前提）。NX も立てない（EFER.NXE 未有効。
-    /// 予約ビット違反の #PF を避ける）。
+    /// `tlb_flush_precondition` の G=0 前提）。**カーネルの側の、実行しない権限の葉には、実行禁止のビットが付く**
+    /// （2026-10-02。`entry::leaf_flags`）。ユーザーの側の葉には、まだ付かない。
     ///
     /// # 書き込み可否は葉だけで表す。中間へは伝播しない
     ///
@@ -546,13 +585,12 @@ impl ActivePageTable {
     /// 決まるので、中間を W=0 にすると、その配下の葉が 1 枚残らず読み取り専用に
     /// なる。** 中間は常に許す側（W=1）に置き、可否は葉で表す。
     ///
-    /// # この段階で入れたのは W だけである。`W^X` ではない
+    /// # 実行できるかは、カーネルの側の葉だけに入っている
     ///
-    /// **X の側（NX ビット）は入っていない。** 立てるには `EFER.NXE` の有効化が
-    /// 要り、それは別項の解禁条件に従う（`docs/deferred-decisions.md` の
-    /// 「`EFER.NXE` の有効化と NX」）。**したがってこの API はまだ
-    /// 「書き込めるが実行もできる」ページしか作れず、`W^X` は成立していない。**
-    /// 名前だけ先に使うと、到達していないものを到達したように書くことになる。
+    /// **カーネルの側の権限は、実行しないものに実行禁止のビットが付く**（2026-10-02。`ADR-0071` の手順 4）。
+    /// **ユーザーの側の葉は、まだどれも実行できる**——ユーザーの写像に入れるまでは、ユーザーのページについて
+    /// 「書けるページは実行できない」とは言えない。**言えるのは、カーネルの側の写像ごとの話までである。**
+    /// 同じフレームの別名（直接マッピング）まで含めた話でもない（保留している）。
     ///
     /// # 書けない権限でマップしたページについて、何を主張してよいか
     ///
@@ -572,54 +610,6 @@ impl ActivePageTable {
         virt: VirtAddr,
         phys: PhysAddr,
         permissions: PagePermissions,
-        frames: &mut FrameAllocator<CAP>,
-    ) -> Result<(), MapUpdateError> {
-        // SAFETY: 呼び出し側の契約をそのまま渡す。葉に足すビットは無い。
-        unsafe { self.map_4kib_leaf(virt, phys, permissions, 0, frames) }
-    }
-
-    /// 実行禁止のビット（[`entry::PTE_NO_EXECUTE`]）を付けた、読むだけのカーネルのページを 1 枚足す
-    /// （2026-10-02。**試し専用**）。
-    ///
-    /// **権限の変換は、まだ実行の欄を読まない**ので、このビットを持つ葉を作れるのは、この関数だけである。
-    /// `crate::arch::x86_64::execute_disable_probe` が、BSP と AP の両方で「このビットを持つ項目を引ける
-    /// （`EFER.NXE` が立っている）」ことを確かめるために使う。変換が実行の欄を読むようになったら、この関数は
-    /// 要らなくなる（[`Self::map_4kib`] に、実行しない権限を渡せば同じ葉になる）。
-    ///
-    /// # Safety
-    ///
-    /// [`Self::map_4kib`] と同じ。加えて、**この表を載せるどの CPU でも `EFER.NXE` が立っていること**
-    /// （立っていない CPU がこのページを引くと、予約のビットの違反の `#PF` になる）。
-    pub unsafe fn map_execute_disable_probe<const CAP: usize>(
-        &mut self,
-        virt: VirtAddr,
-        phys: PhysAddr,
-        frames: &mut FrameAllocator<CAP>,
-    ) -> Result<(), MapUpdateError> {
-        // SAFETY: 呼び出し側の契約。権限は読むだけのカーネルのページで、葉に実行禁止のビットを足す。
-        unsafe {
-            self.map_4kib_leaf(
-                virt,
-                phys,
-                PagePermissions::kernel_read_only(),
-                entry::PTE_NO_EXECUTE,
-                frames,
-            )
-        }
-    }
-
-    /// [`Self::map_4kib`] の本体。`extra_leaf_bits` は、変換が決めたビットに加えて葉へ立てるビットである
-    /// （[`Self::map_execute_disable_probe`] だけが 0 でない値を渡す）。
-    ///
-    /// # Safety
-    ///
-    /// [`Self::map_4kib`] と同じ。
-    unsafe fn map_4kib_leaf<const CAP: usize>(
-        &mut self,
-        virt: VirtAddr,
-        phys: PhysAddr,
-        permissions: PagePermissions,
-        extra_leaf_bits: u64,
         frames: &mut FrameAllocator<CAP>,
     ) -> Result<(), MapUpdateError> {
         let _guard = InterruptGuard::enter();
@@ -652,7 +642,7 @@ impl ActivePageTable {
             self.write(
                 pt,
                 pt_index,
-                entry::leaf_entry(phys, permissions, entry::LeafSize::Small) | extra_leaf_bits,
+                entry::leaf_entry(phys, permissions, entry::LeafSize::Small),
             )
         };
         // SAFETY: テーブルの書き換えが終わってから、追加した 1 本を落とす。

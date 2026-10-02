@@ -5,12 +5,13 @@
 //! `table_flags`）。**権限を決める所は、ここの名前つきの関数だけにする。** 欄を直に書かせると、ページを足す所ごとに
 //! 組み合わせが散らばり、どの組み合わせが実際に在るのかを読み取れなくなる。
 //!
-//! # 実行の欄は、まだビットにならない
+//! # 実行の欄は、カーネルの側だけがビットになる
 //!
-//! **`execute` は型に入っているが、x86_64 の変換は手順 4 までこの欄を読まない**（今は、どのページも実行できる）。
-//! 手順 3 は「いまの権限を保つ」段なので、ページテーブルの項目は 1 つも変えない。手順 4 で変えるのは、変換が
-//! `execute` を読むようにすることと、CPU で実行禁止を有効にすることである。**そのとき、ここの名前つきの関数が
-//! 決めた `execute` の値が、そのまま効く。** 値は手順 4 の決定（`ADR-0071` の決定 1 の 4）に合わせてある。
+//! **x86_64 の変換は、カーネルの側（ユーザーから届かない権限）の `execute` を読む**（2026-10-02。`ADR-0071` の
+//! 手順 4）。実行しない権限の葉には、実行禁止のビットが付く。**ユーザーの側の `execute` は、まだ読まない**
+//! （ユーザーのページは、今はどれも実行できる。ユーザーの写像に入れるときに、同じ変換が読むようにする）。
+//! ここの名前つきの関数が決めた `execute` の値が、そのまま効く。値は手順 4 の決定（`ADR-0071` の決定 1 の 4）に
+//! 合わせてある。
 //!
 //! # 純粋な論理
 //!
@@ -32,7 +33,7 @@ pub enum Cache {
 /// - 共通の側と機械の置き場は、ページを足すときに、用途の名前でこの型を作って渡す。ページテーブルのビットへ直すのは
 ///   CPU の置き場である。
 /// - この型は「何を許すか」だけを持つ。大きさ（4KiB か 2MiB か）や物理の番地は持たない。
-/// - `execute` は、手順 4 まではビットにならない（モジュールの doc）。
+/// - `execute` がビットになるのは、今はカーネルの側の権限だけである（モジュールの doc）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PagePermissions {
     write: bool,
@@ -43,13 +44,15 @@ pub struct PagePermissions {
 }
 
 impl PagePermissions {
-    /// カーネルの、書けて実行もできるメモリ。**区画ごとの権限を持たない今のカーネルの像と、起動の表、恒等、
-    /// 直接マッピングの、キャッシュしてよい範囲がこれである。**
+    /// 静的な起動の表の権限。**書けて実行もできる。** **使うのは、起動の表だけである。**
     ///
-    /// **手順 4 で、この名前は分かれる。** カーネルの像は、区画ごとの名前（コード＝読んで実行する、読むだけの
-    /// データ、書けるデータ）に分け、直接マッピングは実行しない名前へ移す。そのときに、この関数を使う所を
-    /// 1 つずつ見直す。
-    pub const fn kernel_unrestricted() -> Self {
+    /// 起動の表は、カーネルの像と恒等の 1GiB を、区画を分けずに 2MiB の葉で写す。BSP が自前の表へ切り替える
+    /// までと、AP がトランポリンを出てから本番の表へ切り替えるまでの、短い間だけ載る（AP のトランポリンは、
+    /// 恒等の側で実行する）。**自前の表には、書けて実行もできる権限は 1 つも無い**——カーネルの像は区画ごとの
+    /// 名前（[`Self::kernel_code`]・[`Self::kernel_read_only`]・[`Self::kernel_data`]）で写し、恒等と
+    /// 直接マッピングは [`Self::kernel_data`] で写す（2026-10-02。以前は `kernel_unrestricted` という名前で、
+    /// 自前の表の像と恒等と直接マッピングもこれだった）。
+    pub const fn boot_table_unrestricted() -> Self {
         Self {
             write: true,
             execute: true,
@@ -59,7 +62,19 @@ impl PagePermissions {
         }
     }
 
-    /// カーネルの、書けるデータ（CPU ごとのスタックなど）。実行はしない。
+    /// カーネルのコード（像の `.text`）。読んで実行する。**書けない。**
+    pub const fn kernel_code() -> Self {
+        Self {
+            write: false,
+            execute: true,
+            user: false,
+            cache: Cache::Cached,
+            shared: false,
+        }
+    }
+
+    /// カーネルの、書けるデータ（像の `.data` と `.bss`、CPU ごとのスタック、直接マッピングと恒等の、キャッシュして
+    /// よい範囲）。実行はしない。
     pub const fn kernel_data() -> Self {
         Self {
             write: true,
@@ -70,8 +85,7 @@ impl PagePermissions {
         }
     }
 
-    /// カーネルの、読むだけのデータ。**今は、起動時の Ring 3 の試しの破壊テストだけが使う**（ユーザーに見せるはずの
-    /// 読み取り専用のページを、カーネル専用でマップする形）。
+    /// カーネルの、読むだけのデータ（像の読むだけの区画、実行禁止のビットを確かめる試しのページ）。実行はしない。
     pub const fn kernel_read_only() -> Self {
         Self {
             write: false,
@@ -134,7 +148,7 @@ impl PagePermissions {
         self.write
     }
 
-    /// 実行できるか（手順 4 までは、ビットにならない）。
+    /// 実行できるか（ビットになるのは、今はカーネルの側の権限だけである）。
     pub const fn execute(self) -> bool {
         self.execute
     }
@@ -163,7 +177,8 @@ mod tests {
     #[test]
     fn the_kernel_side_names_are_never_reachable_from_user_mode() {
         for permissions in [
-            PagePermissions::kernel_unrestricted(),
+            PagePermissions::boot_table_unrestricted(),
+            PagePermissions::kernel_code(),
             PagePermissions::kernel_data(),
             PagePermissions::kernel_read_only(),
             PagePermissions::kernel_device(),
@@ -196,7 +211,7 @@ mod tests {
     fn only_the_device_name_is_uncached() {
         assert_eq!(PagePermissions::kernel_device().cache(), Cache::Uncached);
         for permissions in [
-            PagePermissions::kernel_unrestricted(),
+            PagePermissions::boot_table_unrestricted(),
             PagePermissions::kernel_data(),
             PagePermissions::kernel_read_only(),
             PagePermissions::user_program(true, true),
@@ -207,12 +222,15 @@ mod tests {
         }
     }
 
-    /// **実行できると名乗るのは、今のカーネルの像と、実行できる区画だけである**（手順 4 で効く値）。
+    /// **実行できると名乗るのは、起動の表と、カーネルのコードと、実行できる区画だけである。**
     /// 書けるかは、区画のフラグと、読むだけの名前に従う。
     #[test]
     fn write_and_execute_follow_the_names() {
-        assert!(PagePermissions::kernel_unrestricted().execute());
-        assert!(PagePermissions::kernel_unrestricted().write());
+        assert!(PagePermissions::boot_table_unrestricted().execute());
+        assert!(PagePermissions::boot_table_unrestricted().write());
+        assert!(PagePermissions::kernel_code().execute());
+        assert!(!PagePermissions::kernel_code().write());
+        assert!(!PagePermissions::kernel_read_only().execute());
         assert!(!PagePermissions::kernel_data().execute());
         assert!(!PagePermissions::kernel_device().execute());
         assert!(!PagePermissions::kernel_read_only().write());
@@ -224,5 +242,23 @@ mod tests {
         assert!(!text.write() && text.execute());
         let data = PagePermissions::user_program(true, false);
         assert!(data.write() && !data.execute());
+    }
+
+    /// **カーネルの側で、書けて実行もできるのは、起動の表の名前だけである**（写像ごとの W^X）。
+    #[test]
+    fn only_the_boot_table_name_is_both_writable_and_executable_on_the_kernel_side() {
+        for permissions in [
+            PagePermissions::kernel_code(),
+            PagePermissions::kernel_data(),
+            PagePermissions::kernel_read_only(),
+            PagePermissions::kernel_device(),
+        ] {
+            assert!(
+                !(permissions.write() && permissions.execute()),
+                "{permissions:?}"
+            );
+        }
+        let boot = PagePermissions::boot_table_unrestricted();
+        assert!(boot.write() && boot.execute());
     }
 }

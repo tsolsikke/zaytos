@@ -702,15 +702,23 @@ bsp-enters-with-nxe-clear-test = []
 # AP のトランポリンが LME だけを立て、NXE を立てない（直す前の形。2026-10-02）。
 # AP がトランポリンを出た直後の EFER を BSP が確かめ、NXE が落ちていることを名指しして止まる。
 ap-trampoline-without-nxe-test = []
+# 下の 2 つの傘（単独では使わない）。**実行禁止のビットを持つ葉を、試しのページの 1 枚だけにする**
+# ——権限の変換は実行禁止のビットを立てず、試しのページの葉にだけ、後から足す。
+# NXE を落とした後に、例外の出力（読むだけの区画を引く）まで予約のビットの違反になるのを避けるためである
+# （2026-10-02 の実測。全部の葉が実行禁止のままだと、狙いの #PF の後、行を出せずに #PF を繰り返した）。
+nx-probe-only-leaf-test = []
 # BSP が、実行禁止のビットを付けた試しのページを読む直前に、EFER.NXE を落とす（2026-10-02）。
 # 読んだ時点で、予約のビットの違反の #PF になる（CR2 が試しのページ）。
-nx-probe-bsp-without-nxe-test = []
+nx-probe-bsp-without-nxe-test = ["nx-probe-only-leaf-test"]
 # AP が、実行禁止のビットを付けた試しのページを読む直前に、EFER.NXE を落とす（2026-10-02）。
 # AP の上で、予約のビットの違反の #PF になる。
-nx-probe-ap-without-nxe-test = []
+nx-probe-ap-without-nxe-test = ["nx-probe-only-leaf-test"]
 # AP が、本番のページテーブルへ切り替える前に、EFER.NXE を落とす（2026-10-02）。
 # 切り替える前の確かめが、名前つきで止める。
 ap-switches-without-nxe-test = []
+# 権限の変換が、実行の欄を無視して、実行禁止のビットを立てない（直す前の形。2026-10-02）。
+# 試しのページを足した直後の読み戻しが、実行禁止のビットが付いていないことを名指しして止まる。
+leaf-ignores-execute-test = []
 # その製造元で「分類していない」最初のビットが立っているものとして判定する（2026-09-24。レジスタは
 # 書かない。QEMU の既定の AMD では EFER.SVME）。[WARN] が名前つきで出て、起動は止まらない。
 cpu-state-sees-an-unclassified-bit-test = []

@@ -363,6 +363,20 @@ const CRITICAL_TESTS: &[CriticalTest] = &[
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
+    // **権限の変換が、実行禁止のビットを立てない形**（2026-10-02。実行禁止を入れる前の形）。**試しのページを
+    // 足した直後の読み戻しが、ビットが付いていないことを名指しして止まる**——付いていないページを読んでも、
+    // 何も確かめたことにならないからである。「読めた」の行は出ない。
+    CriticalTest {
+        name: "leaf-ignores-execute",
+        feature: "leaf-ignores-execute-test",
+        expected_markers: &[
+            "bit 63 set = false",
+            "nx-probe: the probe page was mapped without the execute-disable bit",
+        ],
+        forbidden_markers: &["nx-probe: cpu 0 read the probe page", "user-run: hello"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     CriticalTest {
         name: "cpu-state-sees-sce",
         feature: "cpu-state-sees-sce-test",
@@ -30252,7 +30266,7 @@ fn count_elements(text: &str) -> usize {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 60,
-    full: 446,
+    full: 447,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。

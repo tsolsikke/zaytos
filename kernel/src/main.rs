@@ -67,7 +67,7 @@ extern "C" {
 /// 静的な起動の表の権限。**起動の表は、覆う範囲の全部を、書けて実行もできるメモリとしてマップする**
 /// （カーネルの像と、恒等の 1GiB。区画ごとの権限は、本流の表へ切り替えた後のものである）。
 const BOOT_TABLE_PERMISSIONS: kernel::paging::permissions::PagePermissions =
-    kernel::paging::permissions::PagePermissions::kernel_unrestricted();
+    kernel::paging::permissions::PagePermissions::boot_table_unrestricted();
 
 /// 起動の表の、途中の項目のビット（P|RW = 0x03）。**権限の変換が決める**（2026-10-02。以前は、アセンブリに
 /// 直書きしていた）。値が今までと同じことは、`entry` のホストのテストが固定している。
@@ -1577,6 +1577,10 @@ extern "sysv64" fn kernel_main() -> ! {
             &mut allocator,
         );
     }
+
+    // **カーネルの像の区画ごとの権限を、稼働中の表から読み戻して出す**（2026-10-02。`ADR-0071` の手順 4）。
+    // **この後は、カーネルの写像の権限を変えない。**
+    report_kernel_image_permissions(&mut logger);
 
     // === S2-a: APIC のレジスタを読んで現在値を記録する ===
     //
@@ -9612,7 +9616,7 @@ fn verify_ring3_excursion<const CAP: usize>(
     // 破壊テストの形: 同じ 3 枚を、ユーザーから届かない権限でマップする（書けるかは同じ）。
     #[cfg(feature = "ring3-test-user-page-supervisor")]
     let (code, stack, read_only) = (
-        PagePermissions::kernel_unrestricted(),
+        PagePermissions::kernel_code(),
         PagePermissions::kernel_data(),
         PagePermissions::kernel_read_only(),
     );
@@ -11349,6 +11353,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "ファームウェアが EFER.NXE を落として渡す形を BSP で作り、カーネルに立てさせる（破壊ではない）",
     ),
     (
+        "nx-probe-only-leaf-test",
+        cfg!(feature = "nx-probe-only-leaf-test"),
+        "実行禁止のビットを持つ葉を、試しのページの 1 枚だけにする（下の 2 つの傘）",
+    ),
+    (
         "nx-probe-bsp-without-nxe-test",
         cfg!(feature = "nx-probe-bsp-without-nxe-test"),
         "BSP が、実行禁止のビットを付けた試しのページを読む直前に、EFER.NXE を落とす",
@@ -12037,6 +12046,11 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "ap-stacks-uncached-test",
         cfg!(feature = "ap-stacks-uncached-test"),
         "CPU ごとのスタックをキャッシュ無効で写す",
+    ),
+    (
+        "leaf-ignores-execute-test",
+        cfg!(feature = "leaf-ignores-execute-test"),
+        "権限の変換が、実行の欄を無視して、実行禁止のビットを立てない",
     ),
     (
         "user-run-wrong-entry",
@@ -13446,14 +13460,155 @@ fn install_kernel_stack_guard_page(
     }
 }
 
+/// カーネルの像の区画の境を、物理の番地で読む（`kernel/link.ld` の記号から）。
+fn kernel_image_bounds() -> kernel::paging::image::ImageBounds {
+    use common::addr::VirtAddr;
+    let phys = |symbol: *const u8| {
+        kernel::kernel_phys_from_virt(
+            VirtAddr::new(symbol as u64)
+                .expect("the linker places the kernel at a canonical address"),
+        )
+        .as_u64()
+    };
+    kernel::paging::image::ImageBounds {
+        start: phys(core::ptr::addr_of!(__kernel_start)),
+        read_only_start: phys(core::ptr::addr_of!(__rodata_start)),
+        data_start: phys(core::ptr::addr_of!(__data_start)),
+        end: phys(core::ptr::addr_of!(__kernel_end)),
+    }
+}
+
+/// カーネルの像の区画（写す範囲と権限）。**境が写せる形でなければ、名前つきで止まる。**
+fn kernel_image_sections(logger: &mut Logger<Serial>) -> [kernel::paging::image::ImageSection; 3] {
+    let bounds = kernel_image_bounds();
+    match kernel::paging::image::image_sections(bounds) {
+        Ok(sections) => sections,
+        Err(error) => {
+            logger.error(format_args!(
+                "higher-half: the kernel image sections cannot be mapped with their own permissions \
+                 ({error:?}, {bounds:x?}); halting"
+            ));
+            cpu::halt_forever();
+        }
+    }
+}
+
+/// カーネルの像を、区画ごとの権限で高位（`KERNEL_VIRT_BASE + phys`）へマップする。**像を高位へ写すのは、
+/// この関数だけである**（2026-10-02。以前は 3 か所が、像の全部を 1 つの権限で写していた）。
+///
+/// **コードは読んで実行する（書けない）、読むだけの区画は読むだけ、`.data` と `.bss` は書けて実行しない**
+/// （`kernel::paging::image`。`ADR-0071` の手順 4）。区画ごとに範囲を分けて写すので、どの区画も 2MiB に
+/// 満たない今は、像の全部が 4KiB の葉になる（1 枚の 2MiB の葉に、権限の違う区画が同居しない）。
+fn map_kernel_image<const CAP: usize>(
+    builder: &mut PageTableBuilder<'_, CAP>,
+    logger: &mut Logger<Serial>,
+    who: &str,
+) {
+    for section in kernel_image_sections(logger) {
+        let start = common::addr::PhysAddr::new(section.start)
+            .expect("a kernel image address fits in a physical address");
+        let virt = kernel::kernel_virt_from_phys(start);
+        if let Err(e) = builder.map_range(virt, start, section.len(), section.permissions) {
+            logger.error(format_args!(
+                "{who}: kernel image {} mapping ({:#x} -> phys {:#x}, len {:#x}) failed: {e:?}",
+                section.name,
+                virt.as_u64(),
+                section.start,
+                section.len()
+            ));
+            cpu::halt_forever();
+        }
+    }
+}
+
+/// 稼働中の表から、カーネルの像の区画ごとの権限を読み戻して出す（2026-10-02。`ADR-0071` の手順 4）。
+/// **期待と違うページが 1 枚でも在れば、名前つきで止まる。**
+///
+/// **作る側（`map_kernel_image` と権限の変換）とは別に書いた、辿る側の関数で読む**
+/// （`kernel::arch::x86_64::paging::verify`）。見るのは、区画のページの全部について、4KiB の葉であること、
+/// 書けるか、実行できるか、である。
+///
+/// **マップされていないページは、カーネルスタックの見張りのページだけを認める**（`.bss` の中に在り、わざと
+/// 外してある。`install_kernel_stack_guard_page`）。それ以外に抜けが在れば、止まる。
+fn report_kernel_image_permissions(logger: &mut Logger<Serial>) {
+    use kernel::arch::x86_64::paging::verify;
+
+    let direct_map = common::addr::direct_map();
+    let root = paging::switch::active_page_table_root();
+    let mut all_as_intended = true;
+    let guard = stack::kernel_guard_page();
+    for section in kernel_image_sections(logger) {
+        let (mut small, mut large, mut missing, mut guard_pages) = (0u64, 0u64, 0u64, 0u64);
+        let (mut writable, mut executable) = (0u64, 0u64);
+        let mut address = section.start;
+        while address < section.end {
+            let phys = common::addr::PhysAddr::new(address)
+                .expect("a kernel image address fits in a physical address");
+            let virt = kernel::kernel_virt_from_phys(phys);
+            // SAFETY: 根は稼働中の表で、登録済みの直接マッピングを通して配下の表が読める。読むだけである。
+            match unsafe { verify::walk_page_table(root, direct_map, virt) } {
+                Ok(resolved) => {
+                    if resolved.huge {
+                        large += 1;
+                    } else {
+                        small += 1;
+                    }
+                    writable += u64::from(resolved.leaf_writable());
+                    executable += u64::from(resolved.leaf_executable());
+                }
+                Err(_) if guard.contains(virt) => guard_pages += 1,
+                Err(_) => missing += 1,
+            }
+            address += frame_allocator::FRAME_SIZE;
+        }
+        // 見張りのページを除いた、マップされているはずのページ数。
+        let pages = section.pages() - guard_pages;
+        let want_writable = if section.permissions.write() {
+            pages
+        } else {
+            0
+        };
+        // **変換が実行禁止のビットを立てない破壊テストのビルドでは、どのページも実行できる形になる**
+        // （`entry::LEAVES_CARRY_EXECUTE_DISABLE`。実行禁止のビットを持つ葉を、試しのページだけにする形）。
+        // その形でも、ここでは止めない——止めると、AP が試しのページを読む所まで届かない。
+        let want_executable = if section.permissions.execute()
+            || !kernel::arch::x86_64::paging::entry::LEAVES_CARRY_EXECUTE_DISABLE
+        {
+            pages
+        } else {
+            0
+        };
+        let as_intended = missing == 0
+            && large == 0
+            && small == pages
+            && writable == want_writable
+            && executable == want_executable;
+        all_as_intended &= as_intended;
+        logger.info(format_args!(
+            "kernel-image: {} {:#x}..{:#x}: {} page(s), {small} mapped by a 4KiB leaf, {large} by a \
+             2MiB leaf, {guard_pages} left out as the stack guard page, {missing} missing; \
+             {writable} writable, {executable} executable; as intended (write={} execute={}) = \
+             {as_intended} [read back from the live table]",
+            section.name,
+            kernel::link_symbols::KERNEL_VIRT_BASE + section.start,
+            kernel::link_symbols::KERNEL_VIRT_BASE + section.end,
+            section.pages(),
+            section.permissions.write(),
+            section.permissions.execute()
+        ));
+    }
+    if !all_as_intended {
+        logger.error(format_args!(
+            "kernel-image: a section of the kernel image is not mapped with its own permissions; halting"
+        ));
+        cpu::halt_forever();
+    }
+}
+
 /// kernel イメージを高位（`KERNEL_VIRT_BASE + phys`）へマップする（B-2a）。
 ///
-/// M2-d・A-1 の両テーブルで共通に使う。base=0 では、ビルダーが既に恒等でマップした 4KiB PT を
-/// 同一物理・同一フラグで上書きするだけで冪等になる（新規フレーム 0）。イメージは
-/// `[0x100000, 0x200000)` の 4KiB 領域に収まるので、2MiB huge との衝突（`ensure_child` の
-/// `UnexpectedHugePageEntry`）は起きない。base=高位（B-2a-3）では `PML4[511]` 配下に実
-/// マッピングを作り、再リンク後にこのテーブルへ CR3 を切り替えても高位で走るコードが
-/// 見え続けるようにする。丸めは 4KiB（H-2 と同一。要確認1）。
+/// M2-d・A-1 の両テーブルで共通に使う。**区画ごとの権限で写すのは [`map_kernel_image`] である。**
+/// ここは、使った表のフレームの数を数えて、起動ログへ出す。
 fn map_kernel_high_half<const CAP: usize>(
     builder: &mut PageTableBuilder<'_, CAP>,
     logger: &mut Logger<Serial>,
@@ -13462,24 +13617,9 @@ fn map_kernel_high_half<const CAP: usize>(
     let image_len =
         (image_end.as_u64() - image_start.as_u64()).next_multiple_of(frame_allocator::FRAME_SIZE);
     let high_start = kernel::kernel_virt_from_phys(image_start);
-    // 高位マッピングが消費した中間テーブルのフレーム数を会計する。base=0 では恒等が
-    // 既にマップした PT を上書きするだけなので 0 のはずで、それをログで確かめる。base=高位
-    // （B-2a-3）では PML4[511] 配下の新規部分木の分だけ増える。
+    // 高位マッピングが消費した中間テーブルのフレーム数を会計する（`PML4[511]` 配下の新規部分木の分）。
     let frames_before = builder.frames_used();
-    if let Err(e) = builder.map_range(
-        high_start,
-        image_start,
-        image_len,
-        kernel::paging::permissions::PagePermissions::kernel_unrestricted(),
-    ) {
-        logger.error(format_args!(
-            "higher-half: kernel high mapping ({:#x} -> phys {:#x}, len {:#x}) failed: {e:?}",
-            high_start.as_u64(),
-            image_start.as_u64(),
-            image_len
-        ));
-        cpu::halt_forever();
-    }
+    map_kernel_image(builder, logger, "higher-half");
     let high_frames = builder.frames_used() - frames_before;
     logger.info(format_args!(
         "higher-half: kernel image {:#x}..{:#x} mapped at {:#x} (len {:#x}), \
@@ -13555,17 +13695,7 @@ fn build_and_verify_high_half(
     let image_len = image_end.as_u64() - image_start.as_u64();
     let image_len = image_len.next_multiple_of(frame_allocator::FRAME_SIZE);
     let high_start = kernel::kernel_virt_from_phys(image_start);
-    if let Err(error) = builder.map_range(
-        high_start,
-        image_start,
-        image_len,
-        kernel::paging::permissions::PagePermissions::kernel_unrestricted(),
-    ) {
-        logger.error(format_args!(
-            "high-half: kernel high mapping failed: {error:?}"
-        ));
-        cpu::halt_forever();
-    }
+    map_kernel_image(&mut builder, logger, "high-half");
 
     let new_pml4 = builder.root();
     let frames_used = frames_before - allocator.free_frame_count();

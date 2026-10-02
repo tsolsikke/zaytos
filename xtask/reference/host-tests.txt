@@ -346,10 +346,11 @@ kernel::arch::x86_64::paging::entry::tests::split_moves_the_pat_bit_from_twelve_
 kernel::arch::x86_64::paging::entry::tests::split_preserves_the_cache_attributes
 kernel::arch::x86_64::paging::entry::tests::split_produces_four_kib_pages_covering_the_same_range
 kernel::arch::x86_64::paging::entry::tests::split_without_pat_leaves_bit_seven_clear
+kernel::arch::x86_64::paging::entry::tests::splitting_keeps_the_execute_disable_bit_on_the_leaves_only
 kernel::arch::x86_64::paging::entry::tests::the_bits_below_a_huge_page_address_are_twelve_to_twenty
 kernel::arch::x86_64::paging::entry::tests::the_boot_table_literals_are_what_the_conversion_gives
 kernel::arch::x86_64::paging::entry::tests::the_children_cover_the_same_physical_range_without_gaps
-kernel::arch::x86_64::paging::entry::tests::the_execute_field_does_not_reach_the_bits_yet
+kernel::arch::x86_64::paging::entry::tests::the_execute_field_reaches_the_bits_on_the_kernel_side_only
 kernel::arch::x86_64::paging::entry::tests::the_indices_decompose_a_known_address
 kernel::arch::x86_64::paging::entry::tests::the_parent_entry_does_not_inherit_the_cache_attributes
 kernel::arch::x86_64::paging::entry::tests::the_parent_entry_inherits_the_user_bit
@@ -651,6 +652,12 @@ kernel::page_survey::tests::regions_skip_empty_ranges_retire_by_name_and_count_w
 kernel::page_survey::tests::rows_past_the_limit_are_counted_and_a_range_ending_at_the_top_does_not_overflow
 kernel::page_survey::tests::the_digest_ignores_row_order_and_follows_permissions_and_counted_pages
 kernel::page_survey::tests::the_narrowest_region_wins_and_a_mapping_in_an_absent_region_is_marked
+kernel::paging::image::tests::a_boundary_inside_a_page_is_refused
+kernel::paging::image::tests::boundaries_out_of_order_and_empty_sections_are_refused
+kernel::paging::image::tests::no_section_is_both_writable_and_executable
+kernel::paging::image::tests::the_measured_image_splits_into_code_read_only_and_data
+kernel::paging::image::tests::the_sections_cover_the_image_without_a_gap_or_an_overlap
+kernel::paging::permissions::tests::only_the_boot_table_name_is_both_writable_and_executable_on_the_kernel_side
 kernel::paging::permissions::tests::only_the_device_name_is_uncached
 kernel::paging::permissions::tests::the_kernel_side_names_are_never_reachable_from_user_mode
 kernel::paging::permissions::tests::the_user_side_names_are_reachable_and_only_the_shared_one_is_marked

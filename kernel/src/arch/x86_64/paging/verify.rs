@@ -39,6 +39,8 @@ mod bits {
     pub const ADDR_4K: u64 = 0x000F_FFFF_FFFF_F000;
     /// 2MiB ページのアドレス部分（ビット 21-51）。
     pub const ADDR_2M: u64 = 0x000F_FFFF_FFE0_0000;
+    /// 実行の禁止。立っていれば、そのページの命令は実行できない（2026-10-02。walk の結果を読むメソッドのために足した）。
+    pub const NO_EXECUTE: u64 = 1 << 63;
 }
 
 /// 独立 walk の結果。
@@ -64,6 +66,14 @@ impl Resolved {
     /// **見るのは葉だけである**——書けるかは、途中の段のビットも揃って初めて決まる（x86）。
     pub const fn leaf_writable(&self) -> bool {
         self.entry & bits::WRITABLE != 0
+    }
+
+    /// 葉のエントリが実行を許すか（x86 では、実行禁止のビットが立っていないこと。2026-10-02）。
+    ///
+    /// **見るのは葉だけである**——途中の段に実行禁止が立っていれば実行できないが、途中の段には立てない
+    /// （`entry::table_flags`）。
+    pub const fn leaf_executable(&self) -> bool {
+        self.entry & bits::NO_EXECUTE == 0
     }
 
     /// 葉のエントリがユーザーから触れる印を持つか（x86 では U/S ビット。2026-09-30）。

@@ -84,10 +84,29 @@ pub unsafe fn map_execute_disable_probe<const CAP: usize>(
     }
     // SAFETY: 呼び出し側の契約。稼働中の表へ、まだ誰も使っていない番地をマップする。
     let mut table = unsafe { ActivePageTable::current(direct_map) };
+    // **読むだけの権限でマップする。** 実行しない権限なので、変換が実行禁止のビットを付ける（2026-10-02。
+    // 以前は、変換が実行の欄を読まなかったので、このページ専用の入口でビットを足していた）。
     // SAFETY: 同上。BSP の NXE は立っている（呼び出し側の契約）。AP は、トランポリンで NXE を立ててから来る。
-    if let Err(error) = unsafe { table.map_execute_disable_probe(virt, frame, allocator) } {
+    if let Err(error) = unsafe {
+        table.map_4kib(
+            virt,
+            frame,
+            crate::paging::permissions::PagePermissions::kernel_read_only(),
+            allocator,
+        )
+    } {
         logger.error(format_args!(
             "nx-probe: could not map the probe page: {error:?}; halting"
+        ));
+        common::arch::x86_64::cpu::halt_forever();
+    }
+    // 破壊テストの傘 (2026-10-02, nx-probe-only-leaf): 変換が実行禁止のビットを立てないビルドなので、試しのページの
+    // 葉にだけ、ここで足す。**実行禁止のビットを持つ葉が、このページの 1 枚だけになる。**
+    #[cfg(feature = "nx-probe-only-leaf-test")]
+    // SAFETY: いまマップした、4KiB の葉の読むだけのページである。実行はしない。
+    if let Err(error) = unsafe { table.mark_leaf_execute_disable(virt) } {
+        logger.error(format_args!(
+            "nx-probe: could not mark the probe page: {error:?}; halting"
         ));
         common::arch::x86_64::cpu::halt_forever();
     }
