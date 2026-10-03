@@ -2103,13 +2103,29 @@ fn main() -> Result<()> {
                     )?,
                     None => &PAGE_PERMISSIONS_SCENES[0],
                 };
-                return cmd_page_permissions(scene, &sabotage, update_reference);
+                if sabotage.is_empty() {
+                    return cmd_page_permissions(scene, &sabotage, update_reference);
+                }
+                let result = cmd_page_permissions(scene, &sabotage, update_reference);
+                return finish_direct_sabotage(
+                    "page permissions",
+                    &sabotage,
+                    SabotageForm::Falls,
+                    result,
+                );
             }
             if let Some(index) = rest.iter().position(|a| a == "--boot-marker-sabotage") {
                 let Some(feature) = rest.get(index + 1) else {
                     bail!("--boot-marker-sabotage needs a feature\n\n{USAGE}");
                 };
-                return cmd_boot_marker_sabotage(feature);
+                // **検査の名前は全検査と同じにする**（表は検査の名前と鍵の組で引く）。
+                let check = match feature.as_str() {
+                    "ext2-sparse-as-error-test" => "sparse read",
+                    "user-load-filesz-only" => "bss mapping",
+                    _ => "boot marker",
+                };
+                let result = cmd_boot_marker_sabotage(feature);
+                return finish_direct_sabotage(check, &[feature], SabotageForm::Falls, result);
             }
             if rest.iter().any(|a| a == "--fs-extract") {
                 let features: Vec<&str> = rest
@@ -2118,7 +2134,16 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                return cmd_fs_image_extract(&features);
+                if features.is_empty() {
+                    return cmd_fs_image_extract(&features);
+                }
+                let result = cmd_fs_image_extract(&features);
+                return finish_direct_sabotage(
+                    fs_extract_check_for(&features),
+                    &features,
+                    SabotageForm::Falls,
+                    result,
+                );
             }
             if rest.iter().any(|a| a == "--view-test") {
                 let features: Vec<&str> = rest
@@ -2127,7 +2152,11 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                return cmd_view_test(&features);
+                if features.is_empty() {
+                    return cmd_view_test(&features);
+                }
+                let result = cmd_view_test(&features);
+                return finish_direct_sabotage("view test", &features, SabotageForm::Falls, result);
             }
             if rest.iter().any(|a| a == "--zi-test") {
                 let features: Vec<&str> = rest
@@ -2136,7 +2165,11 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                return cmd_zi_test(&features);
+                if features.is_empty() {
+                    return cmd_zi_test(&features);
+                }
+                let result = cmd_zi_test(&features);
+                return finish_direct_sabotage("zi test", &features, SabotageForm::Falls, result);
             }
             if rest.iter().any(|a| a == "--ansi-test") {
                 let features: Vec<&str> = rest
@@ -2145,7 +2178,11 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                return cmd_ansi_test(&features);
+                if features.is_empty() {
+                    return cmd_ansi_test(&features);
+                }
+                let result = cmd_ansi_test(&features);
+                return finish_direct_sabotage("ansi test", &features, SabotageForm::Falls, result);
             }
             if rest.iter().any(|a| a == "--pci-test") {
                 let features: Vec<&str> = rest
@@ -2154,7 +2191,16 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                return cmd_pci_test(&features);
+                if features.is_empty() {
+                    return cmd_pci_test(&features);
+                }
+                let result = cmd_pci_test(&features);
+                return finish_direct_sabotage(
+                    "pci enumeration",
+                    &features,
+                    SabotageForm::Falls,
+                    result,
+                );
             }
             if rest.iter().any(|a| a == "--virtio-irq-test") {
                 let features: Vec<&str> = rest
@@ -2163,7 +2209,16 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                return cmd_virtio_irq_test(&features);
+                if features.is_empty() {
+                    return cmd_virtio_irq_test(&features);
+                }
+                let result = cmd_virtio_irq_test(&features);
+                return finish_direct_sabotage(
+                    "virtio irq",
+                    &features,
+                    SabotageForm::Falls,
+                    result,
+                );
             }
             if rest.iter().any(|a| a == "--virtio-test") {
                 let features: Vec<&str> = rest
@@ -2172,7 +2227,16 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                return cmd_virtio_test(&features);
+                if features.is_empty() {
+                    return cmd_virtio_test(&features);
+                }
+                let result = cmd_virtio_test(&features);
+                return finish_direct_sabotage(
+                    "virtio blk read",
+                    &features,
+                    SabotageForm::Falls,
+                    result,
+                );
             }
             if rest.iter().any(|a| a == "--shell-test") {
                 // **破壊テストを 1 つだけ実行する入口（f-2）。**
@@ -2209,7 +2273,16 @@ fn main() -> Result<()> {
                     None if rest.iter().any(|a| a == "--drop-esc") => ShellTestMode::EscDropped,
                     None => ShellTestMode::Normal,
                 };
-                return cmd_shell_test(mode);
+                let Some(feature) = sabotage else {
+                    return cmd_shell_test(mode);
+                };
+                let result = cmd_shell_test(mode);
+                return finish_direct_sabotage(
+                    "shell test",
+                    &[feature],
+                    SabotageForm::Inverted,
+                    result,
+                );
             }
             // **持ち越しの判定（P-a）。**
             if rest.iter().any(|a| a == "--utf8-test") {
@@ -2219,8 +2292,16 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                let expect_pass = sabotage.is_empty();
-                return cmd_utf8_test(&sabotage, expect_pass);
+                if sabotage.is_empty() {
+                    return cmd_utf8_test(&sabotage, true);
+                }
+                let result = cmd_utf8_test(&sabotage, false);
+                return finish_direct_sabotage(
+                    "utf8 test",
+                    &sabotage,
+                    SabotageForm::Inverted,
+                    result,
+                );
             }
             // **FP の状態の判定（B-a。`ADR-0058`）。**
             if rest.iter().any(|a| a == "--fp-test") {
@@ -2230,8 +2311,16 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                let expect_pass = sabotage.is_empty();
-                return cmd_fp_test(&sabotage, expect_pass);
+                if sabotage.is_empty() {
+                    return cmd_fp_test(&sabotage, true);
+                }
+                let result = cmd_fp_test(&sabotage, false);
+                return finish_direct_sabotage(
+                    "fp test",
+                    &sabotage,
+                    SabotageForm::Inverted,
+                    result,
+                );
             }
             // **2 本の Ring 3 を同時に走らせる判定（W1-c-4。`ADR-0060`）。**
             if rest.iter().any(|a| a == "--concurrent-test") {
@@ -2241,8 +2330,16 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                let expect_pass = sabotage.is_empty();
-                return cmd_concurrent_test(&sabotage, expect_pass);
+                if sabotage.is_empty() {
+                    return cmd_concurrent_test(&sabotage, true);
+                }
+                let result = cmd_concurrent_test(&sabotage, false);
+                return finish_direct_sabotage(
+                    "concurrent test",
+                    &sabotage,
+                    SabotageForm::Inverted,
+                    result,
+                );
             }
             // **フォントをイメージから読み、Ring 3 で 1 文字ラスタライズする判定（B-d）。**
             if rest.iter().any(|a| a == "--ttf-test") {
@@ -2252,8 +2349,16 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                let expect_pass = sabotage.is_empty();
-                return cmd_ttf_test(&sabotage, expect_pass);
+                if sabotage.is_empty() {
+                    return cmd_ttf_test(&sabotage, true);
+                }
+                let result = cmd_ttf_test(&sabotage, false);
+                return finish_direct_sabotage(
+                    "ttf test",
+                    &sabotage,
+                    SabotageForm::Inverted,
+                    result,
+                );
             }
             // **シリアルの排他の判定（シリアルの排他の段階）。**
             if rest.iter().any(|a| a == "--serial-test") {
@@ -2270,7 +2375,16 @@ fn main() -> Result<()> {
                     features.push(SERIAL_REOPEN_FEATURE);
                 }
                 features.extend_from_slice(&sabotage);
-                return cmd_serial_test(&features, expect_pass);
+                if expect_pass {
+                    return cmd_serial_test(&features, true);
+                }
+                let result = cmd_serial_test(&features, false);
+                return finish_direct_sabotage(
+                    "serial test",
+                    &sabotage,
+                    SabotageForm::Inverted,
+                    result,
+                );
             }
             // **Tab の補完の判定（TAB-1）。**
             if rest.iter().any(|a| a == "--complete-test") {
@@ -2280,8 +2394,16 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                let expect_pass = sabotage.is_empty();
-                return cmd_complete_test(&sabotage, expect_pass);
+                if sabotage.is_empty() {
+                    return cmd_complete_test(&sabotage, true);
+                }
+                let result = cmd_complete_test(&sabotage, false);
+                return finish_direct_sabotage(
+                    "complete test",
+                    &sabotage,
+                    SabotageForm::Inverted,
+                    result,
+                );
             }
             // **履歴の持ち越しの判定（HI-1）。**
             // **`--shell-test` の台本を台本のグループで実行する（`ADR-0063` の (b3) の (b)）。**
@@ -2309,7 +2431,16 @@ fn main() -> Result<()> {
                     }
                     None => ShellTestMode::ScriptNormal,
                 };
-                return cmd_shell_script_test(mode);
+                let Some(feature) = sabotage else {
+                    return cmd_shell_script_test(mode);
+                };
+                let result = cmd_shell_script_test(mode);
+                return finish_direct_sabotage(
+                    "shell script test",
+                    &[feature],
+                    SabotageForm::Inverted,
+                    result,
+                );
             }
             // **シェルの `|` の判定（`ADR-0063` の (b3)）。台本のグループである。**
             if rest.iter().any(|a| a == "--pipe-test") {
@@ -2319,8 +2450,16 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                let expect_pass = sabotage.is_empty();
-                return cmd_pipe_test(&sabotage, expect_pass);
+                if sabotage.is_empty() {
+                    return cmd_pipe_test(&sabotage, true);
+                }
+                let result = cmd_pipe_test(&sabotage, false);
+                return finish_direct_sabotage(
+                    "pipe test",
+                    &sabotage,
+                    SabotageForm::Inverted,
+                    result,
+                );
             }
             // **unix ドメインのストリームソケットの判定（`ADR-0064`）。台本のグループである。**
             if rest.iter().any(|a| a == "--socket-test") {
@@ -2330,8 +2469,16 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                let expect_pass = sabotage.is_empty();
-                return cmd_socket_test(&sabotage, expect_pass);
+                if sabotage.is_empty() {
+                    return cmd_socket_test(&sabotage, true);
+                }
+                let result = cmd_socket_test(&sabotage, false);
+                return finish_direct_sabotage(
+                    "socket test",
+                    &sabotage,
+                    SabotageForm::Inverted,
+                    result,
+                );
             }
             // **入力の生イベントの fd の判定（`ADR-0066` の Y-a）。`sendkey` で本物の打鍵を送る。**
             if rest.iter().any(|a| a == "--input-test") {
@@ -2341,8 +2488,16 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                let expect_pass = sabotage.is_empty();
-                return cmd_input_test(&sabotage, expect_pass);
+                if sabotage.is_empty() {
+                    return cmd_input_test(&sabotage, true);
+                }
+                let result = cmd_input_test(&sabotage, false);
+                return finish_direct_sabotage(
+                    "input test",
+                    &sabotage,
+                    SabotageForm::Inverted,
+                    result,
+                );
             }
             // **入力とソケットを同時に待つ判定（`ADR-0066` の Y-b）。`sendkey` で本物の打鍵を送る。**
             if rest.iter().any(|a| a == "--poll-test") {
@@ -2352,8 +2507,16 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                let expect_pass = sabotage.is_empty();
-                return cmd_poll_test(&sabotage, expect_pass);
+                if sabotage.is_empty() {
+                    return cmd_poll_test(&sabotage, true);
+                }
+                let result = cmd_poll_test(&sabotage, false);
+                return finish_direct_sabotage(
+                    "poll test",
+                    &sabotage,
+                    SabotageForm::Inverted,
+                    result,
+                );
             }
             // **画面へ画素を出す判定（`ADR-0066` の Y-c）。`screendump` で画面を読み戻す。**
             if rest.iter().any(|a| a == "--screen-test") {
@@ -2363,8 +2526,16 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                let expect_pass = sabotage.is_empty();
-                return cmd_screen_test(&sabotage, expect_pass);
+                if sabotage.is_empty() {
+                    return cmd_screen_test(&sabotage, true);
+                }
+                let result = cmd_screen_test(&sabotage, false);
+                return finish_direct_sabotage(
+                    "screen test",
+                    &sabotage,
+                    SabotageForm::Inverted,
+                    result,
+                );
             }
             // **画面・入力・ソケット・共有メモリを 1 つの組で通す判定（`ADR-0066` の Y-d）。**
             // **書く側の上限を確かめる項目を単独で実行する**（2026-09-24。`--full` と同じ関数）。
@@ -2445,8 +2616,16 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                let expect_pass = sabotage.is_empty();
-                return cmd_compose_test(&sabotage, expect_pass);
+                if sabotage.is_empty() {
+                    return cmd_compose_test(&sabotage, true);
+                }
+                let result = cmd_compose_test(&sabotage, false);
+                return finish_direct_sabotage(
+                    "compose test",
+                    &sabotage,
+                    SabotageForm::Inverted,
+                    result,
+                );
             }
             if rest.iter().any(|a| a == "--history-test") {
                 let sabotage: Vec<&str> = rest
@@ -2455,8 +2634,16 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                let expect_pass = sabotage.is_empty();
-                return cmd_history_test(&sabotage, expect_pass);
+                if sabotage.is_empty() {
+                    return cmd_history_test(&sabotage, true);
+                }
+                let result = cmd_history_test(&sabotage, false);
+                return finish_direct_sabotage(
+                    "history test",
+                    &sabotage,
+                    SabotageForm::Inverted,
+                    result,
+                );
             }
             // **起動時の設定の判定（PR-1）。**
             if rest.iter().any(|a| a == "--profile-test") {
@@ -2466,23 +2653,75 @@ fn main() -> Result<()> {
                     .filter(|(i, a)| *a == "--sabotage" && rest.get(i + 1).is_some())
                     .filter_map(|(i, _)| rest.get(i + 1).map(|s| s.as_str()))
                     .collect();
-                let expect_pass = sabotage.is_empty();
-                return cmd_profile_test(&sabotage, expect_pass);
+                if sabotage.is_empty() {
+                    return cmd_profile_test(&sabotage, true);
+                }
+                let result = cmd_profile_test(&sabotage, false);
+                return finish_direct_sabotage(
+                    "profile test",
+                    &sabotage,
+                    SabotageForm::Inverted,
+                    result,
+                );
             }
             if rest.iter().any(|a| a == "--keymap-test") {
-                return cmd_keymap_test(rest.iter().any(|a| a == "--sabotage"));
+                if !rest.iter().any(|a| a == "--sabotage") {
+                    return cmd_keymap_test(false);
+                }
+                // **鍵は全検査の項目の文脈の名前である**（[`SABOTAGE_JUDGEMENTS`] の `keymap` の行）。
+                let result = cmd_keymap_test(true);
+                return finish_direct_sabotage(
+                    "keymap",
+                    &["keymap (us, always jis)"],
+                    SabotageForm::Inverted,
+                    result,
+                );
             }
+            // **永続の 3 つの破壊の形（`--rebuild-between`・`--ignore-file`）も、全検査と同じ判定を通す**（2026-10-03。
+            // `--sabotage` ではないが、直に打つ破壊テストである。鍵は全検査の項目の文脈の名前）。
             if rest.iter().any(|a| a == "--persist-env-test") {
-                return cmd_persist_env_test(
-                    rest.iter().any(|a| a == "--rebuild-between"),
-                    rest.iter().any(|a| a == "--ignore-file"),
+                let rebuild = rest.iter().any(|a| a == "--rebuild-between");
+                let ignore = rest.iter().any(|a| a == "--ignore-file");
+                let result = cmd_persist_env_test(rebuild, ignore);
+                let key = match (rebuild, ignore) {
+                    (false, false) => return result,
+                    (true, _) => "persist (env, rebuilt in between)",
+                    (false, true) => "persist (env, the source is ignored)",
+                };
+                return finish_direct_sabotage(
+                    "persist (env)",
+                    &[key],
+                    SabotageForm::Inverted,
+                    result,
                 );
             }
             if rest.iter().any(|a| a == "--persist-zi-test") {
-                return cmd_persist_zi_test(rest.iter().any(|a| a == "--rebuild-between"));
+                if !rest.iter().any(|a| a == "--rebuild-between") {
+                    return cmd_persist_zi_test(false);
+                }
+                let result = cmd_persist_zi_test(true);
+                return finish_direct_sabotage(
+                    "persist",
+                    &["zi, rebuilt in between"],
+                    SabotageForm::InvertedPersist {
+                        key: "persist-zi-test rebuild-between",
+                    },
+                    result,
+                );
             }
             if rest.iter().any(|a| a == "--persist-test") {
-                return cmd_persist_test(rest.iter().any(|a| a == "--rebuild-between"));
+                if !rest.iter().any(|a| a == "--rebuild-between") {
+                    return cmd_persist_test(false);
+                }
+                let result = cmd_persist_test(true);
+                return finish_direct_sabotage(
+                    "persist",
+                    &["rebuilt in between"],
+                    SabotageForm::InvertedPersist {
+                        key: "persist-test rebuild-between",
+                    },
+                    result,
+                );
             }
             if rest.iter().any(|a| a == "--tool-checks") {
                 return cmd_tool_checks();
@@ -7035,26 +7274,33 @@ fn judgement_verdict(
     let reason = error.map(|error| format!("{error:#}")).unwrap_or_default();
     let output = strip_ansi(output);
     let reason_line = strip_ansi(&reason).replace('\n', " ");
-    let found = output
-        .lines()
-        .chain(std::iter::once(reason_line.as_str()))
-        .any(|line| named.signs.iter().all(|piece| line.contains(piece)));
+    let lines = || output.lines().chain(std::iter::once(reason_line.as_str()));
+    let found = lines().any(|line| named.signs.iter().all(|piece| line.contains(piece)));
     if found {
-        SabotageVerdict::CaughtByTheJudgement {
+        return SabotageVerdict::CaughtByTheJudgement {
             sign,
             note: named.note,
             reached: named.reached,
-        }
-    } else {
-        SabotageVerdict::MissedTheJudgement {
-            sign,
-            why: if reason.is_empty() {
-                "the run reported the catch without it".to_string()
-            } else {
-                format!("the run failed otherwise: {reason}")
-            },
-        }
+        };
     }
+    // **しるしが 1 つずつなら出ているが、同じ行には出ていない形を見分ける**（2026-10-03）——**表に別々の行の断片を
+    // 並べた誤りである**（2026-10-02 に全検査で踏んだ。`NamedJudgement::signs` の doc）。**直に打つ実行がこの判定を
+    // 通るようになったので、その場でこの文が出る。**
+    let each_on_its_own_line = named.signs.len() > 1
+        && named
+            .signs
+            .iter()
+            .all(|piece| lines().any(|line| line.contains(piece)));
+    let why = if each_on_its_own_line {
+        "each sign appears somewhere in the output, but never all on the same line (the signs must \
+         be pieces of one line; do not list pieces of different lines)"
+            .to_string()
+    } else if reason.is_empty() {
+        "the run reported the catch without it".to_string()
+    } else {
+        format!("the run failed otherwise: {reason}")
+    };
+    SabotageVerdict::MissedTheJudgement { sign, why }
 }
 
 /// 破壊テストの実行の判定（5.b。2026-09-25）。
@@ -7228,11 +7474,16 @@ static ANY_JUDGEMENT_VERDICTS: std::sync::Mutex<
 /// 絞る段）。**表（[`SABOTAGE_JUDGEMENTS`]）に検査と破壊テストの組が在れば、その判定が偽になったときだけ検出した
 /// とする。** **無ければ「どれかの判定が偽」として数える**（[`caught_by_any_judgement`]）。
 fn report_inverted_judgement(check: &str, key: &str, label: &str, failed: &mut Failures) {
-    if failed_on_the_run_side(label, check, &[key], failed) {
+    report_inverted_judgement_for(check, &[key], label, failed);
+}
+
+/// [`report_inverted_judgement`] の、鍵を複数で引く形（2026-10-03。直に打つ入口が `--sabotage` を複数受けるので）。
+fn report_inverted_judgement_for(check: &str, keys: &[&str], label: &str, failed: &mut Failures) {
+    if failed_on_the_run_side(label, check, keys, failed) {
         return;
     }
     let ok = format!("--- {label}: OK");
-    let Some(named) = named_judgement_for(check, &[key]) else {
+    let Some(named) = named_judgement_for(check, keys) else {
         caught_by_any_judgement(check, &ok);
         return;
     };
@@ -7550,6 +7801,90 @@ fn report_sabotage_verdict(
             );
             failed.push(name);
         }
+    }
+}
+
+/// 直に打つ破壊テストが、全検査でどの形で判定されるか（2026-10-03）。
+enum SabotageForm {
+    /// 検査の関数が `Err` で落ちるのが検出（[`report_sabotage_verdict`]）。
+    Falls,
+    /// 検査の関数が自分の判定を反転させ、`Ok` が検出（[`report_inverted_judgement_for`]）。
+    Inverted,
+    /// 反転させる永続の形（[`report_inverted_sabotage_verdict`]。鍵は項目の文脈の名前）。
+    InvertedPersist { key: &'static str },
+}
+
+/// 直に打つ破壊テスト（`cargo xtask run --<検査> --sabotage <feature>`）の終わり方（2026-10-03）。**全検査と同じ判定の
+/// 関数を通し、狙いの判定で捕まったときだけ `Ok`（終了の値 0）で終わる。**
+///
+/// **以前は、検査の関数の結果をそのまま返していた**——落ちる形なら「どの理由でも落ちれば 0 でない値」、反転させる形なら
+/// 「どれかの判定が偽なら 0」で、**表（[`SABOTAGE_JUDGEMENTS`]・[`SABOTAGE_STOP_REASONS`]）のしるしも、実行の側の理由
+/// （期限・ログの上限・検査装置の故障）も見ていなかった。** **直に打って「通った」と読んだ破壊テストが、全検査で 2 度
+/// 落ちた**（2026-10-01 と 10-02。`docs/verification-coverage.md` の「全検査に破壊テストの項目を足すときの確かめ」）。
+///
+/// **出す行は全検査と同じ形である**（`--- <検査> (<feature>): OK (...)` か `FAILED (...)`）。**落ちたら、その行の
+/// 後に `Err` で終わる。** **`check` は全検査がその破壊テストに使う検査の名前と同じにする**——**表は検査の名前と鍵の組で
+/// 引く**（同じ鍵を別の検査が別の判定で見る。`NamedJudgement::check` の doc）。
+fn finish_direct_sabotage(
+    check: &str,
+    keys: &[&str],
+    form: SabotageForm,
+    result: Result<()>,
+) -> Result<()> {
+    let label = keys.join(" + ");
+    let name = format!("{check} ({label})");
+    let mut failed = Failures::default();
+    match form {
+        SabotageForm::Falls => {
+            report_sabotage_verdict(check, &label, keys, &result, &mut failed);
+        }
+        SabotageForm::Inverted => match &result {
+            Ok(()) => report_inverted_judgement_for(check, keys, &name, &mut failed),
+            Err(error) => {
+                println!(
+                    "--- {name}: FAILED [{}] ({error:#})",
+                    failure_category(error)
+                );
+                failed.push(name.clone());
+            }
+        },
+        SabotageForm::InvertedPersist { key } => {
+            report_inverted_sabotage_verdict(check, &label, key, &result, &mut failed);
+        }
+    }
+    if failed.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "{name}: the sabotage was not caught the way the full check judges it (the FAILED line \
+         above says why)"
+    )
+}
+
+/// `--fs-extract --sabotage` の feature が、全検査でどの検査の名前で判定されるか（2026-10-03）。**全検査は、
+/// fs の破壊テストを一覧ごとに別の検査の名前で判定する**（`fs create`・`fs mkdir`・…）。**どの一覧にも無ければ
+/// `fs extract`。**
+fn fs_extract_check_for(features: &[&str]) -> &'static str {
+    let listed = |list: &[(&str, &[&str])]| list.iter().any(|(_, listed)| *listed == features);
+    if listed(FS_CREATE_SABOTAGES) {
+        "fs create"
+    } else if listed(FS_MKDIR_SABOTAGES) {
+        "fs mkdir"
+    } else if listed(FS_TRUNCATE_SABOTAGES) {
+        "fs truncate"
+    } else if listed(FS_WRITE_SABOTAGES) {
+        "fs write"
+    } else if listed(FS_BITMAP_SABOTAGES) {
+        "fs bitmap"
+    } else if listed(FS_FLUSH_SABOTAGES) {
+        "fs image flush"
+    } else if FS_LOAD_SABOTAGES
+        .iter()
+        .any(|(_, feature)| features == [*feature])
+    {
+        "fs image load"
+    } else {
+        "fs extract"
     }
 }
 
@@ -14601,6 +14936,21 @@ const FS_LOAD_SABOTAGES: &[(&str, &str)] = &[
     // **`fs-load-from-embedded-test` は P-e で消した。** **埋め込みイメージを外したので、
     // 装置以外の出どころが無い**——**戻す先が無い**（`ADR-0034` の Addendum）。
     ("a skipped first chunk", "virtio-load-skip-first-test"),
+];
+
+/// 書き戻し（flush）の破壊テストの一覧（S13-e）。keep 変種と組む——最終形が「割り当てたまま」のイメージで、
+/// flush を飛ばすと disk0.img がビルドしたイメージのままになる。**帳簿の下限（wr_bytes）とバイト一致の両方が落ちる。**
+/// **落ち方が違う 2 つの形**——skip は全部書かず wr_bytes=0、short は先頭 4KiB を欠いて wr_bytes が 4KiB 少なく
+/// superblock が食い違う。**全検査と直に打つ入口の両方が引く**（2026-10-03。以前は全検査の中に直に並べていた）。
+const FS_FLUSH_SABOTAGES: &[(&str, &[&str])] = &[
+    (
+        "a skipped write-back",
+        &["fs-flush-skip-test", KEEP_ALLOCATED_FEATURE],
+    ),
+    (
+        "a short write-back",
+        &["virtio-flush-short-test", KEEP_ALLOCATED_FEATURE],
+    ),
 ];
 
 /// virtio-blk の読みの破壊テストの一覧（S13-b）。
@@ -28947,22 +29297,8 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
         batch.run(&mut failed);
 
-        // **書き戻し（flush）の破壊テスト（S13-e）。** keep 変種と組む——最終形が
-        // 「割り当てたまま」のイメージで、flush を飛ばすと disk0.img がビルドしたイメージの
-        // ままになる。**帳簿の下限（wr_bytes）とバイト一致の両方が落ちる。**
-        // **落ち方が違う2つの形**——skip は全部書かず wr_bytes=0、short は先頭
-        // 4KiB を欠いて wr_bytes が 4KiB 少なく superblock が食い違う。
-        // どちらも keep 変種と組む（最終形が「割り当てたまま」）。
-        for (label, features) in [
-            (
-                "a skipped write-back",
-                &["fs-flush-skip-test", KEEP_ALLOCATED_FEATURE][..],
-            ),
-            (
-                "a short write-back",
-                &["virtio-flush-short-test", KEEP_ALLOCATED_FEATURE][..],
-            ),
-        ] {
+        // **書き戻し（flush）の破壊テスト（S13-e）。** 一覧と落ち方は [`FS_FLUSH_SABOTAGES`] の doc にある。
+        for &(label, features) in FS_FLUSH_SABOTAGES {
             total += 1;
             begin_item(Family::Fs, &format!("the fs image flush catches {label}"));
             let result = cmd_fs_image_extract(features);
@@ -30137,6 +30473,7 @@ const ITEM_TABLES: &[(&str, usize)] = &[
     ("PCI_SABOTAGES", PCI_SABOTAGES.len()),
     ("VIRTIO_SABOTAGES", VIRTIO_SABOTAGES.len()),
     ("FS_LOAD_SABOTAGES", FS_LOAD_SABOTAGES.len()),
+    ("FS_FLUSH_SABOTAGES", FS_FLUSH_SABOTAGES.len()),
     ("SHELL_TEST_SABOTAGES", SHELL_TEST_SABOTAGES.len()),
     ("SHELL_SCRIPT_SABOTAGES", SHELL_SCRIPT_SABOTAGES.len()),
     ("EXCEPTION_TESTS", EXCEPTION_TESTS.len()),
@@ -33191,6 +33528,56 @@ mod tests {
         assert_eq!(count_lines_ending_with(&lines, "sockd: client left"), 3);
         assert_eq!(count_lines_ending_with(&lines, "sockd: accepted"), 1);
         assert_eq!(count_lines_ending_with(&lines, "sockd: quit"), 0);
+    }
+
+    /// **しるしが 1 つずつなら出ているが、同じ行には出ていない形を、失敗の文で見分ける**（2026-10-03。
+    /// 2026-10-02 に全検査で踏んだ、表に別々の行の断片を並べた誤り）。**同じ行に全部が出れば検出、1 つでも
+    /// 出ていなければ「出ていない」の文のままである。**
+    #[test]
+    fn signs_on_different_lines_are_told_apart_from_signs_that_never_appear() {
+        static SPLIT: NamedJudgement = NamedJudgement {
+            check: "page permissions",
+            key: "split-test",
+            signs: &["before interrupts", "after the APs"],
+            note: "",
+            reached: true,
+        };
+        let on_two_lines = "listing: before interrupts | x\nlisting: after the APs | y\n";
+        match judgement_verdict(&SPLIT, Some(on_two_lines), None) {
+            SabotageVerdict::MissedTheJudgement { why, .. } => {
+                assert!(why.contains("never all on the same line"), "{why}");
+            }
+            _ => panic!("two lines must not count as a catch"),
+        }
+        let on_one_line = "listing: before interrupts | after the APs\n";
+        assert!(matches!(
+            judgement_verdict(&SPLIT, Some(on_one_line), None),
+            SabotageVerdict::CaughtByTheJudgement { .. }
+        ));
+        let one_missing = "listing: before interrupts | x\n";
+        match judgement_verdict(&SPLIT, Some(one_missing), None) {
+            SabotageVerdict::MissedTheJudgement { why, .. } => {
+                assert!(!why.contains("same line"), "{why}");
+            }
+            _ => panic!("a missing sign must not count as a catch"),
+        }
+    }
+
+    /// **`--fs-extract --sabotage` の feature は、全検査と同じ検査の名前で判定される**（2026-10-03）。
+    #[test]
+    fn the_fs_extract_sabotage_takes_the_check_name_the_full_check_uses() {
+        let (_, create) = FS_CREATE_SABOTAGES[0];
+        assert_eq!(fs_extract_check_for(create), "fs create");
+        let (_, bitmap) = FS_BITMAP_SABOTAGES[0];
+        assert_eq!(fs_extract_check_for(bitmap), "fs bitmap");
+        let (_, flush) = FS_FLUSH_SABOTAGES[0];
+        assert_eq!(fs_extract_check_for(flush), "fs image flush");
+        let (_, load) = FS_LOAD_SABOTAGES[0];
+        assert_eq!(fs_extract_check_for(&[load]), "fs image load");
+        assert_eq!(
+            fs_extract_check_for(&["fs-copy-corrupt-tail-test"]),
+            "fs extract"
+        );
     }
 
     /// `/proc/<pid>/status` の `SigIgn:`（実測の形）から SIGXFSZ を読む。

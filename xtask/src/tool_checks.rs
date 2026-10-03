@@ -53,18 +53,21 @@ fn succeeded(script: &str, output: &Output) -> Result<String> {
     Ok(stdout)
 }
 
-/// `cargo xtask run-set`——**通る行と、`!` を付けた落ちるのが正しい行の 2 行を 2 本ずつで回し、2 行とも通過と数えて
-/// まとめの行を出すこと**（2026-09-29。運用者の決定）。**QEMU を起動しない行だけで組む**——通る行は
-/// `full --status`（読むだけ）、落ちる行は知らない命令である（狙いの文言は、知らない命令を断る行）。
+/// `cargo xtask run-set`——**通る行と、`!` を付けた破壊テストの行の 2 行を 2 本ずつで回し、2 行とも通過と数えて
+/// まとめの行を出すこと**（2026-09-29。運用者の決定）。**QEMU を起動しない行だけで組む**——どちらも
+/// `full --status`（読むだけ）で、`!` の行の文言は、その出力に必ず出る行の頭である（2026-10-03。**`!` の行は、
+/// 子が 0 で終わり、文言が記録に在るときだけ通過**——直に打つ破壊テストが全検査と同じ判定を通す形になったので。
+/// **2026-10-02 までは、落ちる子〔知らない命令〕を `!` の行にしていた**）。
 ///
-/// **落ちるのが正しい行が、何で落ちても通過になる形でないことも見る**（2026-10-02）——同じ命令に、記録に出ない
-/// 文言を書いた一覧は、落ちと数えて 0 でない値で終わる。文言の無い `!` の行は、一覧を読む所で断る。
+/// **`!` の行が、文言を見ずに通過になる形でないことも見る**——同じ命令に、記録に出ない文言を書いた一覧は、
+/// 落ちと数えて 0 でない値で終わる。**0 でない値で終わった子は、文言が在っても通過にしない**（知らない命令で
+/// 見る）。文言の無い `!` の行は、一覧を読む所で断る。
 pub(super) fn run_set(root: &Path) -> Result<String> {
     let passing = run_set_once(
         root,
         "run-set-list.txt",
         "# 手で使う道具の軽い確かめ（run-set）\nfull --status\n\
-         !\"unknown xtask subcommand\" not-a-command-for-the-tool-check\n",
+         !\"the last green full check\" full --status\n",
     )?;
     if !passing.succeeded {
         bail!(
@@ -75,7 +78,7 @@ pub(super) fn run_set(root: &Path) -> Result<String> {
     if !passing
         .stdout
         .lines()
-        .any(|line| line.starts_with("PASS (failed as it must"))
+        .any(|line| line.starts_with("PASS (the sabotage was caught"))
     {
         bail!(
             "the row marked with ! was not counted as a pass: {}",
@@ -89,22 +92,39 @@ pub(super) fn run_set(root: &Path) -> Result<String> {
         .with_context(|| format!("no summary line of 2 passed rows: {}", passing.stdout))?
         .to_string();
 
-    // **狙いの文言が記録に無ければ、落ちても通過にしない。**
+    // **狙いの文言が記録に無ければ、0 で終わっても通過にしない。**
     let wrong_words = run_set_once(
         root,
         "run-set-list-wrong-words.txt",
-        "!\"words the log will not carry\" not-a-command-for-the-tool-check\n",
+        "!\"words the log will not carry\" full --status\n",
     )?;
     if wrong_words.succeeded
         || !wrong_words
             .stdout
             .lines()
-            .any(|line| line.starts_with("FAIL (failed with exit") && line.contains("does not say"))
+            .any(|line| line.starts_with("FAIL (exit 0, but the log does not say"))
     {
         bail!(
-            "a row marked with ! that failed without the expected words was not counted as a \
+            "a row marked with ! that exited 0 without the expected words was not counted as a \
              failure: {}",
             wrong_words.summary()
+        );
+    }
+
+    // **0 でない値で終わった子は、文言が在っても通過にしない**（2026-10-03）。
+    let failed_child = run_set_once(
+        root,
+        "run-set-list-failed-child.txt",
+        "!\"unknown xtask subcommand\" not-a-command-for-the-tool-check\n",
+    )?;
+    if failed_child.succeeded
+        || !failed_child.stdout.lines().any(|line| {
+            line.starts_with("FAIL (exit ") && line.contains("did not count the sabotage")
+        })
+    {
+        bail!(
+            "a row marked with ! whose child failed was counted as a pass: {}",
+            failed_child.summary()
         );
     }
 
@@ -121,7 +141,8 @@ pub(super) fn run_set(root: &Path) -> Result<String> {
         );
     }
     Ok(format!(
-        "{summary}; a ! row with the wrong words fails, and one without words is refused"
+        "{summary}; a ! row with the wrong words fails, one whose child failed fails, and one \
+         without words is refused"
     ))
 }
 

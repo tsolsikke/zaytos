@@ -10,25 +10,32 @@
 //! 1 行に、`cargo xtask` に渡す引数を 1 つ分書く（例: `run --smp-ap-test ap-timer`）。空の行と `#` で始まる行は
 //! 読まない。引数は空白で分ける（引用符は読まない）。
 //!
-//! **行の頭に `!` を書いた行は、落ちるのが正しい行である**（破壊テストなど）。**`!` のすぐ後に、子の記録に出るはずの
-//! 文言を `"` で囲んで書く**（2026-10-02）。例:
+//! **行の頭に `!` を書いた行は、破壊テストの行である**——**子が破壊を捕まえたと報告し、その記録に狙いの文言が
+//! 出るのが正しい行。** **`!` のすぐ後に、子の記録に出るはずの文言を `"` で囲んで書く**（2026-10-02）。例:
 //!
 //! ```text
 //! !"application processor stacks | 4K: cache 0 -> 2" run --page-permissions --sabotage ap-stacks-uncached-test
 //! ```
 //!
-//! **通過と数えるのは、子が落ち、しかも狙いの文言が子の記録に在るときだけである。** 次の形は、どれも落ちと数え、
-//! 理由を結果の行に出す。
+//! **通過と数えるのは、子が 0 で終わり、しかも狙いの文言が子の記録に在るときだけである**（2026-10-03）。
+//! **直に打つ破壊テストは、全検査と同じ判定を通して、狙いの判定で捕まったときだけ 0 で終わる**（`crate` の
+//! `finish_direct_sabotage`）——**捕まったことの判定は子の側に在り、こちらの文言は、どの判定で捕まったかを
+//! 一覧に書き残す確かめである**（子の `OK` の行に、捕まえた判定のしるしが出る）。
+//! **2026-10-02 までは「子が落ち、文言が記録に在るときだけ通過」だった**——直に打つ破壊テストは、落ちる形なら
+//! どの理由でも落ちれば 0 でない値で終わり、反転させる形ならどれかの判定が偽なら 0 で終わっていたので、
+//! 落ちる形の破壊テストにしか `!` を書けず、狙いの判定で捕まったかは文言の一致だけが見ていた。
 //!
-//! - 子が通った（落ちるはずの行が通ったのは、破壊テストが働いていないことである。2026-09-29。運用者の決定）。
+//! 次の形は、どれも落ちと数え、理由を結果の行に出す。
+//!
+//! - 子が 0 でない値で終わった（破壊を狙いの判定で捕まえられなかった。子の `FAILED` の行に理由が在る）。
 //! - 検査装置の故障で落ちた（ビルドの失敗、QEMU を起動できない、など）。
-//! - 実行が失敗の期限に着いた、またはログの上限で切られた（途中までの出力で落ちたのであって、狙いの判定で
-//!   落ちたのではない）。
+//! - 実行が失敗の期限に着いた、またはログの上限で切られた（途中までの出力で判定したのであって、狙いの判定で
+//!   捕まえたのではない）。
 //! - 検査の錠が断った（全検査の間に走らせた）。
-//! - 落ちたが、狙いの文言が記録に無い（別の理由で落ちた）。
+//! - 子は 0 で終わったが、狙いの文言が記録に無い（`--sabotage` を書き忘れた行が、ふつうの実行として通った形など）。
 //!
-//! **文言の無い `!` の行は、一覧を読む所で断る。** 以前は、子の終了の値が 0 でなければ何で落ちても通過と数えていた
-//! ——ビルドが落ちた行も、期限に着いた行も通過になり、破壊テストが働いていなくても「通った」と出た。
+//! **文言の無い `!` の行は、一覧を読む所で断る。** 2026-10-01 までは、子の終了の値が 0 でなければ何で落ちても
+//! 通過と数えていた——ビルドが落ちた行も、期限に着いた行も通過になり、破壊テストが働いていなくても「通った」と出た。
 //!
 //! # 出力
 //!
@@ -70,7 +77,7 @@ pub struct Entry {
     /// 一覧に書いたとおりの行（結果の行に出す）。
     pub line: String,
     pub args: Vec<String>,
-    /// 落ちるのが正しい行（行の頭の `!`）なら、子の記録に出るはずの文言。
+    /// 破壊テストの行（行の頭の `!`）なら、子の記録に出るはずの文言。
     pub must_fail_with: Option<String>,
 }
 
@@ -117,8 +124,9 @@ fn expected_phrase(after_mark: &str) -> Option<(&str, &str)> {
 
 /// 1 本の判定（純粋な論理）。`log` は子の記録（標準出力と標準エラー）。
 ///
-/// **落ちるのが正しい行は、子が落ち、狙いの文言が記録に在るときだけ通過である。** 通った行、検査装置の故障・期限・
-/// ログの上限・検査の錠の断りで落ちた行、狙いの文言が無い行は、理由つきで落ちとする（モジュールの doc の
+/// **破壊テストの行（`!`）は、子が 0 で終わり、狙いの文言が記録に在るときだけ通過である**（2026-10-03。
+/// 子が全検査と同じ判定を通し、狙いの判定で捕まったときだけ 0 で終わる）。0 でない値で終わった行、検査装置の故障・
+/// 期限・ログの上限・検査の錠の断りで落ちた行、狙いの文言が無い行は、理由つきで落ちとする（モジュールの doc の
 /// 「一覧の形」）。シグナルで終わった行と、上限を越えて止めた行は、どちらの行でも落ちとする（終わった理由が
 /// 試験の判定ではない）。
 fn verdict(outcome: &Outcome, must_fail_with: Option<&str>, log: &str) -> (bool, String) {
@@ -130,22 +138,36 @@ fn verdict(outcome: &Outcome, must_fail_with: Option<&str>, log: &str) -> (bool,
         ),
         (Outcome::Exited(0), None) => (true, "PASS".to_string()),
         (Outcome::Exited(code), None) => (false, format!("FAIL (exit {code})")),
-        (Outcome::Exited(0), Some(_)) => (false, "FAIL (exit 0, but it must fail)".to_string()),
-        (Outcome::Exited(code), Some(phrase)) => {
-            if let Some(reason) = failed_on_the_run_side(*code, log) {
-                (
-                    false,
-                    format!("FAIL ({reason}; not the failure it must show)"),
-                )
-            } else if log.contains(phrase) {
+        (Outcome::Exited(0), Some(phrase)) => {
+            if log.contains(phrase) {
                 (
                     true,
-                    format!("PASS (failed as it must, exit {code}; the log says {phrase:?})"),
+                    format!("PASS (the sabotage was caught; the log says {phrase:?})"),
                 )
             } else {
                 (
                     false,
-                    format!("FAIL (failed with exit {code}, but the log does not say {phrase:?})"),
+                    format!(
+                        "FAIL (exit 0, but the log does not say {phrase:?}; was the sabotage run?)"
+                    ),
+                )
+            }
+        }
+        (Outcome::Exited(code), Some(phrase)) => {
+            if let Some(reason) = failed_on_the_run_side(*code, log) {
+                (false, format!("FAIL ({reason}; not a catch)"))
+            } else if log.contains(phrase) {
+                (
+                    false,
+                    format!(
+                        "FAIL (exit {code}: the log says {phrase:?}, but the child did not count the \
+                         sabotage as caught; its FAILED line says why)"
+                    ),
+                )
+            } else {
+                (
+                    false,
+                    format!("FAIL (exit {code}, and the log does not say {phrase:?})"),
                 )
             }
         }
@@ -298,7 +320,7 @@ pub fn cmd_run_set(workspace_root: &Path, args: &[String]) -> Result<()> {
             continue;
         };
         sum += result.took;
-        // 子の記録を読む（落ちるのが正しい行の判定に使う。読めなければ空として扱い、文言は見つからない）。
+        // 子の記録を読む（破壊テストの行の判定に使う。読めなければ空として扱い、文言は見つからない）。
         let log = fs::read(&result.log)
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .unwrap_or_default();
@@ -435,7 +457,7 @@ mod tests {
         assert_eq!(entries[1].must_fail_with, None);
     }
 
-    /// **行の頭の `!` は、落ちるのが正しい行で、すぐ後に狙いの文言を `"` で囲んで書く。** 文言の中の空白は保つ。
+    /// **行の頭の `!` は、破壊テストの行で、すぐ後に狙いの文言を `"` で囲んで書く。** 文言の中の空白は保つ。
     #[test]
     fn a_row_marked_to_fail_names_what_its_log_will_say() {
         let entries = parse_list(
@@ -492,25 +514,38 @@ mod tests {
         assert!(!verdict(&Outcome::TimedOut, None, "").0);
     }
 
-    /// **落ちるのが正しい行は、子が落ち、狙いの文言が記録に在るときだけ通過である。**
+    /// **破壊テストの行は、子が 0 で終わり、狙いの文言が記録に在るときだけ通過である**（2026-10-03。子が全検査と
+    /// 同じ判定を通す形になった後）。
     #[test]
-    fn a_row_marked_to_fail_passes_only_when_the_log_says_the_expected_words() {
-        let log = "page permissions: user program hello | segment 0 | 4K: w 0 -> 1\n\
-                   Error: page permissions: 1 difference(s) from the reference\n";
-        let (passed, text) = verdict(&Outcome::Exited(1), Some("segment 0 | 4K: w 0 -> 1"), log);
+    fn a_sabotage_row_passes_only_when_the_child_caught_it_and_the_log_says_the_expected_words() {
+        let caught = "page permissions: user program hello | segment 1 | 4K: w 0 -> 1\n\
+                      --- page permissions (user-run-writable-text): OK (the sabotage was caught by \
+                      the intended judgement: user program hello | segment 1 | 4K: w 0 -> 1)\n";
+        let words = "segment 1 | 4K: w 0 -> 1";
+        let (passed, text) = verdict(&Outcome::Exited(0), Some(words), caught);
         assert!(passed, "{text}");
-        assert!(text.starts_with("PASS (failed as it must"), "{text}");
-        // 通った行は落ち。
-        let (passed, text) = verdict(&Outcome::Exited(0), Some("segment 0 | 4K: w 0 -> 1"), log);
+        assert!(text.starts_with("PASS (the sabotage was caught"), "{text}");
+        // 子が 0 で終わったが、文言が無い行は落ち（破壊テストを走らせていない形）。
+        let (passed, text) = verdict(&Outcome::Exited(0), Some("cache 0 -> 2"), caught);
         assert!(!passed);
-        assert!(text.contains("it must fail"), "{text}");
-        // 落ちたが、狙いの文言が無い行は落ち。理由に文言を出す。
-        let (passed, text) = verdict(&Outcome::Exited(1), Some("cache 0 -> 2"), log);
+        assert!(text.contains("does not say \"cache 0 -> 2\""), "{text}");
+        // 子が 0 でない値で終わった行は、文言が在っても落ち（子が捕まえたと数えなかった）。
+        let missed = "page permissions: user program hello | segment 1 | 4K: w 0 -> 1\n\
+                      --- page permissions (user-run-writable-text): FAILED (the intended judgement \
+                      never read false)\n";
+        let (passed, text) = verdict(&Outcome::Exited(1), Some(words), missed);
+        assert!(!passed);
+        assert!(
+            text.contains("did not count the sabotage as caught"),
+            "{text}"
+        );
+        // 落ちて、文言も無い行は落ち。理由に文言を出す。
+        let (passed, text) = verdict(&Outcome::Exited(1), Some("cache 0 -> 2"), missed);
         assert!(!passed);
         assert!(text.contains("does not say \"cache 0 -> 2\""), "{text}");
         // シグナルと上限は、文言が在っても落ち。
-        assert!(!verdict(&Outcome::Signalled, Some("w 0 -> 1"), log).0);
-        assert!(!verdict(&Outcome::TimedOut, Some("w 0 -> 1"), log).0);
+        assert!(!verdict(&Outcome::Signalled, Some(words), caught).0);
+        assert!(!verdict(&Outcome::TimedOut, Some(words), caught).0);
     }
 
     /// **実行の側の理由で落ちた行は、狙いの文言が記録に在っても落ちである**——検査装置の故障（ビルドの失敗など）、
