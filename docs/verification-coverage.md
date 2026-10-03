@@ -923,7 +923,12 @@ python3 tools/judgement-map.py /tmp/full.txt
 | `addrspace-no-kernel-share` | 新しいアドレス空間へカーネルの上位256本をコピーしない | CR3を差し替えた瞬間に命令フェッチが翻訳できなくなり、「切り替えた後」の行が出ないこと |
 | `kernel-top-digest-mismatch-test` | 起動の終わりに、カーネル側のPML4の違う指紋を控える（`ADR-0071`の決定5） | 起動の後の最初のアドレス空間の作成が`KernelTopChanged`で断られ、シェルが起動しないこと（突き合わせる所が働くことの対照） |
 | `kernel-top-write-after-boot-test` | 起動の後に、カーネル側のPML4の空いた添字（260）へマップしに行く | 書く側の守り（`ensure_child`）が、項目を作る前に名前つきで止めること |
-| `kernel-top-write-unguarded-test` | 書く側の守りを外し、起動の後にカーネル側のPML4の空いた添字（260）へマップしに行く | 次の`AddressSpace::new`の突き合わせが、実際に書かれた項目を見つけ、シェルの起動が`KernelTopChanged`で断られること（違う指紋を控える`kernel-top-digest-mismatch-test`は、実際の書き込みを見つけることを確かめていない） |
+| `kernel-top-write-unguarded-test` | 書く側の守りを外し、起動の後にカーネル側のPML4の空いた添字（260）へマップしに行く | 次の`AddressSpace::new`の突き合わせが、実際に書かれた項目を見つけ、シェルの起動が`KernelTopChanged`で断られること（違う指紋を控える`kernel-top-digest-mismatch-test`は、実際の書き込みを見つけることを確かめていない）。**2026-10-03からは、3つ目の決まり（起動の後はカーネル側の写像を変えない）も一緒に外す**（2枚とも外して、突き合わせが見つける形） |
+| `kernel-mapping-map-after-boot-test` | 起動の後に、カーネルの像のPML4の項目（511）の下へ葉を1枚足しに行く（2026-10-03） | 3つ目の決まりが、項目を1つも書かずに`KernelMappingFrozen`で断ること（添字260の形と違い、既に在る項目の下へ足す形） |
+| `kernel-mapping-change-after-boot-test` | 起動の後に、直接写像の2MiBのページを割りに行く（2026-10-03） | 同上（既に在る写像を変える形。権限を変える入口と同じ守りを通る） |
+| `kernel-mapping-probe-neighbour-test` | 試しのfeature`smp-tlb-shootdown-probe`のビルドで、起動の後に探りのページの隣を外しに行く（2026-10-03。`--smp-ap-test tlb-probe-neighbour`） | 隣は`KernelMappingFrozen`で断られ、探りそのもの（探りのページを外してAPのTLBを落とす）は同じ起動で通ること（許しが探りの1ページに閉じている） |
+| `boot-finish-twice-test` | 起動の終わりの目印を2度立てる（2026-10-03。`--critical-test boot-finish-twice`） | 2度目が名前つきで止まること |
+| `kernel-mapping-rule-off-test` | 3つ目の決まりだけを外し、`kernel-top-write-after-boot-test`と組んで起動の後に添字260へマップしに行く（2026-10-03。`--paging-test kernel-top-write-rule-off`） | 2枚目の守り（`ensure_child`）が、元の文言（`paging: refused to create a kernel-half PML4 entry after boot (index 260)`）で止めること。**1枚目だけ外す→2枚目が止める／2枚とも外す→突き合わせが見つける、の両方を残す** |
 | `interrupt-test-timer` | タイマを動かす | ティックが増え続けること |
 | `no-eoi-test` | タイマハンドラのEOI発行を落とす | ティックが1回で止まること |
 | `alt-offset-test` | PICを0x30-0x3Fへ再マップする | ICW2が実際に効いていること |
@@ -2032,6 +2037,18 @@ VirtualBoxの計数でベクタ0x42が打鍵4バイトで+4、8259のベクタ0x
 **直に打つ終わり方に頼っていた所は2つで、一緒に直した。** `cargo xtask run-set`の`!`の行（上の「全検査の時間を縮める」のrun-setの項。「子が落ち、文言が在る」→「子が0で終わり、文言が在る」）と、基本の検査の`run-set`の道具の確かめ（落ちる子〔知らない命令〕の`!`の行を、`full --status`の`!`の行に替え、落ちる子の`!`の行が落ちと数えられることを別に見る）。**`--machine-variant --sabotage`は変えていない**——全検査も直に打つ形も、同じ期待（`VariantExpect`）で判定していた。
 
 **限り。** 直に打つ実行は1回で、表に載せる前の「3回とも狙いの判定が偽」の確かめは、これまでどおり3回打つ。表に無い破壊テストは、全検査と同じく「どの誤りでも」「どれかの判定が偽なら」で捕まえたと数える（それぞれ`(info)`の計測に乗る）。
+
+### 起動の後はカーネル側の写像を変えない（2026-10-03。`ADR-0071`の手順4の締め）
+
+**「起動の後」の目印を共通の側の1つ（`kernel/src/boot.rs`）にまとめ、3つ目の「起動の後はしない」決まりを入れた**（本体は`ADR-0071`の2026-10-03のAddendum）。ここでは検査の形だけを書く。
+
+- **決まりの判定は純粋な関数**（`kernel_mapping_write_is_refused(添字, 起動の後か, 探りの印)`）で、ホストのテストが、起動の間は断らない・起動の後はカーネル側を断る・探りの印が立てば通す・ユーザー側は断らない、を見る。目印そのもの（`finish`は1回だけ）もホストのテストが見る。
+- **全検査の破壊テストは、上の表の5つ（`kernel-mapping-*`3つ・`boot-finish-twice-test`・`kernel-mapping-rule-off-test`）と、既存の2つ・探りそのものである。** 既存の`kernel-top-write-after-boot-test`は、決まりが先に断る形になった（しるしを「`sabotage: the kernel-half write was refused before any entry was written (KernelMappingFrozen); halting`」に替えた）。`ensure_child`の守りを直に見る形は`kernel-mapping-rule-off-test`が引き継いだ。
+- **止まり方の読み。** 決まりで断られる3本（`kernel-top-write-after-boot-test`・`kernel-mapping-map-after-boot-test`・`kernel-mapping-change-after-boot-test`）は、カーネルが名前つきの行（`…; halting`で終わる）を出して静かに止まる（`halt_forever`）。panicの行（`halting (cli + hlt loop)`）は出ないので、しるしに書かない。2枚目の守りと目印の2度目はpanicで止まるので、panicの行を期待する。**最初の直の実行で、この違いで3本が落ちた**（しるしから外して通した）。
+- **直に打った確かめ**（2026-10-03。全検査と同じ判定。各3回）: 新しい5本、既存の`kernel-top-write-after-boot-test`・`kernel-top-write-unguarded-test`、探りの`tlb-shootdown`の8種×3回＝24回、全部通った。
+- **既定の起動で、起動の後にカーネル側を書く経路が無いこと**は、既定の起動とユーザープログラムの全部が今までどおり通ることで見る（断られれば`KernelMappingFrozen`が出て、その先の判定が落ちる）。
+
+**限界。** 試しのfeatureのビルドにだけ出る警告（入れ子の`unsafe`など）は、基本の検査のclippyが既定のfeatureしか見ないので、検査の外である（持ち越しの行）。
 
 ### rustdocの警告と`# Safety`の節（2026-10-03）
 
