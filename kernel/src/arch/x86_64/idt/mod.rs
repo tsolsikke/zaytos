@@ -1312,7 +1312,10 @@ impl IrqContext {
 ///
 /// `context` はスタブが積んだ [`IrqContext`] を指していること。
 /// `rsp_at_call` はスタブが `call` 直前に読んだ RSP であること。
-extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u64 {
+///
+/// **呼ぶのは asm のスタブだけである**（`sym` で指す）。**`unsafe fn` にしたのは、中の生ポインタの読みがこの前提に
+/// 乗っているからである**（2026-10-03）。
+unsafe extern "sysv64" fn irq_entry(context: *const IrqContext, rsp_at_call: u64) -> u64 {
     // **方向フラグを何より先に見る（2026-09-24）。** [`check_direction_flag`] の doc。
     // SAFETY: スタブが直前に積んだ有効な `IrqContext` を指す。読み取りのみ。
     let (vector, rflags) = unsafe { ((*context).vector, (*context).rflags) };
@@ -2351,7 +2354,10 @@ fn exception_frame_is_trustworthy(vector: u8, cs: u64, handler_rsp: u64) -> bool
 /// # Safety
 ///
 /// `context` はスタブが積んだ [`ExceptionContext`] を指していること。
-extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call: u64) -> ! {
+///
+/// **呼ぶのは asm のスタブだけである**（`sym` で指す）。**`unsafe fn` にしたのは、中の生ポインタの読みがこの前提に
+/// 乗っているからである**（2026-10-03）。
+unsafe extern "sysv64" fn exception_entry(context: *const ExceptionContext, rsp_at_call: u64) -> ! {
     // **方向フラグを何より先に見る（2026-09-24）。** [`check_direction_flag`] の doc。
     // SAFETY: スタブが直前に積んだ有効な `ExceptionContext` を指す。読み取りのみ。
     let (vector, rflags) = unsafe { ((*context).vector, (*context).rflags) };

@@ -2849,7 +2849,15 @@ unsafe fn spawn_from_ring3(
 ///
 /// `context` はスタブが積んだ有効な [`IrqContext`] を指していること。
 /// `sp_at_call` はスタブが `call` 直前に読んだ RSP であること。
-pub(crate) fn syscall_entry(context: *mut IrqContext, sp_at_call: u64) -> u64 {
+///
+/// **呼ぶのは asm のスタブだけである**（`sym` で指す）。**`unsafe fn` にしたのは、中の生ポインタの読みがこの前提に
+/// 乗っているからである**（2026-10-03。前提を doc だけで持たず、型で表す）。**`extern "sysv64"` は、asm から呼ぶ関数の
+/// 呼び出し規約を言語の決まりで固定するためである**（`irq_entry`・`exception_entry` と同じ。2026-10-03 まで Rust の ABI の
+/// ままで、2 つの整数の引数と整数の戻り値ではたまたま同じ機械語になっていた——実測で、変える前後の逆アセンブルが一致した）。
+pub(crate) unsafe extern "sysv64" fn syscall_entry(
+    context: *mut IrqContext,
+    sp_at_call: u64,
+) -> u64 {
     // **方向フラグを何より先に見る（2026-09-24）。** `crate::arch::x86_64::idt::check_direction_flag` の doc。
     // **何を読むかは `arch` が決める**（`IrqContext` のメソッドが読む。ベクタを共通の側に出さない。`ADR-0072` の 3。
     // 9e-2）。
