@@ -1575,7 +1575,7 @@ unsafe fn mmap_screen_from_ring3(len: u64, prot: u64, direct_map: DirectMap) -> 
     }
     let tables_taken = free_before_map.saturating_sub(allocator.free_frame_count());
     crate::frame_allocator::give_back(allocator);
-    crate::userland::note_post_load_frames(slot, tables_taken as usize);
+    crate::userland::note_post_load_frames(tables_taken as usize);
     outcome
 }
 
@@ -2214,10 +2214,7 @@ unsafe fn mmap_from_ring3(len: u64, prot: u64, fd: u64, offset: u64, direct_map:
     }
     let tables_taken = free_before_map.saturating_sub(allocator.free_frame_count());
     crate::frame_allocator::give_back(allocator);
-    crate::userland::note_post_load_frames(
-        crate::arch::x86_64::current_excursion_slot(),
-        tables_taken as usize,
-    );
+    crate::userland::note_post_load_frames(tables_taken as usize);
     outcome
 }
 
@@ -3597,6 +3594,11 @@ unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
     let mut outcome = requested;
     if want > have {
         // **伸ばす。** 1 ページずつマップする。
+        // **取ったフレームを空間ごとの会計へ足す**（2026-10-03）。**葉と、境を越えて新しく取った中間表の両方を、
+        // 空きフレームの差で数える**（`mmap` と同じ形。失敗して返した分は差に出ない）。**以前は数えておらず、
+        // 伸ばしたまま終わるプログラムで、破棄が集めた数が取った数を上回った**（`crate::userland` の
+        // `note_post_load_frames` の doc）。
+        let free_before = allocator.free_frame_count();
         let mut page = have;
         while page < want {
             let Some(frame) = allocator.allocate_frame() else {
@@ -3626,6 +3628,8 @@ unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
             crate::userland::with_current_heap(|heap| heap.note_taken());
             page += PAGE_SIZE;
         }
+        let taken = free_before.saturating_sub(allocator.free_frame_count());
+        crate::userland::note_post_load_frames(taken as usize);
         // **マップできた分までを上端にする**（doc の「そこまでで止める」）。
         let reached = if outcome == requested {
             requested
@@ -3640,6 +3644,9 @@ unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
         // 「伸ばして縮めたら空きフレームの数が元へ戻る」判定だけである。**
         #[cfg(not(feature = "brk-skip-shrink-test"))]
         {
+            // **返した葉の数を、空間ごとの会計から引く**（2026-10-03）。**その場でアロケータへ戻すので、破棄が
+            // 集める数には入らない。** **中間表は外さないので引かない**（破棄が集める）。
+            let mut returned = 0usize;
             let mut page = have;
             while page > want {
                 page -= PAGE_SIZE;
@@ -3651,9 +3658,11 @@ unsafe fn sys_brk(requested: u64, direct_map: DirectMap) -> u64 {
                         // フレームが返らなかった（2026-10-02 に直した）。
                         let _ = allocator.deallocate_frame(page.frame);
                         crate::userland::with_current_heap(|heap| heap.note_given());
+                        returned += 1;
                     }
                 }
             }
+            crate::userland::note_post_load_frames_returned(returned);
         }
         crate::userland::with_current_heap(|heap| heap.set_break(requested));
     }

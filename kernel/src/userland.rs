@@ -403,37 +403,44 @@ const HEAP_PAGE_SIZE: u64 = 4096;
 static CURRENT_HEAP: [Locked<Heap>; crate::arch::x86_64::USER_TASK_SLOTS] =
     [const { Locked::new(Heap::EMPTY) }; crate::arch::x86_64::USER_TASK_SLOTS];
 
-/// 載せた後にアロケータから取った中間ページテーブルの数（スロットごと。`ADR-0065` の (a)）。
+/// 載せた後に取ったフレームの数を足す（`crate::syscall` の `mmap` と `brk` の伸ばす側が呼ぶ。`ADR-0065` の (a)）。
 ///
-/// **`mmap` が新しい領域へマップすると中間表を取るが、`AddressSpace::frames_taken` は載せた時点で
-/// 測るので入らない。** **破棄の会計の `taken` にこれを足す**——**さもないと `collected > taken`
-/// になる。** **`mmap` のためではなく、載せた後に PT を取る経路すべてのためである**——**`brk` が
-/// 境を越えれば同じ穴を踏むので、同時に閉じる。**
-static POST_LOAD_FRAMES: [core::sync::atomic::AtomicUsize; crate::arch::x86_64::USER_TASK_SLOTS] =
-    [const { core::sync::atomic::AtomicUsize::new(0) }; crate::arch::x86_64::USER_TASK_SLOTS];
-
-/// 載せた後に取った PT の数を足す（`crate::syscall` の `mmap` が呼ぶ）。
-pub fn note_post_load_frames(slot: usize, count: usize) {
-    if let Some(cell) = POST_LOAD_FRAMES.get(slot) {
-        cell.fetch_add(count, core::sync::atomic::Ordering::SeqCst);
-    }
+/// **`mmap` が新しい領域へマップすると中間表を取るが、`AddressSpace::frames_taken` は載せた時点で測るので入らない。**
+/// **破棄の会計の `taken` にこれを足す**——**さもないと `collected > taken` になる。** **載せた後にページや表を取る
+/// 経路すべてのためである。** **`brk` の伸ばす側は、葉と、境を越えて新しく取った中間表を一緒に足す**（2026-10-03。
+/// 空きフレームの差で数える）。**以前は `brk` が数えておらず、伸ばしたまま終わるプログラム（`/bin/ttfglyph`）で、破棄が
+/// 集めた数が取った数を 129 上回り、正常に終わったのにシェルが「cannot run」と表示した**（`docs/troubleshooting.md` の
+/// 2026-10-03 の項）。
+///
+/// **数はプロセスごとに持つ**（[`Heap::post_load_frames`]。2026-10-03）。**以前はスロットごとの `static` だった**——
+/// **親と、親が `spawn` した子は同じスロットを使うので、子の破棄の会計が親の分を取ってしまう**（伸ばしたまま子を起動した
+/// `syscall-test` の破壊テストの形で踏んだ。`brk` を数えるようになって表に出た）。**[`Heap`] は Ring 3 を走らせる間だけ
+/// 据えられ、戻るときに親のものへ戻る**（`run_loaded_program`）ので、同じ置き場に入れれば混ざらない。
+pub fn note_post_load_frames(count: usize) {
+    with_current_heap(|heap| heap.post_load_frames += count);
 }
 
-/// そのスロットの「載せた後に取った PT」を読んで 0 に戻す（破棄の会計が呼ぶ）。
-fn take_post_load_frames(slot: usize) -> usize {
-    POST_LOAD_FRAMES
-        .get(slot)
-        .map(|cell| cell.swap(0, core::sync::atomic::Ordering::SeqCst))
-        .unwrap_or(0)
+/// 載せた後に取ったフレームのうち、アロケータへ直に返した数を引く（`brk` の縮める側が呼ぶ。2026-10-03）。
+///
+/// **縮める側が外した葉のフレームは、隔離を通らずにその場でアロケータへ戻る。** **破棄が集める数には入らないので、
+/// 取った数からも引く**——**引かないと、伸ばして縮めたプログラムで `taken > collected` になる。** **中間表は外さない
+/// ので引かない**（破棄が集める）。**0 を下回らない**（この数より多く返すことは無いが、数え方の誤りで会計を
+/// 負にしない）。
+pub fn note_post_load_frames_returned(count: usize) {
+    with_current_heap(|heap| heap.post_load_frames = heap.post_load_frames.saturating_sub(count));
 }
 
-/// ヒープの下端と上端（H-a）。
+/// ヒープの下端と上端と、載せた後に取ったフレームの数（H-a）。**どれもプロセスごとで、Ring 3 を走らせる間だけ
+/// 据えられる**（[`swap_current_heap`]）。
 #[derive(Clone, Copy)]
 pub struct Heap {
     /// イメージの末尾の次のページ。**`brk` はここより下げられない。**
     start: u64,
     /// いまの上端。
     break_at: u64,
+    /// 載せた後にアロケータから取ったフレームの数（`mmap` の中間表と、`brk` の葉と中間表。`ADR-0065` の (a)）。
+    /// **破棄の会計が `AddressSpace::frames_taken` に足す**（[`note_post_load_frames`] の doc）。
+    post_load_frames: usize,
     /// `brk` が取ったフレームの数（H-a）。
     ///
     /// # 空きフレームの全体を数えない
@@ -455,6 +462,7 @@ impl Heap {
     pub const EMPTY: Self = Self {
         start: 0,
         break_at: 0,
+        post_load_frames: 0,
         taken: 0,
         given: 0,
     };
@@ -468,6 +476,7 @@ impl Heap {
         Self {
             start,
             break_at: start,
+            post_load_frames: 0,
             taken: 0,
             given: 0,
         }
@@ -506,6 +515,11 @@ impl Heap {
     /// 取った数と返した数（H-a）。**判定行に出す。**
     pub const fn frames(&self) -> (u32, u32) {
         (self.taken, self.given)
+    }
+
+    /// 載せた後に取ったフレームの数（破棄の会計が読む）。
+    pub const fn post_load_frames(&self) -> usize {
+        self.post_load_frames
     }
 }
 
@@ -1092,10 +1106,10 @@ pub fn load_user_program(
     // **実測で踏んだ**——先に落ちるほうだけを見ていた。
     // **破棄の前に、この空間が取った本数を聞く（`ADR-0063` の (b1)）。**
     // **`AddressSpace::detach` は自分を取るので、後からは聞けない。**
-    // **載せた後に `mmap` が取った PT を足す（`ADR-0065` の (a)）。** **`frames_taken` は
-    // 載せた時点の分だけなので、これを足さないと `collected > taken` になる。**
-    let taken = process.space.frames_taken()
-        + take_post_load_frames(crate::arch::x86_64::current_excursion_slot());
+    // **載せた後に `mmap` と `brk` が取ったフレームを足す（`ADR-0065` の (a)）。** **`frames_taken` は
+    // 載せた時点の分だけなので、これを足さないと `collected > taken` になる。** **数はこのプロセスの `Heap` に
+    // 在る**（走らせた後は `process.heap` へ戻っている。[`note_post_load_frames`] の doc）。
+    let taken = process.space.frames_taken() + process.heap.post_load_frames();
     // **破棄する前に、この空間のページの権限の一覧を出す**（`crate::page_survey`。`ADR-0071` の手順 3 の道具）。
     report_user_mappings(logger, image, &process, direct_map);
     let keep_space = cfg!(feature = "user-exit-keep-space") && run;

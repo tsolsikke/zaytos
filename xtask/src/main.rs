@@ -5917,12 +5917,6 @@ const SABOTAGE_STOP_REASONS: &[StopReason] = &[
         note: "the parse stops the boot before the byte-for-byte check can run",
     },
     StopReason {
-        feature: "brk-skip-shrink-test",
-        reason: "DestroyAccounting",
-        note: "the boot-time syscall-test leaves its space short and the kernel's own accounting \
-               halts the boot; zi's own judgements are not reached",
-    },
-    StopReason {
         feature: "fp-mf-not-foldable-test",
         reason: "exception: vector=16 (#MF",
         note: "the kernel halts on the #MF from Ring 3 instead of folding the program, as intended",
@@ -6082,6 +6076,17 @@ const SABOTAGE_JUDGEMENTS: &[NamedJudgement] = &[
         check: "zi test",
         key: "zi-skip-release-test",
         signs: &["zi gave back every frame it took, on every run = false"],
+        note: "",
+        reached: true,
+    },
+    // **`brk` の縮める側を壊す破壊テストは、狙いの判定（起動時の `syscall-test` が取った分を返したこと）で捕まえる**
+    // （2026-10-03）。**2026-10-02 までは止まる理由の表に在った**——`brk` の伸ばした分が空間ごとの会計に入って
+    // いなかったので、縮めないと破棄の会計（`DestroyAccounting`）が起動を止め、この判定に届かなかった。
+    // 会計を直したら止まらなくなり、狙いの判定に届くようになった（直に打って 3 回とも偽）。
+    NamedJudgement {
+        check: "zi test",
+        key: "brk-skip-shrink-test",
+        signs: &["brk gave back every frame it took = false"],
         note: "",
         reached: true,
     },
@@ -12527,6 +12532,26 @@ fn cmd_ttf_test(features: &[&str], expect_pass: bool) -> Result<()> {
         .map(|(a, b)| format!("zeikos {a:?} vs host {b:?}"))
         .unwrap_or_else(|| format!("zeikos has {} line(s), host {}", zeikos.len(), host.len()));
 
+    // **判定**——**カーネルの `[ERROR]` の行が無く、シェルが「cannot run」と言っていない**（2026-10-03）。
+    // **`ttfglyph` は `brk` で伸ばしたまま終わる。** **字形は一致して正常に終わる（`Exited(0)`）のに、空間ごとの
+    // 会計が合わず、カーネルが `[ERROR]` を出してシェルが「cannot run」と表示する不具合を、この検査は見逃していた**
+    // （2026-10-02 に見つけた。字形の一致だけを見ていた）。**利用者から見える形（シェルの行）と、カーネルの側の
+    // 形（`[ERROR]`）を両方見る**——**どちらか片方だけでは、出し方が変わったときに見逃す。**
+    let error_lines: Vec<&str> = stripped
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains("[ERROR]"))
+        .take(3)
+        .collect();
+    let no_error = error_lines.is_empty();
+    let cannot_run_lines: Vec<&str> = stripped
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains("cannot run"))
+        .take(3)
+        .collect();
+    let no_cannot_run = cannot_run_lines.is_empty();
+
     println!("{context}: (signal) the host side ran to its end = {host_complete}");
     println!("{context}: (signal) the script reached its end = {script_finished}");
     println!("{context}: (info) the image judgement line says {built_by:?}");
@@ -12536,13 +12561,18 @@ fn cmd_ttf_test(features: &[&str], expect_pass: bool) -> Result<()> {
          {matched} ({} line(s); the first difference is {first_difference})",
         host.len()
     );
+    println!("{context}: no [ERROR] line = {no_error} (the first were {error_lines:?})");
+    println!(
+        "{context}: the shell never said cannot run = {no_cannot_run} (the first were \
+         {cannot_run_lines:?})"
+    );
 
     if !host_complete {
         println!("{context}: FAILED");
         bail!("{context}: the host side did not finish, so the comparison asserts nothing")
     }
 
-    if matched && script_finished {
+    if matched && script_finished && no_error && no_cannot_run {
         println!("{context}: PASS");
         if expect_pass {
             Ok(())
