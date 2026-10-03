@@ -22069,6 +22069,159 @@ fn function_name_declared_on(line: &str) -> Option<&str> {
 ///
 /// ドキュメントコメント（`///` と `//!`）の中の `unsafe {` は対象外。
 /// 使用例を書いただけの行まで拾うと、直せない指摘が出続ける。
+/// rustdoc を回す crate と引数（2026-10-03）。**`--document-private-items` で非公開の項目の説明も組む**——説明のずれは
+/// 非公開の側にも在る。**bootloader と kernel はそれぞれの target で組む**（[`CHECKS`] と同じ理由）。
+const RUSTDOC_TARGETS: &[(&str, &[&str])] = &[
+    (
+        "kernel",
+        &[
+            "doc",
+            "-p",
+            KERNEL_PACKAGE,
+            "--target",
+            KERNEL_TARGET,
+            "--no-deps",
+            "--document-private-items",
+        ],
+    ),
+    (
+        "common",
+        &[
+            "doc",
+            "-p",
+            "common",
+            "--no-deps",
+            "--document-private-items",
+        ],
+    ),
+    (
+        "xtask",
+        &[
+            "doc",
+            "-p",
+            "xtask",
+            "--no-deps",
+            "--document-private-items",
+        ],
+    ),
+    (
+        "bootloader",
+        &[
+            "doc",
+            "-p",
+            BOOTLOADER_PACKAGE,
+            "--target",
+            UEFI_TARGET,
+            "--no-deps",
+            "--document-private-items",
+        ],
+    ),
+];
+
+/// 直せない理由つきで許す rustdoc の警告（crate・警告の文言の頭・理由。2026-10-03）。**表に無い警告が 1 つでも在れば
+/// 落ちる。** **基準は 0 で、数の上限ではない**——数の上限にすると、減ったときに基準を下げ忘れる。**行を足すのは、
+/// 直せない理由が在るときだけ**（2026-10-03 に 123 の警告を全部直したので、いまは空である）。
+const ALLOWED_RUSTDOC_WARNINGS: &[(&str, &str, &str)] = &[];
+
+/// rustdoc の出力から、警告の行を取り出す（純粋な論理）。**「warning: 」で始まる行のうち、まとめの行
+/// （`generated N warning(s)`）を除く。** **許す表に在るものは除く。**
+fn rustdoc_warnings_not_allowed(crate_name: &str, stderr: &str) -> Vec<String> {
+    stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("warning: "))
+        .filter(|rest| !rest.contains(" generated ") || !rest.contains(" warning"))
+        .filter(|rest| {
+            !ALLOWED_RUSTDOC_WARNINGS
+                .iter()
+                .any(|(allowed_crate, head, _)| {
+                    *allowed_crate == crate_name && rest.starts_with(head)
+                })
+        })
+        .map(|rest| format!("{crate_name}: {rest}"))
+        .collect()
+}
+
+/// rustdoc を 4 つの crate で回し、許していない警告を集める（2026-10-03）。**成功と警告の数を返す。**
+fn check_rustdoc_warnings(workspace_root: &Path) -> Result<(usize, Vec<String>)> {
+    let mut findings = Vec::new();
+    let mut total = 0usize;
+    for (crate_name, args) in RUSTDOC_TARGETS {
+        let output = Command::new("cargo")
+            .current_dir(workspace_root)
+            .args(*args)
+            .output()
+            .with_context(|| format!("failed to invoke cargo doc for {crate_name}"))?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            findings.push(format!(
+                "{crate_name}: cargo doc failed ({}): {}",
+                output.status,
+                stderr.lines().rev().take(5).collect::<Vec<_>>().join(" | ")
+            ));
+            continue;
+        }
+        let warnings = rustdoc_warnings_not_allowed(crate_name, &stderr);
+        total += warnings.len();
+        findings.extend(warnings);
+    }
+    Ok((total, findings))
+}
+
+/// `# Safety` の節が、`unsafe` でない項目に付いている所を挙げる（純粋な論理。2026-10-03）。
+///
+/// **見出しが `# Safety` そのものの doc の行を探し、その doc の塊（`///`・`#[…]`・空行）の直後の項目の行に `unsafe`
+/// が無ければ挙げる。** **`# Safety（…）` や `# Safety の代わりに…` のような別の見出しは見ない**（設計の不変条件の
+/// 列挙や、呼べる場所の説明である）。**`unsafe fn` に `# Safety` が無い逆向きは見ない**（2026-10-03 に数えて 27 か所。
+/// `docs/deferred-decisions.md` の行）。
+fn safety_sections_on_safe_items(source: &str) -> Vec<(usize, String)> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut findings = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let Some(doc) = line.trim_start().strip_prefix("///") else {
+            continue;
+        };
+        if doc.trim() != "# Safety" {
+            continue;
+        }
+        let mut next = index + 1;
+        while next < lines.len() {
+            let t = lines[next].trim();
+            // **属性が複数行に渡ることがある**（`#[cfg(` … `)]`）——`#[` で始まったら `]` で終わる行まで飛ばす。
+            if t.starts_with("///") || t.is_empty() {
+                next += 1;
+            } else if t.starts_with("#[") {
+                while next < lines.len() && !lines[next].trim_end().ends_with(']') {
+                    next += 1;
+                }
+                next += 1;
+            } else {
+                break;
+            }
+        }
+        let item = lines.get(next).map(|l| l.trim()).unwrap_or("");
+        let is_unsafe = item.split_whitespace().any(|word| word == "unsafe");
+        if !is_unsafe {
+            findings.push((next + 1, item.chars().take(80).collect()));
+        }
+    }
+    findings
+}
+
+/// 追跡している `.rs` を読み、`# Safety` の節が `unsafe` でない項目に付いている所を挙げる（2026-10-03）。
+fn find_safety_sections_on_safe_items(workspace_root: &Path) -> Result<Vec<String>> {
+    let listing = checked_files(workspace_root, &["*.rs"])?;
+    let mut findings = Vec::new();
+    for relative in listing.iter().map(String::as_str) {
+        let path = workspace_root.join(relative);
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        for (line, item) in safety_sections_on_safe_items(&source) {
+            findings.push(format!("{relative}:{line}: {item}"));
+        }
+    }
+    Ok(findings)
+}
+
 fn find_unsafe_without_safety_comment(workspace_root: &Path) -> Result<Vec<String>> {
     // **追跡済みだけでなく、未追跡のファイルも見る。**
     //
@@ -27592,6 +27745,61 @@ fn cmd_check(full: bool, commit: bool, update_reference: bool) -> Result<()> {
         }
     }
 
+    // **rustdoc の警告が 0 であること**（2026-10-03。許す表 + 基準 0。[`ALLOWED_RUSTDOC_WARNINGS`]）。**`CHECKS` の
+    // ビルドの直後に置く**——組んだ直後なので、依存の分は温まっている。
+    total += 1;
+    begin_item(
+        Family::Base,
+        "rustdoc raises no warning that is not allowed with a reason",
+    );
+    match check_rustdoc_warnings(&workspace_root) {
+        Ok((_, findings)) if findings.is_empty() => println!(
+            "--- rustdoc warnings: OK (0 across {} crate(s); {} allowed with a reason)",
+            RUSTDOC_TARGETS.len(),
+            ALLOWED_RUSTDOC_WARNINGS.len()
+        ),
+        Ok((_, findings)) => {
+            for finding in &findings {
+                println!("    {finding}");
+            }
+            println!(
+                "--- rustdoc warnings: FAILED ({} finding(s); fix the doc, or allow it with a reason in \
+                 ALLOWED_RUSTDOC_WARNINGS)",
+                findings.len()
+            );
+            failed.push("rustdoc warnings".to_string());
+        }
+        Err(error) => {
+            println!("--- rustdoc warnings: FAILED ({error:#})");
+            failed.push("rustdoc warnings".to_string());
+        }
+    }
+
+    // **`# Safety` の節は `unsafe` な項目にだけ付く**（2026-10-03）。
+    total += 1;
+    begin_item(
+        Family::Base,
+        "a `# Safety` section sits only on unsafe items",
+    );
+    match find_safety_sections_on_safe_items(&workspace_root) {
+        Ok(findings) if findings.is_empty() => println!("--- safety sections: OK"),
+        Ok(findings) => {
+            for finding in &findings {
+                println!("    {finding}");
+            }
+            println!(
+                "--- safety sections: FAILED ({} item(s) that are not unsafe carry a `# Safety` section; \
+                 make the item unsafe or rename the heading)",
+                findings.len()
+            );
+            failed.push("safety sections".to_string());
+        }
+        Err(error) => {
+            println!("--- safety sections: FAILED ({error:#})");
+            failed.push("safety sections".to_string());
+        }
+    }
+
     total += 1;
     begin_item(
         Family::Base,
@@ -30993,8 +31201,8 @@ fn count_elements(text: &str) -> usize {
 
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
-    base: 60,
-    full: 457,
+    base: 62,
+    full: 459,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。
@@ -33918,6 +34126,47 @@ mod tests {
                 "{flag} is only in RUN_FLAGS"
             );
         }
+    }
+
+    /// **`# Safety` の節が `unsafe` でない項目に付いていれば挙がり、`unsafe fn`・`unsafe impl`・属性つき・別の見出しは
+    /// 挙がらない**（2026-10-03）。
+    #[test]
+    fn a_safety_section_on_a_safe_item_is_found() {
+        // **doc の行を文字列の中に直に書かない**——この検査自身がこのファイルを読むので、`///` を分けて組む。
+        let d = "///";
+        let source = format!(
+            "{d} # Safety\n{d}\n{d} a\npub fn safe_one() {{}}\n\n\
+             {d} # Safety\n{d}\n{d} b\n#[cfg(all(\n    feature = \"x\",\n))]\n\
+             pub(crate) unsafe fn unsafe_with_attribute() {{}}\n\n\
+             {d} # Safety\nunsafe impl Send for T {{}}\n\n\
+             {d} # Safety（別の見出し）\npub fn other_heading() {{}}\n\n\
+             {d} # Safety\n#[inline]\nextern \"sysv64\" fn entry() {{}}\n"
+        );
+        let found = safety_sections_on_safe_items(&source);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found[0].0, 4);
+        assert!(found[0].1.starts_with("pub fn safe_one"), "{found:?}");
+        assert!(found[1].1.starts_with("extern"), "{found:?}");
+    }
+
+    /// **rustdoc の出力から、まとめの行と許した警告を除いた警告の行だけを取り出す**（2026-10-03）。
+    #[test]
+    fn rustdoc_warning_lines_are_counted_without_the_summary() {
+        let stderr = "\
+ Documenting kernel v0.1.0
+warning: unresolved link to `RECOVERY`
+  --> kernel/src/arch/x86_64/ring3.rs:19:50
+warning: `kernel` (lib doc) generated 1 warning
+    Finished `dev` profile
+";
+        let found = rustdoc_warnings_not_allowed("kernel", stderr);
+        assert_eq!(
+            found,
+            vec!["kernel: unresolved link to `RECOVERY`".to_string()]
+        );
+        assert!(
+            rustdoc_warnings_not_allowed("kernel", " Documenting x\n    Finished\n").is_empty()
+        );
     }
 
     /// `/proc/<pid>/status` の `SigIgn:`（実測の形）から SIGXFSZ を読む。
