@@ -157,6 +157,8 @@ pub const PATH_RULES: &[PathRule] = &[
             "kernel/src/lib.rs",
             "kernel/src/panic.rs",
             "kernel/src/bkl.rs",
+            // **起動の終わりの目印**——**どの起動も立て、「起動の後はしない」決まりが読む。**
+            "kernel/src/boot.rs",
             "kernel/src/frame_allocator.rs",
             "kernel/src/memory_map.rs",
             // **ページの権限の一覧**——**既定の起動が時点ごとに要約を出し、どのユーザーのプログラムの終わりでも出す。**

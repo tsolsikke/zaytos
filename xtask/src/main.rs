@@ -24890,6 +24890,11 @@ const COMMON_ITEMS_FOR_HOMES: &[CommonItemsForHomes] = &[
         reason: "`arch` の入口が呼ぶシステムコールの入口と、遠征の間のユーザーの窓の設定",
     },
     CommonItemsForHomes {
+        module: "kernel::boot",
+        items: &["finished"],
+        reason: "起動の終わりの目印。「起動の後はしない」決まり（ページテーブルの `ensure_child` の守り）が読む",
+    },
+    CommonItemsForHomes {
         module: "kernel::task",
         items: &[
             "current_ring3_slot",

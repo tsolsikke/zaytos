@@ -37,6 +37,7 @@ pub mod enabled_features {
 pub mod abi;
 pub mod arch;
 pub mod bkl;
+pub mod boot;
 pub mod console;
 pub mod frame_allocator;
 pub mod graphics;

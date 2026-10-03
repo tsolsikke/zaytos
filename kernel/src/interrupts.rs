@@ -433,14 +433,15 @@ impl core::fmt::Display for InterruptSource {
 
 /// 外からの割り込みの処理の表（`ADR-0072` の 5。2026-09-28。9d-4）。添字は源の番号である。
 ///
-/// 登録は起動の間だけで、閉じた（[`Self::close`]）後は断る。起動の後は表が変わらないので、割り込みの中で
-/// 読むのにロックが要らない（BKL を取らない種類からも読める）。
+/// 登録は起動の間だけで、起動の後（`crate::boot::finished`）は断る。起動の後は表が変わらないので、割り込みの中で
+/// 読むのにロックが要らない（BKL を取らない種類からも読める）。**表は自分の閉じた印を持たない**（2026-10-03。
+/// それまでは `closed` を持ち、起動の終わりに閉じていた。目印を共通の側の 1 つにまとめた）——**起動の後かは、
+/// 登録の入口（[`register_interrupt_handler`]）が目印を読んで渡す**（純粋な論理のまま、ホストで試せる）。
 ///
 /// 処理を整数で持つのは、`common::percpu` の `install_cpu_id_reader` と同じ形である（0 は「登録なし」。
 /// 関数のポインタは 0 にならない）。
 struct HandlerTable {
     handlers: [AtomicUsize; INTERRUPT_SOURCES],
-    closed: AtomicBool,
 }
 
 /// 登録を断った理由。
@@ -458,17 +459,17 @@ impl HandlerTable {
     const fn new() -> Self {
         Self {
             handlers: [const { AtomicUsize::new(0) }; INTERRUPT_SOURCES],
-            closed: AtomicBool::new(false),
         }
     }
 
-    /// 源に処理を登録する。閉じた後・表の外・2 つ目は断る。
+    /// 源に処理を登録する。起動の後（`after_boot`）・表の外・2 つ目は断る。
     fn register(
         &self,
         source: InterruptSource,
         handler: fn(InterruptSource),
+        after_boot: bool,
     ) -> Result<(), Refusal> {
-        if self.closed.load(Ordering::Acquire) {
+        if after_boot {
             return Err(Refusal::AfterBoot);
         }
         let slot = self
@@ -478,12 +479,6 @@ impl HandlerTable {
         slot.compare_exchange(0, handler as usize, Ordering::Release, Ordering::Relaxed)
             .map(|_| ())
             .map_err(|_| Refusal::AlreadyRegistered)
-    }
-
-    /// 登録を閉じ、処理のある源の一覧を返す。
-    fn close(&self) -> RegisteredSources {
-        self.closed.store(true, Ordering::Release);
-        self.sources()
     }
 
     /// 処理のある源の一覧（小さい順）。登録は閉じない。
@@ -554,13 +549,13 @@ static INTERRUPT_HANDLERS: HandlerTable = HandlerTable::new();
 ///
 /// - 呼ぶのは装置のドライバで、起動の途中、その源を許可する前に 1 回だけ呼ぶ（処理を登録してから源を許可する）。
 ///   今の呼び手（キーボードと virtio-blk の用意）は、ほかの CPU が走り出す前で、割り込みを止めた所にいる。
-/// - 起動の後（[`close_interrupt_handler_registration`] の後）に呼ぶと、名前つきで止まる。書く側の守り（ページ
-///   テーブルの `ensure_child`）と同じ形である。表の外の番号と、同じ源への 2 つ目の登録も、名前つきで止まる。
+/// - 起動の後（`crate::boot::finished` が真）に呼ぶと、名前つきで止まる。書く側の守り（ページテーブルの
+///   `ensure_child`）と同じ目印を読む。表の外の番号と、同じ源への 2 つ目の登録も、名前つきで止まる。
 /// - 登録した処理は、その源の割り込みが届くたびに、BKL の中で、完了させる前に呼ばれる。引数は源の番号である
 ///   （9e。それまでは到着の番号（x86 ではベクタ）だった）。レベルで鳴る源の処理は、源を下ろしてから戻ること
 ///   （`ADR-0072` の 4）。
 pub fn register_interrupt_handler(source: InterruptSource, handler: fn(InterruptSource)) {
-    match INTERRUPT_HANDLERS.register(source, handler) {
+    match INTERRUPT_HANDLERS.register(source, handler, crate::boot::finished()) {
         Ok(()) => {}
         Err(Refusal::AfterBoot) => panic!(
             "interrupts: refused to register a handler for source {source} after boot; the handler table \
@@ -619,14 +614,6 @@ pub fn report_arrivals_without_handler_once<W: core::fmt::Write>(logger: &mut Lo
         "interrupts: disabled source {source}, which arrived with no handler registered ({arrivals} \
          arrival(s) without a handler so far)"
     ));
-}
-
-/// 割り込みの処理の登録を閉じる（`ADR-0072` の 5。2026-09-28。9d-4）。
-///
-/// **起動の終わり、カーネル側の PML4 の指紋を採った直後に 1 回だけ呼ぶ**（`ADR-0072` の 5 が決めた時点）。この後の
-/// 登録は名前つきで止まる。戻り値は、処理のある源の一覧である（起動ログの行に出す）。
-pub fn close_interrupt_handler_registration() -> RegisteredSources {
-    INTERRUPT_HANDLERS.close()
 }
 
 /// 処理を登録してある源の一覧（小さい順。`ADR-0072` の 5。2026-09-28。9d-5）。登録は閉じない。
@@ -1692,7 +1679,7 @@ mod tests {
             ARRIVED.store(u64::from(source.table_index()) + 100, Ordering::Relaxed);
         }
         let table = HandlerTable::new();
-        assert_eq!(table.register(source(1), record), Ok(()));
+        assert_eq!(table.register(source(1), record, false), Ok(()));
         assert!(table.handler(source(2)).is_none());
         let handler = table
             .handler(source(1))
@@ -1702,12 +1689,14 @@ mod tests {
     }
 
     #[test]
-    fn registration_is_refused_after_the_table_is_closed() {
+    fn registration_is_refused_after_boot() {
         fn ignore(_source: InterruptSource) {}
         let table = HandlerTable::new();
-        assert_eq!(table.register(source(1), ignore), Ok(()));
-        let _ = table.close();
-        assert_eq!(table.register(source(11), ignore), Err(Refusal::AfterBoot));
+        assert_eq!(table.register(source(1), ignore, false), Ok(()));
+        assert_eq!(
+            table.register(source(11), ignore, true),
+            Err(Refusal::AfterBoot)
+        );
         assert!(table.handler(source(1)).is_some());
         assert!(table.handler(source(11)).is_none());
     }
@@ -1720,9 +1709,9 @@ mod tests {
         }
         fn second(_source: InterruptSource) {}
         let table = HandlerTable::new();
-        assert_eq!(table.register(source(11), first), Ok(()));
+        assert_eq!(table.register(source(11), first, false), Ok(()));
         assert_eq!(
-            table.register(source(11), second),
+            table.register(source(11), second, false),
             Err(Refusal::AlreadyRegistered)
         );
         table.handler(source(11)).expect("the first handler stays")(source(11));
@@ -1734,32 +1723,25 @@ mod tests {
         fn ignore(_source: InterruptSource) {}
         let table = HandlerTable::new();
         assert_eq!(
-            table.register(source(16), ignore),
+            table.register(source(16), ignore, false),
             Err(Refusal::OutsideTable)
         );
         assert!(table.handler(source(16)).is_none());
     }
 
     #[test]
-    fn closing_lists_the_sources_with_a_handler() {
+    fn the_sources_with_a_handler_are_listed_in_order() {
         fn ignore(_source: InterruptSource) {}
-        assert_eq!(format!("{}", HandlerTable::new().close()), "none");
+        assert_eq!(format!("{}", HandlerTable::new().sources()), "none");
         let table = HandlerTable::new();
-        assert_eq!(table.register(source(11), ignore), Ok(()));
-        assert_eq!(table.register(source(1), ignore), Ok(()));
-        assert_eq!(format!("{}", table.close()), "1, 11");
-    }
-
-    #[test]
-    fn the_sources_can_be_listed_without_closing() {
-        fn ignore(_source: InterruptSource) {}
-        let table = HandlerTable::new();
-        assert_eq!(table.register(source(11), ignore), Ok(()));
-        assert_eq!(table.register(source(1), ignore), Ok(()));
+        assert_eq!(table.register(source(11), ignore, false), Ok(()));
+        assert_eq!(table.register(source(1), ignore, false), Ok(()));
+        assert_eq!(format!("{}", table.sources()), "1, 11");
         assert_eq!(table.sources().as_slice(), &[source(1), source(11)]);
-        assert_eq!(table.register(source(5), ignore), Ok(()));
+        // **一覧を読んでも登録は閉じない**（閉じるのは `crate::boot::finish` で、表は目印を持たない）。
+        assert_eq!(table.register(source(5), ignore, false), Ok(()));
         assert_eq!(
-            table.close().as_slice(),
+            table.sources().as_slice(),
             &[source(1), source(5), source(11)]
         );
     }

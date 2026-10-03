@@ -371,6 +371,7 @@ kernel::arch::x86_64::stack::tests::the_canary_differs_from_the_heap_poison
 kernel::arch::x86_64::stack::tests::the_guards_are_a_multiple_of_the_alignment
 kernel::arch::x86_64::stack::tests::the_kernel_guard_is_exactly_one_aligned_page
 kernel::arch::x86_64::stack::tests::the_stacks_are_a_multiple_of_the_required_alignment
+kernel::boot::tests::the_end_of_boot_is_announced_exactly_once
 kernel::console::dirty::tests::a_fully_offscreen_update_is_ignored
 kernel::console::dirty::tests::a_new_region_has_nothing_to_transfer
 kernel::console::dirty::tests::a_single_update_is_recorded_as_is
@@ -484,9 +485,8 @@ kernel::input::tests::plain_bytes_and_dropped_events_are_unchanged
 kernel::interrupts::tests::a_registered_handler_is_found_by_its_source
 kernel::interrupts::tests::a_second_handler_for_the_same_source_is_refused
 kernel::interrupts::tests::a_source_outside_the_table_is_refused
-kernel::interrupts::tests::closing_lists_the_sources_with_a_handler
-kernel::interrupts::tests::registration_is_refused_after_the_table_is_closed
-kernel::interrupts::tests::the_sources_can_be_listed_without_closing
+kernel::interrupts::tests::registration_is_refused_after_boot
+kernel::interrupts::tests::the_sources_with_a_handler_are_listed_in_order
 kernel::keyboard::buffer::tests::an_empty_ring_yields_nothing
 kernel::keyboard::buffer::tests::bytes_come_out_in_the_order_they_went_in
 kernel::keyboard::buffer::tests::overflow_drops_the_newest_and_keeps_a_valid_prefix

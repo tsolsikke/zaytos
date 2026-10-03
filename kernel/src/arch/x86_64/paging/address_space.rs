@@ -92,15 +92,11 @@ pub enum AddressSpaceError {
 
 /// 起動の終わり（`run_init` の前）に採った、カーネル側の PML4 の項目（添字 256〜511）の指紋
 /// （2026-09-27。`ADR-0071` の決定 5）。**0 は「まだ採っていない」を表す**（[`kernel_top_digest`] は 0 を返さない）。
+///
+/// **突き合わせ（[`AddressSpace::new`]）だけが読む。** **「起動の後か」の目印ではない**——その目印は
+/// `crate::boot::finished` の 1 つで、書く側の守り（`ActivePageTable` の `ensure_child`）はそちらを読む
+/// （2026-10-03 にまとめた。それまでは、この値が 0 でないことを目印にも使っていた）。
 static FROZEN_KERNEL_TOP: AtomicU64 = AtomicU64::new(0);
-
-/// 起動が終わったか（カーネル側の PML4 の指紋を採ったか）。**「起動の間」と「起動の後」を分ける目印は、
-/// 指紋を採った時点（`run_init` の直前）で切り替わるこれ 1 つである**（2026-09-27。`ADR-0071` の決定 5）。
-/// **書く側の守り（`ActivePageTable` の `ensure_child`）と突き合わせ（[`AddressSpace::new`]）は、
-/// どちらも同じ `FROZEN_KERNEL_TOP` を読む**——**目印を 2 か所で持たない。**
-pub fn kernel_top_is_frozen() -> bool {
-    FROZEN_KERNEL_TOP.load(Ordering::SeqCst) != 0
-}
 
 /// カーネル側の PML4 の項目を新しく作る書き込みを断るか（純粋な論理。2026-09-27）。**起動の後に、
 /// カーネル側の添字（256〜511）へ作るときだけ断る。** **ユーザー側の添字は、起動の後も各空間が自分の

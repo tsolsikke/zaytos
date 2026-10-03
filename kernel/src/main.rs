@@ -2063,10 +2063,12 @@ extern "sysv64" fn kernel_main() -> ! {
         }
     }
 
-    // **割り込みの処理の登録を閉じる**（2026-09-28。`ADR-0072` の 5）。**カーネル側の PML4 の指紋を採ったのと同じ
-    // 時点である。** **ここから後は、処理の表を誰も変えない**——割り込みの中で表を読むのにロックが要らないのは、
-    // これが理由である。この後の登録は名前つきで止まる。
-    let registered = kernel::interrupts::close_interrupt_handler_registration();
+    // **起動の終わりを告げる**（2026-10-03。`kernel::boot`）。**「起動の後はしない」決まりは、どれもこの 1 つの目印を
+    // 読む**——カーネル側の PML4 の項目を作らない（`ADR-0071` の決定 5）、割り込みの処理を登録しない（`ADR-0072` の 5）。
+    // **指紋を採ったのと同じ時点である**（それまでは、指紋と処理の表の閉じた印の 2 つが、ここで続けて立っていた）。
+    // **ここから後は、処理の表を誰も変えない**——割り込みの中で表を読むのにロックが要らないのは、これが理由である。
+    kernel::boot::finish();
+    let registered = kernel::interrupts::registered_interrupt_sources();
     logger.info(format_args!(
         "interrupts: closed handler registration before init (sources with a handler: {registered})"
     ));
