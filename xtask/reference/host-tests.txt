@@ -854,6 +854,7 @@ xtask::tests::a_copy_is_written_aside_and_then_put_in_place
 xtask::tests::a_copy_onto_itself_is_refused_and_the_file_is_kept
 xtask::tests::a_current_state_document_names_items_where_they_are_defined
 xtask::tests::a_current_state_document_names_moved_files_by_their_new_place
+xtask::tests::a_detached_line_is_counted_even_after_an_interleaved_prompt
 xtask::tests::a_difference_passes_only_with_a_reason_for_that_very_pair
 xtask::tests::a_failed_expectation_in_the_reference_is_caught
 xtask::tests::a_feature_reached_only_through_another_crate_is_followed

@@ -8407,6 +8407,24 @@ const SOCKET_TEST_SABOTAGES: &[&str] = &[
     "socket-recvmsg-takes-fd-first",
 ];
 
+/// `socket-test` の「ちょうど N 本」の判定が、プログラムの行を数える形。**行の終わりが `wanted` の行を
+/// 数える**——**行がまるごと `wanted` の行に加えて、前に別の文字列が付いた行も数える。**
+///
+/// **`sockd` は切り離して走る**ので、その行がシェルの書いている途中へ割り込むことがある。**`--full` で
+/// 1 度、`zeikos$ /sockd: client left` の 1 行になり、まるごと一致で数えると 7 本のうち 1 本が
+/// 欠けて落ちた**（2026-10-03。`docs/troubleshooting.md`）。**カーネルの計測（EOF 8）は合っていた**——
+/// **数え方の側の揺れである。**
+///
+/// **終わりでしか一致しない**——**`sockd: client left now` のように後ろに続く行は数えない。** **部分一致に
+/// しないのは、1 つの行が 2 つの文言に当たりうるからである**（`sockd: shm 6000 bytes ok=true` の
+/// 2 本を `== 2` で見る判定がある）。
+fn count_lines_ending_with(lines: &[&str], wanted: &str) -> usize {
+    lines
+        .iter()
+        .filter(|line| line.trim().ends_with(wanted))
+        .count()
+}
+
 /// `socket-test` の上限（秒）。**既定は台本のグループの水準（10 秒の桁）の見込みなので、その 10 倍。**
 const SOCKET_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -8528,7 +8546,9 @@ fn cmd_socket_test(features: &[&str], expect_pass: bool) -> Result<()> {
 
     let stripped = strip_ansi(&serial);
     let lines: Vec<&str> = stripped.lines().map(str::trim_end).collect();
-    let count_line = |wanted: &str| lines.iter().filter(|line| line.trim() == wanted).count();
+    // **行の終わりで数える**（`count_lines_ending_with`）——**`sockd` は切り離して走るので、その行が
+    // シェルの書いている途中へ割り込むことがある**（2026-10-03。`docs/troubleshooting.md`）。
+    let count_line = |wanted: &str| count_lines_ending_with(&lines, wanted);
     let number_after = |line: &str, key: &str| -> Option<u64> {
         let rest = &line[line.find(key)? + key.len()..];
         let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
@@ -33151,6 +33171,26 @@ mod tests {
         ] {
             assert_eq!(source.matches(direct).count(), 0, "{name}");
         }
+    }
+
+    /// **切り離して走る `sockd` の行が、シェルの書いている途中へ割り込んでも数えられる**（2026-10-03。
+    /// `--full` で 1 度落ちた形。`zeikos$ /` の直後に `sockd: client left` が入り、台本の行の残り
+    /// `bin/sockc quit` が次の行になった）。**前に何が来ても、終わりでしか一致しない。**
+    #[test]
+    fn a_detached_line_is_counted_even_after_an_interleaved_prompt() {
+        let lines = [
+            "sockd: accepted",
+            "zeikos$ /sockd: client left",
+            "bin/sockc quit",
+            "sockd: client left",
+            "sockd: client left now",
+            "sockd: client left; zeikos$ ",
+            "client left",
+            "  sockd: client left  ",
+        ];
+        assert_eq!(count_lines_ending_with(&lines, "sockd: client left"), 3);
+        assert_eq!(count_lines_ending_with(&lines, "sockd: accepted"), 1);
+        assert_eq!(count_lines_ending_with(&lines, "sockd: quit"), 0);
     }
 
     /// `/proc/<pid>/status` の `SigIgn:`（実測の形）から SIGXFSZ を読む。
