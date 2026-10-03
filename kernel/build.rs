@@ -104,10 +104,12 @@ fn build_user_programs(manifest_dir: &str, out_dir: &str) {
     const PROGRAMS: &[&str] = &[
         "hello",
         "fault-test",
-        // **実行できないページへ跳んで終了させられる 3 つ**（2026-10-03。ユーザーの写像の W^X）。
+        // **実行できないページへ跳んで終了させられる 4 つ**（2026-10-03。ユーザーの写像の W^X。`nx-brk` は
+        // `brk` の会計を直したときに足した）。
         "nx-stack",
         "nx-data",
         "nx-rodata",
+        "nx-brk",
         "syscall-test",
         "spawn-test",
         "ls",

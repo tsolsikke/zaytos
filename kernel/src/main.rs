@@ -5497,10 +5497,11 @@ static HELLO_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.elf"))
 /// 出所は [`HELLO_ELF`] と同じで、`kernel/userland/fault-test.rs` をビルドしたものである。
 static FAULT_TEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fault-test.elf"));
 
-/// 埋め込んだユーザープログラム `nx-stack`・`nx-data`・`nx-rodata` の ELF（2026-10-03）。
+/// 埋め込んだユーザープログラム `nx-stack`・`nx-data`・`nx-rodata`・`nx-brk` の ELF（2026-10-03）。
 /// **実行できないページへ跳んで、終了させられる**（`kernel/userland/nx-stack.rs` ほか）。
 static NX_STACK_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/nx-stack.elf"));
 static NX_DATA_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/nx-data.elf"));
+static NX_BRK_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/nx-brk.elf"));
 static NX_RODATA_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/nx-rodata.elf"));
 
 /// 埋め込んだユーザープログラム `syscall-test` の ELF（S9-b-3-2a）。
@@ -8754,6 +8755,10 @@ const NX_STACK_TARGET: u64 = 0x007f_f000;
 /// `nx-data` と `nx-rodata` が跳ぶ先（`.text` の次のページ。`kernel/userland/user.ld` の並び）。
 const NX_SECOND_PAGE_TARGET: u64 = 0x0040_1000;
 
+/// `nx-brk` が跳ぶ先（`brk` で伸ばした範囲の最後のページの先頭。2026-10-03）。**`nx-brk.rs` の即値
+/// （`brk` に渡す上端は、この 1 ページ上）と対になっている。** 食い違えば、止まった番地の突き合わせが落ちる。
+const NX_BRK_TARGET: u64 = 0x0040_f000;
+
 /// プロセスの終わり方（S9-b-3-2a）。**期待する側の記述である。**
 ///
 /// # なぜ表に持たせるか
@@ -8900,6 +8905,23 @@ const USER_PROGRAMS: &[UserProgram] = &[
         probes_abi: false,
         status_meanings: &[],
         argv: &[b"nx-rodata"],
+        enters_with_direction_flag: None,
+    },
+    // **`brk` で伸ばしたページへ跳ぶ**（2026-10-03。`brk` の会計を直したときに足した）。**稼働中の表へ 1 枚ずつ足す
+    // 経路のページも実行できないことと、伸ばしたまま終わっても空間ごとの会計が合うことを、起動時の経路で見る。**
+    // 実行できてしまえば、跳んだ先の `ud2` でベクタが 6 になり、判定行が食い違いとして止める。
+    UserProgram {
+        name: "nx-brk",
+        image: NX_BRK_ELF,
+        outcome: UserProgramOutcome::StopsFetchingAt {
+            target: NX_BRK_TARGET,
+        },
+        // 使わない（受け皿の `ud2` は、跳ぶ先そのものに置いてある）。
+        receiver_offset: 0,
+        expected_write: None,
+        probes_abi: false,
+        status_meanings: &[],
+        argv: &[b"nx-brk"],
         enters_with_direction_flag: None,
     },
     UserProgram {
