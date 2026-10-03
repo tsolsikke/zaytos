@@ -425,7 +425,7 @@ fn flush_if_generation_is_stale() {
 
 /// BKL を取る。**戻り値のガードが生きている間だけ保持される。**
 ///
-/// # Safety
+/// # 使い方の約束
 ///
 /// 安全な関数である。**ただし呼び出し側は、このガードを `hlt` を含む区間へ
 /// 持ち込まないこと。** それは型では防げない（doc とレビューで守る）。
@@ -601,9 +601,9 @@ pub fn acquire_counting_only(_entry: KernelEntry) -> BklGuard {
 ///
 /// **同時実行を要さない。** 待っている側の TSC が進めばよい。
 ///
-/// # Safety
+/// # 戻らない
 ///
-/// **戻らない。** 呼んだコアはそこで止まる。既定ビルドには存在しない。
+/// 呼んだコアはそこで止まる。既定ビルドには存在しない。
 #[cfg(feature = "bkl-hold-forever-test")]
 pub fn sabotage_hold_forever() -> ! {
     let guard = acquire(KernelEntry::ApBringUp);

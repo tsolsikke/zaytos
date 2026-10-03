@@ -921,9 +921,10 @@ pub unsafe fn length_of(ptr: *const u8, limit: usize) -> usize {
 ///
 /// **`d_reclen` を頼りに進む。** 0 なら止める——**進まない量で歩き続けない。**
 ///
-/// # Safety
+/// # 前提
 ///
-/// `buf` が `getdents64` の返したバイト数ぶんの、正しいレコード列であること。
+/// `buf` が `getdents64` の返したバイト数ぶんの、正しいレコード列であること（崩れていても、添字の境界の検査で止まる。
+/// メモリ安全の前提ではない）。
 pub fn for_each_dirent(buf: &[u8], mut body: impl FnMut(&[u8])) {
     let mut at = 0usize;
     while at + DIRENT_NAME_OFFSET <= buf.len() {

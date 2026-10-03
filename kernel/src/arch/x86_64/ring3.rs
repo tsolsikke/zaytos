@@ -355,7 +355,7 @@ pub fn current_excursion_recovery() -> u64 {
 
 /// 回復点のアドレスを載せる（W1-b。切り替えが書く）。
 ///
-/// # Safety の代わりに、呼べる場所を狭めてある
+/// # 呼べる場所を狭めてある（`unsafe` にする代わりに）
 ///
 /// **`pub` だが、呼ぶのは `crate::task::schedule_switch` だけである**
 /// （切り替えの割り込み禁止区間）。**遠征の出入りは [`run_excursion`] の中で

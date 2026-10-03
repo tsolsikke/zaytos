@@ -1219,9 +1219,9 @@ pub unsafe fn send_startup_ipi(lapic_virt: u64, apic_id: u8, vector: u8) -> bool
 
 /// Local APIC の MMIO を読める仮想アドレス（S3-b-2b-1）。
 ///
-/// # Safety
+/// # 前提
 ///
-/// `mapped` が [`map_and_probe`] の戻り値であること。
+/// `mapped` が [`map_and_probe`] の戻り値であること（番地を計算して返すだけで、メモリ安全の前提ではない）。
 pub fn lapic_virt_of(mapped: &MappedInterruptController) -> u64 {
     common::addr::direct_map()
         .phys_to_virt(mapped.local_apic_phys())
