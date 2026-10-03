@@ -122,7 +122,11 @@ impl ActivePageTable {
     /// 起動の後に用意する必要が出たら当たる（推測）。そのときは、決まりを外すのではなく、決めた窓の中に決めた権限で
     /// 新しく足すことだけを許す入口を 1 つ作る（`ADR-0071` の 2026-10-03 の追記）。
     fn refuse_kernel_mapping_change_after_boot(virt: VirtAddr) -> Result<(), MapUpdateError> {
-        if cfg!(feature = "kernel-top-write-unguarded-test") {
+        // 破壊テスト (kernel-mapping-rule-off-test): **この決まりだけを外す**（`ensure_child` の守りは残る。2 枚目が
+        // 働くことを見る）。**`kernel-top-write-unguarded-test` は、2 枚とも外す**（突き合わせが見つけることを見る）。
+        if cfg!(feature = "kernel-top-write-unguarded-test")
+            || cfg!(feature = "kernel-mapping-rule-off-test")
+        {
             return Ok(());
         }
         #[cfg(feature = "smp-tlb-shootdown-probe")]

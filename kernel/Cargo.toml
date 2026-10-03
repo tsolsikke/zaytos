@@ -78,6 +78,20 @@ kernel-top-write-after-boot-test = []
 # 2026-09-27（`ADR-0071` の決定 5）: 書く側の守りを外し、同じ書き込みをする。突き合わせが、実際に書かれた項目を
 # 見つける。`--paging-test kernel-top-write-unguarded-test`。
 kernel-top-write-unguarded-test = []
+# 2026-10-03（`ADR-0071` の手順 4 の 3 つ目の決まり）: 起動の後に、カーネルの像の PML4 の項目の下へ葉を 1 枚足しに行く。
+# 決まりが、項目を 1 つも書かずに断る。`--paging-test kernel-mapping-map-after-boot-test`。
+kernel-mapping-map-after-boot-test = []
+# 2026-10-03（同上）: 起動の後に、直接写像の 2MiB のページを割りに行く（権限を変える入口と同じ守り）。
+# `--paging-test kernel-mapping-change-after-boot-test`。
+kernel-mapping-change-after-boot-test = []
+# 2026-10-03（同上）: 試しの feature `smp-tlb-shootdown-probe` のビルドで、探りのページの隣を外しに行く。探りの 1 ページ
+# だけが許され、隣は断られる。`--smp-ap-test tlb-probe-neighbour`（2 つの feature を組む）。
+kernel-mapping-probe-neighbour-test = []
+# 2026-10-03: 起動の終わりを 2 度告げる。2 度目は名前つきで止まる。`--critical-test boot-finish-twice`。
+boot-finish-twice-test = []
+# 2026-10-03（`ADR-0071` の手順 4 の 3 つ目の決まり）: 決まりだけを外す（`ensure_child` の守りは残す）。
+# `kernel-top-write-after-boot-test` と組んで、2 枚目の守りが止めることを見る。`--paging-test kernel-top-write-rule-off`。
+kernel-mapping-rule-off-test = []
 # タイマを実際に動かす(M4-d-2)。
 interrupt-test-timer = ["interrupt-test"]
 # EOI の発行をわざと落とし、ティックが 1 回で止まることを確認する。

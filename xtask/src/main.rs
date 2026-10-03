@@ -259,6 +259,20 @@ struct CriticalTest {
 }
 
 const CRITICAL_TESTS: &[CriticalTest] = &[
+    // 2026-10-03: 起動の終わりの目印（`kernel::boot`）を 2 度立てる。**2 度目は名前つきで止まる**——2 度呼ばれる形は、
+    // 起動の順が崩れていることである。
+    CriticalTest {
+        name: "boot-finish-twice",
+        feature: "boot-finish-twice-test",
+        expected_markers: &[
+            "sabotage: announcing the end of boot a second time",
+            "boot: finish() was called twice; the end of boot is announced exactly once",
+            "halting (cli + hlt loop)",
+        ],
+        forbidden_markers: &["the end of boot was announced twice", "zash: ready"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
     CriticalTest {
         name: "double-lock",
         feature: "critical-test-double-lock",
@@ -752,17 +766,64 @@ const PAGING_TESTS: &[CriticalTest] = &[
     },
     // 2026-09-27（`ADR-0071` の決定 5）: 起動の後に、カーネル側の PML4 の空いた添字（260）へマップしに行く。
     //
-    // **書く側の守り（`ActivePageTable` の `ensure_child`）が、項目を作る前に名前つきで止める。** **突き合わせ
-    // （`AddressSpace::new`）は後で見つける側で、こちらは書く前に止める側である。**
+    // **2026-10-03 からは、3 つ目の決まり（起動の後はカーネル側の写像を足さない。`refuse_kernel_mapping_change_after_boot`）
+    // が、`ensure_child` の守りより先に、項目を 1 つも書かずに `KernelMappingFrozen` で断る。** **`ensure_child` の
+    // 守りは 2 枚目になった**（2026-10-02 までは、こちらが「refused to create a kernel-half PML4 entry」で止めていた）。
+    // **突き合わせ（`AddressSpace::new`）は後で見つける側で、こちらは書く前に止める側である。**
     CriticalTest {
         name: "kernel-top-write-after-boot-test",
         feature: "kernel-top-write-after-boot-test",
         expected_markers: &[
             "sabotage: mapping a page into the empty kernel-half PML4 slot 260 after boot",
+            "sabotage: the kernel-half write was refused before any entry was written (KernelMappingFrozen); halting",
+        ],
+        forbidden_markers: &["the write guard did not stop it", "zash: ready"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // 2026-10-03（`ADR-0071` の手順 4 の 3 つ目の決まり）: 起動の後に、カーネルの像の PML4 の項目（添字 511）の下へ葉を
+    // 1 枚足しに行く。**添字 260 の形（PML4 の項目を作る）と違い、既に在る項目の下へ足す形である。** **決まりが、項目を
+    // 1 つも書かずに `KernelMappingFrozen` で断る。**
+    CriticalTest {
+        name: "kernel-mapping-map-after-boot-test",
+        feature: "kernel-mapping-map-after-boot-test",
+        expected_markers: &[
+            "sabotage: mapping a kernel-half page under the kernel image's PML4 entry after boot",
+            "sabotage: the kernel mapping map after boot was refused (KernelMappingFrozen); halting",
+        ],
+        forbidden_markers: &["the rule did not stop it", "zash: ready"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // 2026-10-03（同上）: 起動の後に、直接写像の 2MiB のページを割りに行く。**既に在る写像を変える形で、権限を変える入口
+    // （`set_huge_page_uncached`・`mark_leaf_execute_disable`）と同じ守りを通る。**
+    CriticalTest {
+        name: "kernel-mapping-change-after-boot-test",
+        feature: "kernel-mapping-change-after-boot-test",
+        expected_markers: &[
+            "sabotage: splitting a direct-map huge page after boot",
+            "sabotage: the kernel mapping change after boot was refused (KernelMappingFrozen); halting",
+        ],
+        forbidden_markers: &["the rule did not stop it", "zash: ready"],
+        wait_for_full_timeout: false,
+        min_heartbeats: None,
+    },
+    // 2026-10-03（`ADR-0071` の手順 4 の 3 つ目の決まり）: **決まりだけを外し（`kernel-mapping-rule-off-test`）、同じ書き込み
+    // （起動の後に添字 260 へマップ）をする。** **2 枚目の守り（`ensure_child`）が、項目を作る前に元の文言で止める。**
+    // **「1 枚目だけ外す → 2 枚目が止める」「2 枚とも外す → 突き合わせが見つける（下の unguarded）」の両方を残す。**
+    CriticalTest {
+        name: "kernel-top-write-rule-off",
+        feature: "kernel-top-write-after-boot-test,kernel-mapping-rule-off-test",
+        expected_markers: &[
+            "sabotage: mapping a page into the empty kernel-half PML4 slot 260 after boot",
             "paging: refused to create a kernel-half PML4 entry after boot (index 260)",
             "halting (cli + hlt loop)",
         ],
-        forbidden_markers: &["the write guard did not stop it", "zash: ready"],
+        forbidden_markers: &[
+            "the write guard did not stop it",
+            "KernelMappingFrozen",
+            "zash: ready",
+        ],
         wait_for_full_timeout: false,
         min_heartbeats: None,
     },
@@ -24237,6 +24298,22 @@ const SMP_AP_TESTS: &[CriticalTest] = &[
     // バイナリのレイアウトで決まるため、無関係な変更で決定的に落ちた（S8-d）。
     // この破壊テストの本来の主張は「世代を上げなければ AP は世代フラッシュをしない」で
     // あり、それは flushes の不動が観測している。
+    // 2026-10-03（`ADR-0071` の手順 4 の 3 つ目の決まり）: 試しの feature のビルドで、探りのページの隣を起動の後に外しに
+    // 行く。**許しは探りの 1 ページに閉じていて、隣は `KernelMappingFrozen` で断られる。** 探りそのもの（探りのページを
+    // 外して AP の TLB を落とす）は、同じビルドで今までどおり通る（`tlb-shootdown` の主張をここでも期待する）。
+    CriticalTest {
+        name: "tlb-probe-neighbour",
+        feature: "smp-tlb-shootdown-probe,kernel-mapping-probe-neighbour-test",
+        expected_markers: &[
+            "sabotage: unmapping the page next to the probe page after boot",
+            "sabotage: the page next to the probe was refused (KernelMappingFrozen); only the probe page is allowed after boot",
+            "the ap touched the probe page 1 time(s)",
+            "the ap flushed",
+        ],
+        forbidden_markers: &["was not refused by the rule", "the ap did not flush"],
+        wait_for_full_timeout: true,
+        min_heartbeats: None,
+    },
     CriticalTest {
         name: "tlb-no-shootdown",
         feature: "smp-tlb-shootdown-probe,smp-tlb-no-generation-bump",
@@ -31212,7 +31289,7 @@ fn count_elements(text: &str) -> usize {
 /// 会計行の現在値。**検査を足したらここを上げ、あわせて会計行も更新すること。**
 const EXPECTED_CHECK_COUNT: ExpectedCheckCount = ExpectedCheckCount {
     base: 62,
-    full: 459,
+    full: 464,
 };
 
 /// `--shell-test` の破壊テストが `sendkey` と台本のグループにどう分かれているか（`ADR-0063` の (b3) の (b)）。

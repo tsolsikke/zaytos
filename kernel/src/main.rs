@@ -2121,6 +2121,54 @@ extern "sysv64" fn kernel_main() -> ! {
         ));
     }
 
+    // 破壊テスト (2026-10-03, kernel-mapping-map-after-boot-test / kernel-mapping-change-after-boot-test): **起動の後に、
+    // カーネル側の写像を足す・変えるに行く。** **3 つ目の決まりが、項目を 1 つも書かずに断る。**
+    #[cfg(any(
+        feature = "kernel-mapping-map-after-boot-test",
+        feature = "kernel-mapping-change-after-boot-test"
+    ))]
+    change_a_kernel_mapping_after_boot(&mut logger);
+
+    // 破壊テスト (2026-10-03, kernel-mapping-probe-neighbour-test): **試しの feature のビルドで、探りのページの隣を
+    // 外しに行く。** **探りの 1 ページだけが許され、隣は断られる**（許しが番地で閉じていることを見る）。
+    #[cfg(all(
+        feature = "smp-tlb-shootdown-probe",
+        feature = "kernel-mapping-probe-neighbour-test"
+    ))]
+    {
+        use kernel::arch::x86_64::paging::active::{ActivePageTable, MapUpdateError};
+        let probe = kernel::smp::shootdown_probe::virt();
+        logger.info(format_args!(
+            "sabotage: unmapping the page next to the probe page after boot ({:#x})",
+            probe + 4096
+        ));
+        // SAFETY: 破壊テスト。断られるのが正しい（隣はマップしていないので、通っても外すものは無い）。
+        let result = common::addr::VirtAddr::new(probe + 4096).map(|virt| unsafe {
+            ActivePageTable::current(common::addr::direct_map()).unmap_4kib(virt)
+        });
+        match result {
+            Some(Err(MapUpdateError::KernelMappingFrozen)) => logger.info(format_args!(
+                "sabotage: the page next to the probe was refused (KernelMappingFrozen); only the probe page \
+                 is allowed after boot"
+            )),
+            other => logger.error(format_args!(
+                "sabotage: the page next to the probe was not refused by the rule ({other:?})"
+            )),
+        }
+    }
+
+    // 破壊テスト (2026-10-03, boot-finish-twice-test): **起動の終わりを 2 度告げる。** 2 度目は名前つきで止まる。
+    #[cfg(feature = "boot-finish-twice-test")]
+    {
+        logger.info(format_args!(
+            "sabotage: announcing the end of boot a second time"
+        ));
+        kernel::boot::finish();
+        logger.error(format_args!(
+            "sabotage: the second finish() went through; the end of boot was announced twice"
+        ));
+    }
+
     run_init(&mut logger, console.as_mut());
 }
 
@@ -2176,6 +2224,75 @@ fn write_a_kernel_half_entry_after_boot(logger: &mut Logger<Serial>) {
         "sabotage: the write went through ({result:?}); the write guard did not stop it"
     ));
     frame_allocator::give_back(allocator);
+}
+
+/// 破壊テスト `kernel-mapping-map-after-boot-test` と `kernel-mapping-change-after-boot-test` の本体（2026-10-03。
+/// `ADR-0071` の手順 4 の 3 つ目の決まり）。**起動の後に、カーネル側の写像を足す（既に在る PML4 の項目の下に葉を
+/// 1 枚）か、変える（直接写像の 2MiB のページを割る）に行く。** **決まりが、項目を 1 つも書かずに
+/// `KernelMappingFrozen` で断る。** 断られたら名前つきで止まり、通ったら通ったことを出す（試験はその行とシェルの起動を
+/// 禁じている）。
+#[cfg(any(
+    feature = "kernel-mapping-map-after-boot-test",
+    feature = "kernel-mapping-change-after-boot-test"
+))]
+fn change_a_kernel_mapping_after_boot(logger: &mut Logger<Serial>) {
+    use kernel::arch::x86_64::paging::active::{ActivePageTable, MapUpdateError};
+    #[cfg(feature = "kernel-mapping-map-after-boot-test")]
+    use kernel::paging::permissions::PagePermissions;
+    let Some(allocator) = frame_allocator::take() else {
+        logger.error(format_args!(
+            "sabotage: the frame allocator is not available"
+        ));
+        return;
+    };
+    let direct_map = common::addr::direct_map();
+    // SAFETY: 破壊テスト。稼働中の表を direct map 越しに辿る。**決まりが、項目を読む前に断る。**
+    let mut table = unsafe { ActivePageTable::current(direct_map) };
+    #[cfg(feature = "kernel-mapping-map-after-boot-test")]
+    let (what, result) = {
+        // **カーネルの像の PML4 の項目（添字 511）の下の、像より上の空いた番地。** 添字 260 の形（`ensure_child` の
+        // 守りが項目を作る所）とは違い、既に在る項目の下へ葉を足す形である。
+        let (Some(frame), Some(virt)) = (
+            allocator.allocate_frame(),
+            common::addr::VirtAddr::new(0xFFFF_FFFF_8100_0000),
+        ) else {
+            logger.error(format_args!("sabotage: no frame or no canonical address"));
+            frame_allocator::give_back(allocator);
+            return;
+        };
+        logger.info(format_args!(
+            "sabotage: mapping a kernel-half page under the kernel image's PML4 entry after boot"
+        ));
+        // SAFETY: 破壊テスト。断られるのが正しい。通ったときは、新しい葉を 1 枚足しただけである。
+        let result =
+            unsafe { table.map_4kib(virt, frame, PagePermissions::kernel_data(), allocator) };
+        if result.is_err() {
+            let _ = allocator.deallocate_frame(frame);
+        }
+        ("map", result)
+    };
+    #[cfg(feature = "kernel-mapping-change-after-boot-test")]
+    let (what, result) = {
+        // **直接写像の 2MiB のページ（カーネルの像の次の 2MiB）を割りに行く。** 権限を変える入口と同じ守りを通る。
+        let virt = direct_map.phys_to_virt(common::addr::PhysAddr::new(0x0080_0000).unwrap());
+        logger.info(format_args!(
+            "sabotage: splitting a direct-map huge page after boot ({:#x})",
+            virt.as_u64()
+        ));
+        // SAFETY: 破壊テスト。断られるのが正しい。通ったときは、2MiB のページを 4KiB の葉に割っただけである。
+        let result = unsafe { table.split_huge_page(virt, allocator) }.map(|_| ());
+        ("change", result)
+    };
+    frame_allocator::give_back(allocator);
+    if result == Err(MapUpdateError::KernelMappingFrozen) {
+        logger.info(format_args!(
+            "sabotage: the kernel mapping {what} after boot was refused (KernelMappingFrozen); halting"
+        ));
+        cpu::halt_forever();
+    }
+    logger.error(format_args!(
+        "sabotage: the kernel mapping {what} after boot went through ({result:?}); the rule did not stop it"
+    ));
 }
 
 /// ハートビートを何本出してからシェルへ渡すか（S11-11）。
@@ -11114,6 +11231,31 @@ const TEST_HOOKS: &[(&str, bool, &str)] = &[
         "kernel-top-write-unguarded-test",
         cfg!(feature = "kernel-top-write-unguarded-test"),
         "書く側の守りを外し、起動の後にカーネル側の PML4 の空いた添字へマップしに行く",
+    ),
+    (
+        "kernel-mapping-map-after-boot-test",
+        cfg!(feature = "kernel-mapping-map-after-boot-test"),
+        "起動の後に、カーネルの像の PML4 の項目の下へ葉を 1 枚足しに行く",
+    ),
+    (
+        "kernel-mapping-change-after-boot-test",
+        cfg!(feature = "kernel-mapping-change-after-boot-test"),
+        "起動の後に、直接写像の 2MiB のページを割りに行く",
+    ),
+    (
+        "kernel-mapping-probe-neighbour-test",
+        cfg!(feature = "kernel-mapping-probe-neighbour-test"),
+        "試しの feature のビルドで、探りのページの隣を起動の後に外しに行く",
+    ),
+    (
+        "boot-finish-twice-test",
+        cfg!(feature = "boot-finish-twice-test"),
+        "起動の終わりを 2 度告げる",
+    ),
+    (
+        "kernel-mapping-rule-off-test",
+        cfg!(feature = "kernel-mapping-rule-off-test"),
+        "起動の後にカーネル側の写像を足さない決まりだけを外す（PML4 の項目を作る守りは残す）",
     ),
     (
         "no-eoi-test",
