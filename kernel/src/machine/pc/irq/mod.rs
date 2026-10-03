@@ -51,12 +51,12 @@
 //!
 //! | 公開関数 | 扱い | 理由 |
 //! |---|---|---|
-//! | [`unmask`] | [`Controller`] へ委譲 | 実装ごとに答えが変わる |
-//! | [`mask_all`] | [`Controller`] へ委譲 | 同上 |
-//! | [`end_of_interrupt`] | [`Controller`] へ委譲 | 同上 |
-//! | [`is_spurious`] | [`Controller`] へ委譲 | 同上 |
-//! | [`check_masks`] | [`Controller`] へ委譲 | 同上 |
-//! | [`configure_timer`] | [`TimerSource`] へ委譲 | 同上 |
+//! | [`unmask`] | `Controller` へ委譲 | 実装ごとに答えが変わる |
+//! | [`mask_all`] | `Controller` へ委譲 | 同上 |
+//! | [`end_of_interrupt`] | `Controller` へ委譲 | 同上 |
+//! | [`is_spurious`] | `Controller` へ委譲 | 同上 |
+//! | [`check_masks`] | `Controller` へ委譲 | 同上 |
+//! | [`configure_timer`] | `TimerSource` へ委譲 | 同上 |
 //! | [`init`] | PIC 専用 | 8259 の再マップ（ICW1 から ICW4）そのもので、APIC 側に対応物が無い。I/O APIC 側の初期設定は形が違うので、S2-d-1c で `init` の扱いと合わせて改めて判断する |
 //! | [`service_snapshot`] | PIC 専用 | 8259 の ISR を読む診断であり、LAPIC の ISR は 8 本で形が違う。配送が移る段階（S2-d-1c 以降）で形を決める |
 //! | [`vector_for`] | モジュール関数 | `const fn` である。固定ツールチェイン（1.97.1）で const trait method が安定しておらず、trait へ入れると [`crate::arch::x86_64::idt::PIC_TIMER_VECTOR`] が定義できない |
@@ -81,8 +81,8 @@
 //! # `TimerSource` は実装が 1 つしかない。これは原則の例外である
 //!
 //! S0-a は「実装が 2 つになるまで trait を切らない」と決めており、S2-d-1b は
-//! [`Controller`] についてはそれを満たす（`Legacy` と `Apic`）。
-//! [`TimerSource`] は満たしていない。実装は PIT の 1 つだけで、Local APIC
+//! `Controller` についてはそれを満たす（`Legacy` と `Apic`）。
+//! `TimerSource` は満たしていない。実装は PIT の 1 つだけで、Local APIC
 //! タイマ側は S2-d-2 で足す。単一実装の trait であることを、書かずに
 //! 通さない。
 //!
@@ -110,7 +110,7 @@
 //! # まだ置き場の決まっていない操作（S2-d-1c で決める）
 //!
 //! redirection entry の設定を担う操作が、trait にも境界にも無い。
-//! [`Controller::unmask`] はマスクを外すだけだが、I/O APIC ではその前に
+//! `Controller::unmask` はマスクを外すだけだが、I/O APIC ではその前に
 //! ベクタ・配送モード・宛先を entry へ書き込む必要がある。PIC 側では
 //! この役割を [`init`] が担っていたが、その `init` は PIC 専用として残した
 //! ので、APIC 側には置き場が無い。
@@ -874,7 +874,7 @@ pub unsafe fn mask_all() {
 ///
 /// PIC では In-Service Register を読んで判定する。読み出し自体に副作用が
 /// あるため `unsafe` にしてある。判定そのものは純粋関数
-/// （[`pic::is_spurious`]）で、ホストテストで固定してある。
+/// （`pic::is_spurious`）で、ホストテストで固定してある。
 ///
 /// # Safety
 ///
@@ -1534,7 +1534,7 @@ pub unsafe fn enable_interrupt_controller_for_this_cpu() -> Option<LocalApicEnab
 ///
 /// # Safety
 ///
-/// [`apic::arm_timer_for_this_cpu`] の契約をそのまま引き継ぐ。戻った時点から
+/// `apic::arm_timer_for_this_cpu` の契約をそのまま引き継ぐ。戻った時点から
 /// ティックが届きうる。
 pub unsafe fn enable_local_timer_for_this_cpu() -> Option<(u32, u32)> {
     // SAFETY: 呼び出し側の契約をそのまま引き継ぐ。

@@ -286,7 +286,7 @@ unsafe fn config_read(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
 ///
 /// # Safety
 ///
-/// [`config_read`] の契約そのままである——**BSP だけが走っており（AP 起床前）、
+/// `config_read` の契約そのままである——**BSP だけが走っており（AP 起床前）、
 /// 割り込みが無効である位置から呼ぶこと。** 呼び出し位置が契約である
 /// （`kernel_main` の ACPI 走査の直後。AP の起床と `sti` はどちらも後段にある）。
 ///

@@ -8,7 +8,7 @@
 //!
 //! ベクタ 0x80 の IDT ゲートを DPL=3 の割り込みゲートにし、[`crate::arch::x86_64::idt`] の
 //! `zeikos_syscall_stub` へ向ける。スタブは IRQ スタイルの復元経路をコピーした
-//! `zeikos_syscall_common` へ jmp し、GPR 15 本を退避して [`syscall_entry`] を
+//! `zeikos_syscall_common` へ jmp し、GPR 15 本を退避して `syscall_entry` を
 //! 呼ぶ。Ring 3 からの `int 0x80` は特権変化（3→0）なので、CPU が TSS.RSP0 の
 //! スタックへ自動で切り替える（M5-c/d で更新している RSP0 がここで効く）。
 //!
@@ -1069,7 +1069,7 @@ unsafe fn flush_root_image(bkl: &mut Option<crate::bkl::BklGuard>) -> Result<(),
 /// 切り離して起動するスロットから端末へ書いた回数（`ADR-0063` の (b3) の計測）。
 static TERMINAL_WRITES_FROM_DETACHED: AtomicU64 = AtomicU64::new(0);
 
-/// [`TERMINAL_WRITES_FROM_DETACHED`] の値。
+/// `TERMINAL_WRITES_FROM_DETACHED` の値。
 pub fn terminal_writes_from_detached() -> u64 {
     TERMINAL_WRITES_FROM_DETACHED.load(Ordering::Relaxed)
 }
@@ -1081,12 +1081,12 @@ static DETACHED_ENTRY_WAIT_TICKS_MAX: AtomicU64 = AtomicU64::new(0);
 /// [`SYS_SPAWN_DETACHED`] を通った回数（計測）。
 static DETACHED_STARTS: AtomicU64 = AtomicU64::new(0);
 
-/// [`DETACHED_ENTRY_WAIT_TICKS_MAX`] の値。
+/// `DETACHED_ENTRY_WAIT_TICKS_MAX` の値。
 pub fn detached_entry_wait_ticks_max() -> u64 {
     DETACHED_ENTRY_WAIT_TICKS_MAX.load(Ordering::Relaxed)
 }
 
-/// [`DETACHED_STARTS`] の値。
+/// `DETACHED_STARTS` の値。
 pub fn detached_starts() -> u64 {
     DETACHED_STARTS.load(Ordering::Relaxed)
 }
@@ -2072,7 +2072,7 @@ unsafe fn write_to_socket(
 }
 
 /// `mmap` がマップする基点（プロセスごと）。**イメージ・ヒープ・スタックは `0x400000..0x800000` に
-/// 収まっているので、その上（PML4[0] の空き）へ順にマップする**（`ADR-0065`。ウィンドウの拡張は要らない）。
+/// 収まっているので、その上（PML4\[0\] の空き）へ順にマップする**（`ADR-0065`。ウィンドウの拡張は要らない）。
 pub(crate) const MMAP_BASE: u64 = 0x1000_0000;
 
 /// 次に `mmap` でマップするアドレス（スロットごと。`MMAP_BASE` から上へ）。

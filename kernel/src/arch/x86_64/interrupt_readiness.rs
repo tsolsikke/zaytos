@@ -422,7 +422,7 @@ pub fn loop_iterations() -> u64 {
 ///
 /// # Safety
 ///
-/// 割り込みを有効化する。[`verify_ready_for_sti`](crate::arch::x86_64::interrupt_readiness::verify_ready_for_sti) が
+/// 割り込みを有効化する。[`verify_ready_for_sti`] が
 /// [`ReadinessReport::may_enable_interrupts`](crate::arch::x86_64::interrupt_readiness::ReadinessReport::may_enable_interrupts)
 /// を返した後にのみ呼ぶこと。
 pub unsafe fn spin_with_interrupts_enabled(

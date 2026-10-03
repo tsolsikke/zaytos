@@ -33,7 +33,7 @@ use crate::syscall::{MAX_ARGV_BYTES, MAX_ENVP_BYTES, MAX_EXECUTABLE_SIZE, PATH_M
 
 /// ユーザープログラムを走らせる空間のユーザーサブツリーの添字（S9-b-1）。
 ///
-/// **[`USER_PML4_INDEX`]（= 1）とは別である。** あちらは本番の空間の値で、
+/// **`USER_PML4_INDEX`（= 1。`kernel/src/main.rs`）とは別である。** あちらは本番の空間の値で、
 /// 起動時の検証 3 本が使っている。**プログラムは自分の空間を持つので、添字も
 /// 自分で決められる**（`AddressSpace` が添字を持つ。S7-e）。
 ///
@@ -890,7 +890,7 @@ pub enum SpawnOutcome {
 ///
 /// # 「走らせるプログラムの一覧」とは別物である
 ///
-/// あちらは [`USER_PROGRAMS`] で、**静的な記述**である（`TASK_COUNT` や
+/// あちらは `USER_PROGRAMS`（`kernel/src/main.rs`）で、**静的な記述**である（`TASK_COUNT` や
 /// `build.rs` の `PROGRAMS` と同じ性質）。**混ぜると、一覧の長さが管理構造の
 /// 容量に見える。** こちらは管理構造で、長さは常に 1 である。
 pub struct UserProcess {
@@ -962,7 +962,7 @@ pub struct UserProcess {
 /// # 終わり方は判定しない（S9-b-3-2a）
 ///
 /// 走らせた場合、返すのはイメージの entry である。**どう終わったかの判定は
-/// [`check_user_program_outcome`] が行う**——プログラムごとに正しい終わり方が
+/// `check_user_program_outcome`（`kernel/src/main.rs`）が行う**——プログラムごとに正しい終わり方が
 /// 違い、それは呼び出し側の知識だからである（`ring3::run_excursion` が終了させた位置を
 /// 主張しないのと同じ形）。`run` が偽なら 0 を返す。
 pub fn load_user_program(
@@ -1307,7 +1307,7 @@ pub fn open_spawn_window() -> SpawnWindow {
 ///
 /// **交差の見方は 3 つである**——**開いたときに他のスロットのウィンドウが開いていたか、閉じるときに
 /// 開いているか、自分の間に他のスロットのウィンドウが開いたか。** **どれかなら、大域の差は相手の分を
-/// 取り込んでいる。** **同じスロットの入れ子は交差ではない**（[`SPAWN_WINDOWS_OPEN`] の doc）。
+/// 取り込んでいる。** **同じスロットの入れ子は交差ではない**（`SPAWN_WINDOWS_OPEN` の doc）。
 pub fn close_spawn_window(window: SpawnWindow) -> bool {
     SPAWN_WINDOWS_OPEN[window.slot].fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
     let (open_elsewhere, starts_elsewhere) = windows_elsewhere(window.slot);

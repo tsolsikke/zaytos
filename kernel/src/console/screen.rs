@@ -1,6 +1,6 @@
 //! 画面コンソール本体（M3-c-2）。
 //!
-//! [`super::grid`] の桁送り、[`super::dirty`] の未転送範囲、
+//! [`common::screen`] の格子の桁送り、[`super::dirty`] の未転送範囲、
 //! [`super::backbuffer`] のバックバッファを束ね、`core::fmt::Write` として
 //! 使えるようにする。
 //!
@@ -80,7 +80,7 @@ pub struct FlushStats {
     pub foreground_bytes: u64,
     /// 代替画面から戻るときの全面描き直しに費やした TSC サイクル（P-c-2 の測定）。
     ///
-    /// **`draw_cycles` の内訳ではない**——**[`Screen::repaint_from_cells`] は
+    /// **`draw_cycles` の内訳ではない**——**`Screen::repaint_from_cells` は
     /// `set_alternate_screen` の中から呼ばれ、`draw_cycles` の外側に居る。**
     /// **別に測る理由は、`:wq` の待ちの支配項を探したことである**（P-c-2）。
     pub repaint_cycles: u64,
@@ -325,7 +325,7 @@ impl Console {
     /// カーソルをセルへ動かす（zi-b。ANSI の CUP が使う）。
     ///
     /// **0 起点である。** 1 起点からの変換は呼び出し側（`console::mod` の
-    /// 前景経路）が行う。端の切り詰めは [`Grid::set_cursor`] が持つ。
+    /// 前景経路）が行う。端の切り詰めは [`common::screen::Screen::set_cursor`] が持つ。
     pub fn cursor_to_cell(&mut self, column: u32, row: u32) {
         self.grid.set_cursor(column, row);
     }
@@ -501,7 +501,7 @@ impl Console {
     ///
     /// # カーソルの跡は面をまたがない
     ///
-    /// **[`Self::cursor_drawn_at`] は「いまの面のどこに下線を描いたか」である。**
+    /// **`Self::cursor_drawn_at` は「いまの面のどこに下線を描いたか」である。**
     /// **面が変われば、その跡はもう無い**ので忘れる。
     ///
     /// # 色（SGR の状態）は面をまたぐ

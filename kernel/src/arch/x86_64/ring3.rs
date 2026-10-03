@@ -16,8 +16,8 @@
 //!
 //! 例外ハンドラ（`exception_entry`）は `-> !` の fail-fast で、復元も iretq も
 //! 持たない。そこを壊さずに戻るため、setjmp/longjmp 相当を使う。遠征に入る前に
-//! callee-saved レジスタと RSP、復帰 RIP を [`RECOVERY`] へ保存し（setjmp 相当）、
-//! #GP ハンドラが遠征中と判定したら [`RECOVERY`] から復元して復帰 RIP へ飛ぶ
+//! callee-saved レジスタと RSP、復帰 RIP を `RECOVERY`（`CURRENT_RECOVERY` が指す控え）へ保存し（setjmp 相当）、
+//! #GP ハンドラが遠征中と判定したら `RECOVERY` から復元して復帰 RIP へ飛ぶ
 //! （longjmp 相当）。例外スタブには一切触れない。
 //!
 //! # 判定と主張を分ける（S8-a）
@@ -124,7 +124,7 @@ struct ExcursionStack([u8; EXCURSION_STACK_SIZE]);
 /// 気づけるが、doc は落ちない。段階の完了時の `.rs` の grep が拾った。**
 ///
 /// **固定配列の様式に合わせる**（`MAX_CPUS`・`WORKER_COUNT`・`MAX_OPEN_FILES`）。
-/// **深さ 1 つにつき遠征スタックを [`EXCURSION_STACK_SIZE`] だけ静的に持つ**ので、
+/// **深さ 1 つにつき遠征スタックを `EXCURSION_STACK_SIZE` だけ静的に持つ**ので、
 /// **増やすと `.bss` がそのぶん増える**（S10-a でガードページの位置が動いた件と同じ面）。
 ///
 /// # 越えたらどうするか
@@ -207,7 +207,7 @@ static CURRENT_RECOVERY: AtomicU64 = AtomicU64::new(0);
 /// **W1-c で 2 本を同時に走らせるので、もう 1 本ぶんを持つ**
 /// （`task` の `TASK_COUNT` の末尾に足した 1 本と対になる）。
 ///
-/// **W1-c-1 では 2 つ目を誰も使わない**——**スロットを引く入口（[`current_excursion_slot`]）は、
+/// **W1-c-1 では 2 つ目を誰も使わない**——**スロットを引く入口（`current_excursion_slot`）は、
 /// W1-c-3 でタスクから引く形になった後も、W1-c-3c までは必ず 0 を返した。** **W1-c-4 から、
 /// `concurrent-test` の構成の足した 1 本だけが 1 を返す。**
 /// **大きさだけを変えた段階である**（遠征スタックが 128 KiB 増える。あちらの表）。
@@ -373,7 +373,7 @@ pub fn set_current_excursion_recovery(value: u64) {
 ///
 /// # なぜアドレスの属する場所で見るのか
 ///
-/// **切り替えの後、asm が longjmp で使うのは [`CURRENT_RECOVERY`] が指す 1 箇所である。**
+/// **切り替えの後、asm が longjmp で使うのは `CURRENT_RECOVERY` が指す 1 箇所である。**
 /// **入るタスクのスロットの行の外を指していたら、そのタスクが終了させられたときに別のタスクの回復点へ跳ぶ。**
 ///
 /// **「入れ替えで書いた値が載ったか」を見る形にしない**——**同じ代入を 2 度読むだけになる**
@@ -438,7 +438,7 @@ extern "C" {
     /// **飛び先と Ring 3 のスタック上端は引数で受け取る**（S9-a）。RDI が
     /// `user_rip`、RSI が `user_stack_top` である（System V の第 1・第 2 引数）。
     fn zeikos_enter_ring3(user_rip: u64, user_stack_top: u64);
-    /// [`RECOVERY`] から RSP と callee-saved を復元し、復帰 RIP へ飛ぶ
+    /// `RECOVERY` から RSP と callee-saved を復元し、復帰 RIP へ飛ぶ
     /// （longjmp 相当）。戻らない。
     fn zeikos_resume_from_ring3() -> !;
 }
@@ -578,7 +578,7 @@ unsafe fn fill_excursion_stack(depth: usize) {
 /// **下から走査して、埋めた値でなくなる最初の位置を探す。**
 /// そこから上端までが使われた量である。
 ///
-/// **[`fill_excursion_stack`] を通っていないスタックについては意味を持たない**
+/// **`fill_excursion_stack` を通っていないスタックについては意味を持たない**
 /// （埋めていないので、走査は 0 バイト目で止まる）。
 ///
 /// # 契約（境界の関数。2026-09-30）
@@ -605,7 +605,7 @@ pub fn excursion_stack_high_water(depth: usize) -> usize {
 ///
 /// **偽なら、そのスタックを使い切って下の静的領域まで書いた疑いがある。**
 /// **溢れは静かに起きる**——このスタックにはガードページが無い
-/// （[`EXCURSION_STACK_CANARY`]）。
+/// （`EXCURSION_STACK_CANARY`）。
 ///
 /// # 契約（境界の関数。2026-09-30）
 ///
@@ -628,7 +628,7 @@ pub fn excursion_stack_capacity() -> usize {
 /// # なぜ半分で見るのか。**見張り区間では遅い**
 ///
 /// [`excursion_stack_canary_intact`] が偽になるのは、**残り
-/// [`EXCURSION_STACK_CANARY`] バイトまで使い切ったとき**である。
+/// `EXCURSION_STACK_CANARY` バイトまで使い切ったとき**である。
 /// **そこまで来ていたら、判断する余地はもう無い。**
 ///
 /// **半分は、`deferred-decisions.md` の「遠征スタックにガードページが無い」の
@@ -702,7 +702,7 @@ pub fn excursion_depth() -> usize {
 /// - **`ADR-0023` の S11-11 の Addendum。** 例外経路が BKL を取らない根拠が、
 ///   **「畳みが戻った先で触るものは per-CPU か、自前の排他を持つものだけである」**
 ///   に置き換わっている。**その「per-CPU」の側**（この関数の末尾が書く
-///   [`ExcursionState::depth`]・[`CURRENT_RECOVERY`]・RSP0・ユーザー窓）は、
+///   `ExcursionState::depth`・`CURRENT_RECOVERY`・RSP0・ユーザー窓）は、
 ///   **書く者が常に 1 つであること**に依っている。**AP が入ると 2 つになる。**
 /// - **`ADR-0027` の S8 の Addendum と `docs/roadmap.md` の S7 の到達条件 5**
 ///   （`AddressSpace` を破棄した後に、古い TLB でそこへ触れないことの直接の観測）。
@@ -946,7 +946,7 @@ fn report_resumed_with_interrupts_enabled() -> ! {
 /// `exception_entry` が呼ぶ。今この例外を終了処理してよいかを判定する。
 ///
 /// 呼び出し側で「ベクタ==13」「CS.RPL==3」を確認済みで、ここでは今 Ring 3 に
-/// いることを見る。**フォルト RIP は見ない**（[`FAULT_RIP`] の doc）。
+/// いることを見る。**フォルト RIP は見ない**（`fault_rip` の doc）。
 pub fn should_fold() -> bool {
     state().in_ring3.load(Ordering::SeqCst)
 }
@@ -979,13 +979,13 @@ pub fn note_return_to_user() {
 /// Ring 3 由来の例外を終了処理する。ベクタ・フォルト RIP・CS・RSP とハンドラ RSP を記録し、
 /// **[`leave_user_mode`] で遠征の呼び出し元へ戻る。戻らない。**
 ///
-/// **[`ExcursionState::in_ring3`] を降ろすのは [`leave_user_mode`] の側である**（S9-b-3-1 で切り出した）。
+/// **`ExcursionState::in_ring3` を降ろすのは [`leave_user_mode`] の側である**（S9-b-3-1 で切り出した）。
 /// ここが持つのは「畳みに固有の記録」だけである。
 ///
 /// # Safety
 ///
 /// [`should_fold`] とベクタ/CS.RPL の判別が全て真のときだけ呼ぶこと。
-/// [`RECOVERY`] が [`run_excursion`] で保存済みであること（遠征中なら必ずそう）。
+/// `RECOVERY` が [`run_excursion`] で保存済みであること（遠征中なら必ずそう）。
 pub unsafe fn record_and_fold(
     fault_vector: u64,
     fault_cs: u64,
@@ -1013,7 +1013,7 @@ pub unsafe fn record_and_fold(
 
 /// Ring 3 を出てカーネルへ戻る（S9-b-3-1）。**戻らない。**
 ///
-/// [`ExcursionState::in_ring3`] を降ろし、longjmp で [`run_excursion`] の呼び出し元へ帰る。
+/// `ExcursionState::in_ring3` を降ろし、longjmp で [`run_excursion`] の呼び出し元へ帰る。
 ///
 /// # 理由を問わない
 ///
@@ -1040,7 +1040,7 @@ pub unsafe fn record_and_fold(
 ///
 /// # Safety
 ///
-/// [`RECOVERY`] が [`run_excursion`] で保存済みであること（遠征中なら必ずそう）。
+/// `RECOVERY` が [`run_excursion`] で保存済みであること（遠征中なら必ずそう）。
 /// Ring 3 から入ったカーネル文脈から呼ぶこと。
 pub unsafe fn leave_user_mode() -> ! {
     state().in_ring3.store(false, Ordering::SeqCst);

@@ -11,7 +11,7 @@
 //!
 //! **`prlimit --fsize` で起動する**——**QEMU が書くどのファイル（`-D` の記録・シリアル・ディスクのイメージ・
 //! screendump・pmemsave）も上限を越えられない**（RLIMIT_FSIZE）。**監視の糸が遅れても越えない。**
-//! **上限はディスクのイメージへの書き込みにも掛かる**ので、[`OTHER_WRITES`] より大きく保つ（ホストのテスト）。
+//! **上限はディスクのイメージへの書き込みにも掛かる**ので、`OTHER_WRITES` より大きく保つ（ホストのテスト）。
 //!
 //! # コアを吐かせない
 //!
@@ -174,7 +174,7 @@ impl fmt::Display for Cut {
 /// （`crate::run_set`。書く側と読む側で、同じ定数を使う）。
 pub const HARNESS_FAULT_MARK: &str = "harness fault: ";
 
-/// 実行が失敗の期限に着いたことを出す行の目印（[`Child::finish`] が出す）。**`run-set` が、子の記録から探す。**
+/// 実行が失敗の期限に着いたことを出す行の目印（`Child::finish` が出す）。**`run-set` が、子の記録から探す。**
 pub const REACHED_DEADLINE_MARK: &str = "the run reached its failure deadline";
 
 /// 実行をログの上限で切ったことを出す行の目印（同上）。**`run-set` が、子の記録から探す。**

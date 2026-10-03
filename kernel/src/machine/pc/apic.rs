@@ -1193,7 +1193,7 @@ const IPI_DELIVERY_POLL_LIMIT: u32 = 1_000_000;
 ///
 /// # Safety
 ///
-/// [`send_ipi`] と同じ。AP をリセット状態へ落とすので、起動時に 1 回だけ。
+/// `send_ipi` と同じ。AP をリセット状態へ落とすので、起動時に 1 回だけ。
 pub unsafe fn send_init_ipi(lapic_virt: u64, apic_id: u8) -> bool {
     // SAFETY: 呼び出し元契約。
     unsafe { send_ipi(lapic_virt, apic_id, ICR_DELIVERY_INIT | ICR_LEVEL_ASSERT) }
@@ -1205,7 +1205,7 @@ pub unsafe fn send_init_ipi(lapic_virt: u64, apic_id: u8) -> bool {
 ///
 /// # Safety
 ///
-/// [`send_ipi`] と同じ。`vector << 12` に実行可能なトランポリンが置かれていること。
+/// `send_ipi` と同じ。`vector << 12` に実行可能なトランポリンが置かれていること。
 pub unsafe fn send_startup_ipi(lapic_virt: u64, apic_id: u8, vector: u8) -> bool {
     // SAFETY: 呼び出し元契約。
     unsafe {

@@ -10,9 +10,9 @@
 //! 「higher-half B-2b」を参照。
 //!
 //! # なぜ本流ロジックを lib 側に置くか
-//! 書き込み primitive（[`super::table::clear_pml4_entry`] /
-//! [`super::table::restore_pml4_entry`]）とテーブルフレーム走査
-//! （[`super::verify::collect_subtree_table_frames`]）を `pub(crate)` に保ちつつ
+//! 書き込み primitive（`super::table::clear_pml4_entry` /
+//! `super::table::restore_pml4_entry`）とテーブルフレーム走査
+//! （`super::verify::collect_subtree_table_frames`）を `pub(crate)` に保ちつつ
 //! 呼ぶには、呼び出し側も同じ lib クレート内である必要がある（`main.rs` は別の
 //! bin クレートで、lib の `pub(crate)` は見えない）。鋭利な道具の可視性を lib 内へ
 //! 閉じ込めるため、オーケストレーションをここへ置き、`main.rs` からは

@@ -504,7 +504,7 @@ const IA32_EFER: u32 = 0xC000_0080;
 
 /// EFER の読み（2026-09-24。`ADR-0018` の Addendum 9 の棚卸しの監視）。
 ///
-/// **解釈した型で外へ出す**（[`read_msr`] の doc の方針）。**生の値は起動ログへ出すためだけに
+/// **解釈した型で外へ出す**（`read_msr` の doc の方針）。**生の値は起動ログへ出すためだけに
 /// 開ける**（[`Efer::raw`]）——**ビットの意味はこの型と `kernel::arch::x86_64::cpu_state` が持つ。**
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Efer(u64);

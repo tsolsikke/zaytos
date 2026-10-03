@@ -7,7 +7,7 @@
 /// 1回の確保の配置計画。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AllocPlan {
-    /// [`super::allocator::AllocatedBlockHeader`] を書き込む位置。
+    /// `super::allocator::AllocatedBlockHeader` を書き込む位置。
     pub header_addr: u64,
     /// 呼び出し元へ返す、実際に使えるアドレス（`layout.align()` を満たす）。
     pub user_addr: u64,

@@ -272,7 +272,7 @@ enum TaskState {
 /// **最初はキーボードだけだった。** **W2-d+ でタイマを足した**（`ADR-0062`）。**I/O の完了は
 /// 足さない**——**virtio は既に BKL を解いて眠る形を持っている**（`ADR-0036`）。
 ///
-/// **`Copy` である必要がある**——[`TaskState`] が `Copy` で、`scheduler::states()` が
+/// **`Copy` である必要がある**——`TaskState` が `Copy` で、`scheduler::states()` が
 /// 配列で返す。
 // **作るのは W2-c-2 の `read(0)` である。**
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -301,7 +301,7 @@ pub enum Wait {
     ///
     /// **締切は `nanosleep` の締切であって、安全網ではない**——**本番の待ちに上限は
     /// 置かない**（`ADR-0061`）。**起こすのはタイマ割り込みである**
-    /// （[`wake_expired_timers`]）。
+    /// （`wake_expired_timers`）。
     Timer {
         /// 起こしてよい最初の単調なティック（`idt::monotonic_ticks` の値）。
         deadline: u64,
@@ -338,7 +338,7 @@ pub enum Wait {
 /// （[`crate::socket::MAX_CONNECTIONS`]）**＝ 4 である。** **これが `poll` に渡せる fd の
 /// 上限でもある**（`crate::syscall` の `MAX_POLL_FDS`）。
 ///
-/// **2 つ目——コピーの費用。** **[`TaskState`] は `Copy` で、[`scheduler::states`] が配列で
+/// **2 つ目——コピーの費用。** **`TaskState` は `Copy` で、`scheduler::states` が配列で
 /// 返す**ので、**この型の大きさが `schedule_switch` のフレームに乗る。** **実測**（`size_of` の
 /// コピーで測った。2026-09-21）——**`[TaskState; TASK_COUNT]` は 96 バイト（いまの 1 理由）/
 /// 432 バイト（4 本）/ 816 バイト（8 本）。** **遠征スタックの高水位は残り 904 バイトである**
@@ -357,7 +357,7 @@ pub const MAX_WAIT_REASONS: usize = 4;
 ///
 /// # 起こす側は理由を運ばない
 ///
-/// **[`wake_tasks_waiting_on`] は今までどおり合図 1 つで引く**——**変わったのは突き合わせ方
+/// **`wake_tasks_waiting_on` は今までどおり合図 1 つで引く**——**変わったのは突き合わせ方
 /// （完全一致 → 所属）だけである。** **起こされた側が、集合の各理由を非ブロッキングで
 /// 問い合わせ直す**（`crate::syscall` の `poll`）。**空振りで起こしてよい形は W2-c からの
 /// ものである**（`ADR-0061`）。
@@ -404,7 +404,7 @@ impl WaitSet {
         true
     }
 
-    /// その理由が入っているか。**これが起こす条件そのものである**（[`wake_tasks_waiting_on`]）。
+    /// その理由が入っているか。**これが起こす条件そのものである**（`wake_tasks_waiting_on`）。
     pub fn contains(&self, on: Wait) -> bool {
         self.reasons[..self.len as usize].contains(&on)
     }
@@ -419,7 +419,7 @@ impl WaitSet {
         self.len == 0
     }
 
-    /// タイマの理由が入っていれば、その締切（[`wake_expired_timers`] が使う）。
+    /// タイマの理由が入っていれば、その締切（`wake_expired_timers` が使う）。
     ///
     /// **先に見つかった 1 本を返す。** **v1 では `nanosleep` の 1 本だけで、集合に 2 本の
     /// タイマは入らない**（`poll` はタイマを集合へ入れない。`crate::syscall` の `poll`）。
@@ -846,7 +846,7 @@ pub fn current_ring3_task_handle() -> u64 {
     ring3_task_handle(RING3_TASK_GENERATION.load(Ordering::Relaxed))
 }
 
-/// 足した 1 本（[`RING3_TASK`]）を起動する（W1-c-4。`ADR-0063` の (b2) で作り直した）。
+/// 足した 1 本（`RING3_TASK`）を起動する（W1-c-4。`ADR-0063` の (b2) で作り直した）。
 ///
 /// **呼ぶのは `userland::start_detached` だけである。** **起動できたらハンドルを返す。**
 ///
@@ -1071,10 +1071,10 @@ const fn expected_stack(depth_count: usize) -> ExpectedStack {
 /// 今のタスクが使う Ring 3 のスロット（W1-c-3）。
 ///
 /// **まだ誰も走らせていなければ 0 である**——**起動の途中、タスクが 1 本も割り当てられていない
-/// 時点で Ring 3 の遠征が走る**（[`current_index_if_any`] の doc）。**それはメインのタスクになる
+/// 時点で Ring 3 の遠征が走る**（`current_index_if_any` の doc）。**それはメインのタスクになる
 /// 起動の直線上なので、スロット 0 が正しい。**
 ///
-/// **既定の起動では必ず 0 である**——**[`RING3_TASK`] は `concurrent-test` の構成でだけ走る**（W1-c-4）。
+/// **既定の起動では必ず 0 である**——**`RING3_TASK` は `concurrent-test` の構成でだけ走る**（W1-c-4）。
 #[inline(always)]
 pub fn current_ring3_slot() -> usize {
     match current_index_if_any() {
@@ -1307,7 +1307,7 @@ pub fn max_wait_set_len() -> u64 {
 /// 待ちの欄を据えたとき、他のタスクも既に待っていた回数（`ADR-0063` の (b3) の計測）。
 static WAITING_TOGETHER: AtomicU64 = AtomicU64::new(0);
 
-/// [`WAITING_TOGETHER`] の値。**`init` がセッションの後に出す。**
+/// `WAITING_TOGETHER` の値。**`init` がセッションの後に出す。**
 pub fn waiting_together() -> u64 {
     WAITING_TOGETHER.load(Ordering::Relaxed)
 }
@@ -1685,7 +1685,7 @@ const NO_CURRENT_TASK_DISPLAY: &str = "none";
 
 /// [`ap_current_index`] をログ向けに整形する（S4-c-2）。
 ///
-/// sentinel なら [`NO_CURRENT_TASK_DISPLAY`]、それ以外は添字をそのまま出す。
+/// sentinel なら `NO_CURRENT_TASK_DISPLAY`、それ以外は添字をそのまま出す。
 pub struct ApCurrent(usize);
 
 impl core::fmt::Display for ApCurrent {
@@ -1712,7 +1712,7 @@ pub fn ap_current_display() -> ApCurrent {
 /// 走らせない」段階だったので、走らせ方が決まる前に形を決めていた。
 ///
 /// 走らせ方を決めた時点で、その形では走らないと分かった。AP の `CURRENT` へこの添字を
-/// 書くと、AP の最初のティックで [`schedule_switch`] は「現タスク = 次タスク」になり
+/// 書くと、AP の最初のティックで `schedule_switch` は「現タスク = 次タスク」になり
 /// 切り替えを行わない。組んだ初期コンテキストは `set_saved_stack_pointer` に上書きされ、
 /// `ap_idle_entry` へは永久に入らない。専用スタックも使われない。
 ///
@@ -1741,7 +1741,7 @@ pub fn ap_current_display() -> ApCurrent {
 ///   である。これは実行時に守られている。まだなら `ap_kernel_stack_range` が `None` を
 ///   返し、本関数は理由を出して停止する
 /// - 起動時の単一実行文脈から 1 回だけ呼ぶこと。スケジューラの静的領域へ書くため
-///   である。この書き込み自体は [`scheduler::init_task`] が安全な関数として提供して
+///   である。この書き込み自体は `scheduler::init_task` が安全な関数として提供して
 ///   いる（添字を検査し、参照を作らずに書く）ので、義務は本関数の呼び出し側ではなく
 ///   あちらのモジュールにある
 pub fn init_ap_idle_task() {
@@ -1845,7 +1845,7 @@ pub fn rearm_workers_for_smp_stimulus() {
 /// - BKL を保持した状態で呼ぶこと（`KernelEntry::ApBringUp`）。`CURRENT` は共有物で、
 ///   書く時点で bootstrap processor が走っている
 /// - 自コアのタイマを開ける前に呼ぶこと。開けた後だと、解く前にティックが来て
-///   [`current_index`] が sentinel を読んで停止しうる
+///   `current_index` が sentinel を読んで停止しうる
 pub fn adopt_idle_task_on_this_cpu() {
     let cpu = common::percpu::cpu_id();
     set_current_index(default_task_for(cpu));
@@ -2216,7 +2216,7 @@ pub fn on_yield(current_sp: u64) -> u64 {
 }
 
 /// timer（IRQ0）のティックで `irq_entry` から呼ばれ、プリエンプティブに切り替える
-/// （M5-d）。yield と同じ [`schedule_switch`] 中核へ合流する。
+/// （M5-d）。yield と同じ `schedule_switch` 中核へ合流する。
 ///
 /// 明示 yield と違い、critical 区間中なら fail-fast せずスキップする。timer が割り込む
 /// のは呼び出し側のバグではない。ただし今は譲るべきでないので現 RSP を返してプリエンプト

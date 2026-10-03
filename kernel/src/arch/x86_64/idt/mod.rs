@@ -918,7 +918,7 @@ fn report_concurrent_entry_once(depth: u64) {
 /// [`NO_VECTOR_YET`] は「まだ 1 件も来ていない」ことを表す番兵。
 static FIRST_PIC_VECTOR: AtomicU64 = AtomicU64::new(NO_VECTOR_YET);
 
-/// [`FIRST_PIC_VECTOR`] の「まだ来ていない」を表す値（ベクタ番号は 0-255）。
+/// `FIRST_PIC_VECTOR` の「まだ来ていない」を表す値（ベクタ番号は 0-255）。
 pub const NO_VECTOR_YET: u64 = u64::MAX;
 
 /// このコアのタイマのティック数を読む（S4-a）。
@@ -1025,7 +1025,7 @@ const TIMER_ACCOUNTING_SLACK: u64 = (MAX_CPUS as u64) * 2;
 /// コアごとのティックの合計と、配送された本数が一致するか（S4-a）。
 ///
 /// `smp-ap-timer-share-ticks` が検出される場所はここである。per-CPU をやめて
-/// 1 つを共有すると、合計が配送数のおよそ 2 倍になり、[`TIMER_ACCOUNTING_SLACK`]
+/// 1 つを共有すると、合計が配送数のおよそ 2 倍になり、`TIMER_ACCOUNTING_SLACK`
 /// をはるかに超える。「per-CPU 化が済んだように見えて共有のまま」を、
 /// 名前ではなく数で検出する。
 ///
@@ -1235,7 +1235,7 @@ impl EntryPath {
 /// **前提を作るのは `fault-test`・`syscall-test`・`spin` である。**
 static ENTRIES_FROM_DF_SET: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 
-/// 入口の系統 `path` から、割り込まれた側が DF=1 のまま入ってきた回数（[`ENTRIES_FROM_DF_SET`]）。**読むだけで、
+/// 入口の系統 `path` から、割り込まれた側が DF=1 のまま入ってきた回数（`ENTRIES_FROM_DF_SET`）。**読むだけで、
 /// 数を変えない。**
 ///
 /// # 契約（境界の関数。2026-09-30）
@@ -1543,7 +1543,7 @@ macro_rules! symbol_address {
 /// 例外用（[`check_stub_table`]）と別系統である。表が別の領域にある
 /// ため、片方の検証がもう片方を保証しない。
 ///
-/// **刻み幅の確かめは、記号の番地を [`symbol_address!`] で取って比べる**——表の頭（`zeikos_irq_stubs`）と
+/// **刻み幅の確かめは、記号の番地を `symbol_address!` で取って比べる**——表の頭（`zeikos_irq_stubs`）と
 /// 最初の項目（`zeikos_irq_stub_0`）は同じ番地に在る別の記号で、`addr_of!` で比べると最適化が偽に畳む。
 pub fn check_irq_stub_table() -> StubTableCheck {
     let base = symbol_address!(zeikos_irq_stubs);
@@ -1598,7 +1598,7 @@ const SABOTAGED_STUB_INDEX: usize = PIC_VECTOR_SPAN - 1;
 
 /// `n` 番目の IRQ スタブのアドレス。
 ///
-/// 破壊テスト（S6-a、`idt-irq-stub-offset-test`）: [`SABOTAGED_STUB_INDEX`] のときだけ
+/// 破壊テスト（S6-a、`idt-irq-stub-offset-test`）: `SABOTAGED_STUB_INDEX` のときだけ
 /// 1 本先を指す。[`check_irq_stub_table`] の `entries_ok` を落とすためのもので
 /// ある。この検査は「落ちるところを一度も見ていない」側だったので、
 /// 見るための破壊テストを用意した（`verification-coverage.md`）。
@@ -1800,7 +1800,7 @@ pub fn check_gates_lead_to_common_entries() -> CommonEntryCheck {
 /// スタブに命令を 1 つ足して 16 バイトを超えると、終端までの距離が
 /// `256 * STUB_SIZE` からずれるため、ここで検出される。
 ///
-/// **記号の番地は [`symbol_address!`] で取る**（[`check_irq_stub_table`] と同じ理由。別の記号の番地を
+/// **記号の番地は `symbol_address!` で取る**（[`check_irq_stub_table`] と同じ理由。別の記号の番地を
 /// 「等しいか」で比べる形である）。
 pub fn check_stub_table() -> StubTableCheck {
     let base = symbol_address!(zeikos_exception_stubs);
@@ -2222,7 +2222,7 @@ pub fn monotonic_ticks() -> u64 {
     MONOTONIC_TICKS.load(Ordering::Relaxed)
 }
 
-/// 単調なティックを 1 つ進める（W2-d+）。**BSP だけが進める**（[`MONOTONIC_TICKS`] の doc）。
+/// 単調なティックを 1 つ進める（W2-d+）。**BSP だけが進める**（`MONOTONIC_TICKS` の doc）。
 ///
 /// # 契約（境界の関数。2026-09-28。9d-2 で共通の側から呼ぶ形にした）
 ///

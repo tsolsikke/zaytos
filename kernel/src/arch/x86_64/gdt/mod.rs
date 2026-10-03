@@ -132,7 +132,7 @@ pub unsafe fn init(double_fault_stack_top: u64, page_fault_stack_top: u64) {
 ///
 /// [`PerCpu::this_cpu_ptr`] は `cpu_id()` を呼ぶが、**AP は自分の GDT を
 /// ロードするまで `cpu_id()` を使えない**（`sgdt` 由来の実装は自コアの GDT が
-/// 載った後でなければ正しくない。[`cpu_id_from_gdtr`] の doc）。
+/// 載った後でなければ正しくない。`cpu_id_from_gdtr` の doc）。
 ///
 /// **循環している**——AP は索引を知らないと自分のスロットへ書けず、
 /// `cpu_id()` は GDT が載った後でないと正しくない。
@@ -495,7 +495,7 @@ fn cpu_id_from_gdtr() -> usize {
 ///
 /// # 呼ぶ位置。**[`init`] の後でなければならない**
 ///
-/// 載荷条件（[`cpu_id_from_gdtr`] の doc）がそれを要求する。`lgdt` より前に
+/// 載荷条件（`cpu_id_from_gdtr` の doc）がそれを要求する。`lgdt` より前に
 /// 据えると、`gdt::init` 自身が `this_cpu_ptr` を通るときに
 /// ファームウェアの GDT から引き算することになる。
 ///

@@ -403,7 +403,7 @@ pub fn read_events(dst: &mut [u8]) -> usize {
 /// # スキャンコードをここでデコードする
 ///
 /// **リングから取り、デコーダへ食わせ、文字が出たら `dst` へ置く。**
-/// **`dst` が埋まったら、余りは [`PENDING`] へ残す**——次の `read` が続きを取る。
+/// **`dst` が埋まったら、余りは `PENDING` へ残す**——次の `read` が続きを取る。
 ///
 /// # デコーダの状態は静的に持つ
 ///
@@ -697,7 +697,7 @@ pub fn script_drives_input() -> bool {
 /// 台本を作動させる（zi-d。`zi-test` / `view-test` feature のときだけ効く）。
 ///
 /// **`init` がシェルを起こす直前に呼ぶ。** それより前に流すと、起動シーケンスの
-/// 検算（`syscall-test` の 51 番）が台本を食べてしまう（[`script`] の doc）。
+/// 検算（`syscall-test` の 51 番）が台本を食べてしまう（`script` モジュールの doc）。
 pub fn arm_input_script() {
     #[cfg(any(
         feature = "zi-test",

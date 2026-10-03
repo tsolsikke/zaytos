@@ -81,7 +81,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 /// **遠征は入れ子でも親が待つ**ので、同時に 2 つの `write` が走らない。
 static FOREGROUND: AtomicPtr<Console> = AtomicPtr::new(core::ptr::null_mut());
 
-/// [`FOREGROUND`] へ据えている間だけ生きるガード。
+/// `FOREGROUND` へ据えている間だけ生きるガード。
 ///
 /// **`&mut Console` を預かる。** 落ちるときに静的を戻す。
 pub struct ForegroundConsole<'a> {

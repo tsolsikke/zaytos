@@ -377,7 +377,7 @@ fn should_fold_excursion(interrupted: &crate::arch::x86_64::Interrupted<'_>) -> 
 ///
 /// # 破壊テストでは 0 になる
 ///
-/// **`kill-fold-at-depth-one-test` は [`MINIMUM_DEPTH`] を 1 にするので、深さ 1 は
+/// **`kill-fold-at-depth-one-test` は `MINIMUM_DEPTH` を 1 にするので、深さ 1 は
 /// この分岐へ来ない。**
 ///
 /// # なぜ「深さ 1 で畳んだ回数」を数えないのか
@@ -389,7 +389,7 @@ fn should_fold_excursion(interrupted: &crate::arch::x86_64::Interrupted<'_>) -> 
 /// 検出されなかった**）。**弾いた側を数えると、そのウィンドウに依らない。**
 static DEPTH_ONE_NOT_FOLDED: AtomicU64 = AtomicU64::new(0);
 
-/// [`DEPTH_ONE_NOT_FOLDED`] の値（W2-c-2 の対策。`init` がセッションの後に出す）。
+/// `DEPTH_ONE_NOT_FOLDED` の値（W2-c-2 の対策。`init` がセッションの後に出す）。
 pub fn depth_one_not_folded() -> u64 {
     DEPTH_ONE_NOT_FOLDED.load(Ordering::Relaxed)
 }

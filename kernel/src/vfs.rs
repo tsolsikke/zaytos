@@ -93,7 +93,7 @@ pub fn root_image() -> &'static [u8] {
 
 /// RAM 複製を可変で貸す（zi-c。ADR-0037 の「書き手の口」）。
 ///
-/// **複製前（[`ROOT_IMAGE_PTR`] が 0）は `None` である。** **そのとき読めるイメージは
+/// **複製前（`ROOT_IMAGE_PTR` が 0）は `None` である。** **そのとき読めるイメージは
 /// 無い**（P-e で埋め込みを外した。`ADR-0034` の Addendum）——
 /// **貸す対象そのものが存在しない。**
 ///
@@ -158,7 +158,7 @@ static CURRENT_FILES: [Locked<FileTable>; crate::arch::x86_64::USER_TASK_SLOTS] 
 
 /// 表を据え、**据える前の表を返す**。
 ///
-/// **戻すのは呼び出し側の責任である**（[`CURRENT_FILES`] の doc）。
+/// **戻すのは呼び出し側の責任である**（`CURRENT_FILES` の doc）。
 pub fn swap_current_files(table: FileTable) -> FileTable {
     core::mem::replace(
         &mut *CURRENT_FILES[crate::arch::x86_64::current_excursion_slot()].lock(),

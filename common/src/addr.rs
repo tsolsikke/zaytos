@@ -419,7 +419,7 @@ impl DirectMap {
 ///
 /// # 使い方
 ///
-/// **static を直接参照して回らない。** [`ActivePageTable`] や
+/// **static を直接参照して回らない。** `ActivePageTable`（kernel の側）や
 /// `PageTableBuilder` のように変換を必要とする型は、構築時に
 /// [`direct_map`] で 1 度受け取り、以後はその値を持ち回る。
 /// そうすることで、

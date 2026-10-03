@@ -21084,7 +21084,7 @@ fn check_host_test_names(workspace_root: &Path, update: bool) -> Result<String> 
 
 /// 直接の割り込み制御（`InterruptGuard` 非経由の `cli`/`sti`）を許可する箇所。
 ///
-/// 排他は `common::critical` の [`InterruptGuard`]/`Locked<T>` の裏に閉じる決まりで
+/// 排他は `common::critical` の `InterruptGuard`/`Locked<T>` の裏に閉じる決まりで
 /// ある（ADR-0023 §3 の seam整備）。それでも直接 `cli`/`sti` が要る箇所は存在し、
 /// **いずれも「共有データの排他」以外の目的**である。目的別に許可し、リスト外の
 /// 出現は FAIL させる。
@@ -31216,8 +31216,10 @@ const TEST_HOOKS_EXCLUSIONS: &[(&str, &str)] = &[
 /// 存在しない feature 名で `cfg!(feature = "…")` を書くと、`-D warnings` の
 /// clippy が落ちる。
 ///
-///     error: unexpected `cfg` condition value: `zzz-not-a-real-feature`
-///          = note: `-D unexpected-cfgs` implied by `-D warnings`
+/// ```text
+/// error: unexpected `cfg` condition value: `zzz-not-a-real-feature`
+///      = note: `-D unexpected-cfgs` implied by `-D warnings`
+/// ```
 ///
 /// `cargo xtask check` は 4 構成すべてに `-D warnings` を掛けているので、
 /// **この経路は既に検査に入っている。**

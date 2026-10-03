@@ -334,15 +334,15 @@ impl VirtioBlk {
     ///
     /// **シェルの文脈は BKL を保持して入る。** **`ADR-0036` が「BKL を保持した
     /// まま待たない」と決めているので、発行だけを BKL 下で行い、待ちは解いた後に
-    /// 行う必要がある。** **割る前は [`request_at`] が中で完了まで回しており、
+    /// 行う必要がある。** **割る前は `request_at` が中で完了まで回しており、
     /// 発行だけを取り出す入口が無かった。**
     ///
-    /// **起動シーケンスは [`request_at`] のまま**（発行と待ちを続けて行う）
+    /// **起動シーケンスは `request_at` のまま**（発行と待ちを続けて行う）
     /// ——**あちらは BKL を持っていない。**
     ///
     /// # Safety
     ///
-    /// [`request_at`] と同じ契約。
+    /// `request_at` と同じ契約。
     unsafe fn issue_at(
         &mut self,
         first_sector: u64,
@@ -408,7 +408,7 @@ impl VirtioBlk {
     ///
     /// # Safety
     ///
-    /// [`issue_at`] が返した `expected` であること。
+    /// `issue_at` が返した `expected` であること。
     unsafe fn wait_for_used(&mut self, expected: u16) -> Result<(), VirtioBlkError> {
         let base = self.ring_virt;
         let spare = self.spare_virt();
@@ -518,7 +518,7 @@ static FLUSH_CYCLES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU
 /// 眠った回数（`hlt` を踏んだ数）。
 static FLUSH_HALTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// [`DEVICE`] へ据えている間だけ生きるガード（P-c-1）。
+/// `DEVICE` へ据えている間だけ生きるガード（P-c-1）。
 pub struct InstalledDevice<'a> {
     /// 据えている装置。**手放すときに静的を戻すために持つ。**
     device: &'a mut VirtioBlk,
@@ -632,7 +632,7 @@ impl DeviceClaim {
     ///
     /// # Safety
     ///
-    /// [`issue_image_write`] が返した値であること。**BKL を保持していないこと。**
+    /// [`Self::issue_image_write`] が返した値であること。**BKL を保持していないこと。**
     pub unsafe fn wait_for_image_write(
         &mut self,
         expected: u16,
@@ -820,7 +820,7 @@ const BLOCKING_WAIT_TICKS: u64 = 200;
 ///
 /// # 取り逃しの窓の閉じ（ADR-0036 の IF の規律）
 ///
-/// 完了フラグの検査を `cli` 下（[`EntryInterruptGuard`]）で行い、未完了なら
+/// 完了フラグの検査を `cli` 下（[`common::critical::EntryInterruptGuard`]）で行い、未完了なら
 /// **`sti; hlt` を隣接させて眠る**（[`common::arch::x86_64::enable_interrupts_and_wait`]）。
 /// 検査から `hlt` まで IF=0 なので、「検査したら未完了と見てから眠るまでの間に
 /// 完了 IRQ が来て取り逃す」ウィンドウが開かない。

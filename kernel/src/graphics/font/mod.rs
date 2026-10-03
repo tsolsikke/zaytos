@@ -2,7 +2,7 @@
 //!
 //! グリフデータは GNU Unifont に由来する（SIL Open Font License 1.1、
 //! 出典と全文は `third_party/unifont/` を参照）。テーブルは
-//! `cargo xtask gen-font` が [`unifont_glyphs`] へ生成する。
+//! `cargo xtask gen-font` が `unifont_glyphs` へ生成する。
 //!
 //! 検索は `char` をキーにする。`u8` ではなく `char` を入口にしておくことで、
 //! 日本語を追加する際にこのインターフェースを変えずに済む。

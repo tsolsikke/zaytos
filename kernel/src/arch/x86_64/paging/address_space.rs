@@ -97,7 +97,7 @@ static FROZEN_KERNEL_TOP: AtomicU64 = AtomicU64::new(0);
 /// 起動が終わったか（カーネル側の PML4 の指紋を採ったか）。**「起動の間」と「起動の後」を分ける目印は、
 /// 指紋を採った時点（`run_init` の直前）で切り替わるこれ 1 つである**（2026-09-27。`ADR-0071` の決定 5）。
 /// **書く側の守り（`ActivePageTable` の `ensure_child`）と突き合わせ（[`AddressSpace::new`]）は、
-/// どちらも同じ [`FROZEN_KERNEL_TOP`] を読む**——**目印を 2 か所で持たない。**
+/// どちらも同じ `FROZEN_KERNEL_TOP` を読む**——**目印を 2 か所で持たない。**
 pub fn kernel_top_is_frozen() -> bool {
     FROZEN_KERNEL_TOP.load(Ordering::SeqCst) != 0
 }
@@ -500,7 +500,7 @@ impl AddressSpace {
     /// 壊す入口のうちページテーブルを触る分だけにした）。
     ///
     /// 集めるのは、下位で使っていた葉のフレーム（共有の印の付いた葉を除く）、途中の表、最上位の表そのものである。
-    /// **触るのは下位だけである**（[`PRIVATE_INDEX_RANGE`]）。上位は共有なので、ここで返したら他のアドレス空間の
+    /// **触るのは下位だけである**（`PRIVATE_INDEX_RANGE`）。上位は共有なので、ここで返したら他のアドレス空間の
     /// マッピングを壊す。
     ///
     /// 返すのは（`into` へ集めた本数, 入り切らなかった本数）。**入り切らなかったフレームは、どこにも返らない**
