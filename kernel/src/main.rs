@@ -1559,12 +1559,11 @@ extern "sysv64" fn kernel_main() -> ! {
     // 単一文脈で AP はまだ走っていない。
     unsafe {
         kernel::smp::prepare_ap_per_cpu(&mut logger, &mut allocator);
-        // 探り用ページは、アロケータのあるここでマップする（S5-c）。
-        // SAFETY: 本番テーブルへ切り替え済みで、direct map ウィンドウが使える。
+        // 探り用ページは、アロケータのあるここでマップする（S5-c）。**外の `unsafe` の前提（本番テーブルへ
+        // 切り替え済みで、direct map ウィンドウが使える）と同じで、入れ子の `unsafe` は要らない**（試しの feature の
+        // ビルドで警告が出ていた。2026-10-03）。
         #[cfg(feature = "smp-tlb-shootdown-probe")]
-        unsafe {
-            kernel::smp::prepare_shootdown_probe(&mut logger, &mut allocator)
-        };
+        kernel::smp::prepare_shootdown_probe(&mut logger, &mut allocator);
     }
 
     // **実行禁止のビットを付けた試し専用のページを 1 枚マップし、BSP で読む**（2026-10-02。`ADR-0071` の手順 4）。
