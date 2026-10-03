@@ -886,6 +886,7 @@ xtask::tests::declarations_are_read_through_their_qualifiers
 xtask::tests::declared_limit_runs_are_listed_with_their_items
 xtask::tests::disk0_rd_bytes_is_parsed_and_other_drives_are_ignored
 xtask::tests::disk0_wr_bytes_is_parsed_and_other_drives_are_ignored
+xtask::tests::every_documented_run_command_is_accepted
 xtask::tests::every_judged_machine_variant_is_in_the_table_with_a_serial_port
 xtask::tests::every_stop_reason_names_a_kernel_feature
 xtask::tests::expectations_in_the_form_are_read_right_after_their_value
@@ -916,6 +917,7 @@ xtask::tests::qemu_args_reference_given_ovmf_and_esp_paths
 xtask::tests::qemu_args_separate_debug_log_from_serial
 xtask::tests::qemu_args_use_serial_file_sink_when_requested
 xtask::tests::qemu_is_started_only_through_the_launch_module
+xtask::tests::run_refuses_unknown_options_and_stray_arguments_by_name
 xtask::tests::sigign_is_read_for_sigxfsz
 xtask::tests::signs_on_different_lines_are_told_apart_from_signs_that_never_appear
 xtask::tests::slowness_is_compared_without_the_cargo_time

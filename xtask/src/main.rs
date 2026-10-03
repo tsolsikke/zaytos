@@ -1938,6 +1938,156 @@ const MONITOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SCREENDUMP_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// `cargo xtask run` の旗が値を取るか（2026-10-03）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunValue {
+    /// 値を取らない（`--gui`）。
+    None,
+    /// 直後の 1 語を値に取る（`--exception-test <kind>`）。**無ければ、その旗の処理が自分の文で断る。**
+    Required,
+    /// 直後の 1 語が `-` で始まらなければ値に取る（`--drift-test [MINUTES]`。`--keymap-test --sabotage` の
+    /// `--sabotage` は値を取らない形でも使う）。
+    Optional,
+}
+
+/// `cargo xtask run` が受け付ける旗の一覧（2026-10-03）。**ここに無い `-` で始まる引数と、どの旗の値でもない
+/// 位置の引数は、入口で名前つきで断る**（[`run_arguments_problem`]）。
+///
+/// **2026-10-02 まで、`run` は知らない引数を黙って捨てていた**——引数の列を `any(|a| a == "--…")` で引くだけ
+/// なので、打ち間違えた旗も、`--help` も、既定の起動（QEMU をそのまま起こす）に化けた。**実測で、`--help` を
+/// 打って素の QEMU が起動した**（2026-10-03。`docs/troubleshooting.md`）。
+///
+/// **旗を足したら、ここにも足す。** **足し忘れは、その旗を打った最初の 1 回で「知らない旗」と断られて分かる。**
+/// **一覧の旗が全部この表に在ることは、ホストのテストが `USAGE` と docs の `cargo xtask run …` の行を読んで確かめる。**
+const RUN_FLAGS: &[(&str, RunValue)] = &[
+    // 既定の起動の変種
+    ("--panic-test", RunValue::None),
+    ("--gui", RunValue::None),
+    ("--gtk", RunValue::None),
+    ("--gfx-test", RunValue::None),
+    ("--kvm", RunValue::None),
+    ("--no-limit", RunValue::None),
+    ("--manual", RunValue::None),
+    ("--key-probe", RunValue::None),
+    ("--keep-disk", RunValue::None),
+    ("--rebuild-disk", RunValue::None),
+    // 種別を取る判定
+    ("--exception-test", RunValue::Required),
+    ("--critical-test", RunValue::Required),
+    ("--interrupt-test", RunValue::Required),
+    ("--paging-test", RunValue::Required),
+    ("--stack-test", RunValue::Required),
+    ("--task-test", RunValue::Required),
+    ("--ring3-test", RunValue::Required),
+    ("--syscall-test", RunValue::Required),
+    ("--acpi-test", RunValue::Required),
+    ("--apic-test", RunValue::Required),
+    ("--ioapic-test", RunValue::Required),
+    ("--lapic-timer-test", RunValue::Required),
+    ("--bkl-test", RunValue::Required),
+    ("--highhalf-test", RunValue::Required),
+    ("--smp-ap-test", RunValue::Optional),
+    // 種別を取らない判定
+    ("--acpi-smp-test", RunValue::None),
+    ("--acpi-smp4-test", RunValue::None),
+    ("--apic-decode-test", RunValue::None),
+    ("--smp-tramp-test", RunValue::None),
+    ("--ap-timer-rate", RunValue::None),
+    ("--percpu-test", RunValue::None),
+    ("--kernel-entry-concurrency", RunValue::None),
+    ("--bkl-exclusion-proof", RunValue::None),
+    ("--write-cap-check", RunValue::None),
+    ("--tool-checks", RunValue::None),
+    ("--drift-test", RunValue::Optional),
+    ("--smp", RunValue::Required),
+    ("--calibration-spread", RunValue::Optional),
+    // 台本・打鍵・装置の判定（`--sabotage FEATURE` を取るものを含む）
+    ("--shell-test", RunValue::None),
+    ("--shell-script-test", RunValue::None),
+    ("--drop-arrows", RunValue::None),
+    ("--drop-esc", RunValue::None),
+    ("--ansi-test", RunValue::None),
+    ("--zi-test", RunValue::None),
+    ("--view-test", RunValue::None),
+    ("--utf8-test", RunValue::None),
+    ("--fp-test", RunValue::None),
+    ("--concurrent-test", RunValue::None),
+    ("--ttf-test", RunValue::None),
+    ("--serial-test", RunValue::None),
+    ("--reopen", RunValue::None),
+    ("--complete-test", RunValue::None),
+    ("--pipe-test", RunValue::None),
+    ("--socket-test", RunValue::None),
+    ("--input-test", RunValue::None),
+    ("--poll-test", RunValue::None),
+    ("--screen-test", RunValue::None),
+    ("--compose-test", RunValue::None),
+    ("--history-test", RunValue::None),
+    ("--profile-test", RunValue::None),
+    ("--keymap-test", RunValue::None),
+    ("--persist-test", RunValue::None),
+    ("--persist-zi-test", RunValue::None),
+    ("--persist-env-test", RunValue::None),
+    ("--rebuild-between", RunValue::None),
+    ("--ignore-file", RunValue::None),
+    ("--fs-extract", RunValue::None),
+    ("--pci-test", RunValue::None),
+    ("--virtio-test", RunValue::None),
+    ("--virtio-irq-test", RunValue::None),
+    ("--sabotage", RunValue::Optional),
+    ("--boot-marker-sabotage", RunValue::Required),
+    ("--page-permissions", RunValue::None),
+    ("--scene", RunValue::Required),
+    ("--update-reference", RunValue::None),
+    ("--machine-variant", RunValue::Required),
+    ("--config", RunValue::Required),
+    ("--media", RunValue::Required),
+    // 起動ログの参照
+    ("--boot-log-diff", RunValue::None),
+    ("--allow-shrink", RunValue::None),
+    ("--only-masked", RunValue::None),
+];
+
+/// `cargo xtask run` の引数に、知らない旗か、どの旗の値でもない位置の引数が在れば、その名前を挙げる（純粋な論理。
+/// 2026-10-03）。**無ければ `None`。** **旗の組み合わせの意味までは見ない**（それぞれの旗の処理が見る）。
+fn run_arguments_problem(rest: &[String]) -> Option<String> {
+    let mut unknown: Vec<&str> = Vec::new();
+    let mut stray: Vec<&str> = Vec::new();
+    let mut index = 0;
+    while index < rest.len() {
+        let arg = rest[index].as_str();
+        index += 1;
+        if !arg.starts_with('-') {
+            stray.push(arg);
+            continue;
+        }
+        let Some(&(_, takes)) = RUN_FLAGS.iter().find(|(flag, _)| *flag == arg) else {
+            unknown.push(arg);
+            continue;
+        };
+        let next_is_a_value = rest.get(index).is_some_and(|next| !next.starts_with('-'));
+        match takes {
+            RunValue::None => {}
+            RunValue::Required | RunValue::Optional if next_is_a_value => index += 1,
+            RunValue::Required | RunValue::Optional => {}
+        }
+    }
+    if unknown.is_empty() && stray.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if !unknown.is_empty() {
+        parts.push(format!("unknown option(s) {unknown:?}"));
+    }
+    if !stray.is_empty() {
+        parts.push(format!("argument(s) that belong to no option {stray:?}"));
+    }
+    Some(format!(
+        "cargo xtask run: {} (run takes only the options listed below; nothing is run)",
+        parts.join(" and ")
+    ))
+}
+
 fn main() -> Result<()> {
     const USAGE: &str = "usage: cargo xtask check [--full | --commit]\n       cargo xtask full [<commit>] | --status | --select   (全検査をメインの作業ツリーの隣の <名前>-full-check で実行する。--select は HEAD の族の選びを出す)\n       cargo xtask flaky\n       cargo xtask run [--panic-test] [--gui] [--gtk] [--gfx-test] [--kvm] [--no-limit] [--manual] [--key-probe] [--keep-disk | --rebuild-disk]\n       cargo xtask run --exception-test <kind>\n       cargo xtask run --critical-test <kind>\n       cargo xtask run --interrupt-test <kind>\n       cargo xtask run --paging-test <kind>\n       cargo xtask run --stack-test <kind>\n       cargo xtask run --task-test <kind>\n       cargo xtask run --ring3-test <kind>\n       cargo xtask run --syscall-test <kind>\n       cargo xtask run --acpi-test <kind>\n       cargo xtask run --acpi-smp-test\n       cargo xtask run --apic-test <kind>\n       cargo xtask run --apic-decode-test\n       cargo xtask run --ioapic-test <kind>\n       cargo xtask run --lapic-timer-test <kind>\n       cargo xtask run --drift-test [MINUTES] [--smp N]
        cargo xtask run --shell-test [--drop-arrows | --drop-esc]\n       cargo xtask run --ansi-test [--sabotage FEATURE]\n       cargo xtask run --zi-test [--sabotage FEATURE]\n       cargo xtask run --view-test [--sabotage FEATURE]
@@ -1962,6 +2112,13 @@ fn main() -> Result<()> {
         bail!("{problem}");
     }
     let args: Vec<String> = env::args().skip(1).collect();
+    // **`run` の知らない引数は、ロックを取る前に断る**（2026-10-03。[`RUN_FLAGS`]）。**以前は黙って捨て、
+    // 既定の起動に化けていた。**
+    if args.first().map(String::as_str) == Some("run") {
+        if let Some(problem) = run_arguments_problem(&args[1..]) {
+            bail!("{problem}\n\n{USAGE}");
+        }
+    }
     // **QEMU を使う入口は、最初にロックを共有で取る**（`check_lock`。2026-09-25。検査の体系の改善の ③）。
     // **実行の途中で断られる形を避けるため、入口で取ってプロセスの終わりまで持つ。** **起動の入口
     // （`launch::spawn`）でも取る**——**入口で取り損ねた経路の裏打ちである。**
@@ -33608,6 +33765,157 @@ mod tests {
             fs_extract_check_for(&["fs-copy-corrupt-tail-test"]),
             "fs extract"
         );
+    }
+
+    /// **`cargo xtask run` は、知らない旗と、どの旗の値でもない位置の引数を名前つきで断る**（2026-10-03）。
+    /// **知っている旗の列は通す**——値が要る旗は直後の 1 語を取り、値が任意の旗は `-` で始まらない語だけを取る。
+    #[test]
+    fn run_refuses_unknown_options_and_stray_arguments_by_name() {
+        let args = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+        // 知らない旗。
+        let problem = run_arguments_problem(&args(&["--help"])).expect("--help is not an option");
+        assert!(
+            problem.contains("unknown option(s) [\"--help\"]"),
+            "{problem}"
+        );
+        // 打ち間違い。
+        let problem = run_arguments_problem(&args(&["--socket-tset", "--sabotage", "x"])).unwrap();
+        assert!(problem.contains("\"--socket-tset\""), "{problem}");
+        // どの旗の値でもない位置の引数。
+        let problem = run_arguments_problem(&args(&["--socket-test", "extra"])).unwrap();
+        assert!(
+            problem.contains("belong to no option [\"extra\"]"),
+            "{problem}"
+        );
+        // 通る列。
+        for ok in [
+            &[
+                "--socket-test",
+                "--sabotage",
+                "socket-recvmsg-takes-fd-first",
+            ][..],
+            &["--keymap-test", "--sabotage"],
+            &["--drift-test", "5", "--smp", "2"],
+            &["--drift-test"],
+            &["--exception-test", "divide-by-zero"],
+            &["--machine-variant", "pc-epyc", "--sabotage", "f"],
+            &[
+                "--page-permissions",
+                "--scene",
+                "heap",
+                "--update-reference",
+            ],
+            &["--smp-ap-test"],
+            &["--calibration-spread", "3"],
+            &[],
+        ] {
+            assert_eq!(run_arguments_problem(&args(ok)), None, "{ok:?}");
+        }
+    }
+
+    /// **`USAGE` と docs の `cargo xtask run …` の行は、全部が受け付けられる**（2026-10-03。断られる行が 0）。
+    /// **表（`RUN_FLAGS`）の旗は、全部が `run` の処理に出てくる**（表だけに残った旗が無い）。
+    #[test]
+    fn every_documented_run_command_is_accepted() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        // `USAGE` の文字列だけを切り出す（ソースのほかの行は、命令の形ではない）。
+        let source = include_str!("main.rs");
+        let usage_start = source.find("const USAGE: &str = \"").unwrap();
+        let usage = &source[usage_start..];
+        let usage = &usage[..usage.find("\";\n").unwrap()];
+        let mut texts: Vec<(String, String)> = vec![("USAGE".into(), usage.into())];
+        let mut stack = vec![root.join("docs"), root.join(".claude")];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "md") {
+                    texts.push((
+                        path.display().to_string(),
+                        fs::read_to_string(&path).unwrap(),
+                    ));
+                }
+            }
+        }
+        for name in ["README.md", "CLAUDE.md"] {
+            texts.push((name.into(), fs::read_to_string(root.join(name)).unwrap()));
+        }
+        let mut refused = Vec::new();
+        let mut accepted = 0usize;
+        for (name, text) in &texts {
+            for line in text.lines() {
+                let mut rest = line;
+                while let Some(at) = rest.find("cargo xtask run ") {
+                    let after = &rest[at + "cargo xtask run ".len()..];
+                    // 引用符の中ならそこまで、無ければ行の終わりまで。`\n` を含む `USAGE` の文字列は `\n` で切る。
+                    let end = after
+                        .find(['`', '"', '）', '(', '（'])
+                        .unwrap_or(after.len());
+                    let command = after[..end].split("\\n").next().unwrap_or("");
+                    rest = &after[end..];
+                    // **旗の形そのものを書いた所（`--<名前>-test`）は命令ではない。** **`--persist-probe` は
+                    // `804a35d` で `--persist-test` に替わった探りで、ADR-0034 がその時点の記録として残している。**
+                    if command.contains("--<") || command.contains("--persist-probe") {
+                        continue;
+                    }
+                    // 書き方の記号（`[` `]` `|`）と、置き場の印（`<kind>`・`FEATURE`・`NAME`・大文字の語）は、
+                    // 値の位置に在るものとして読む。旗の名前そのものだけを確かめる。
+                    // `a | b | c` の `|` の後ろの語は、同じ位置の別の値である（ADR-0018 の例外の種別の並び）。
+                    let mut after_a_bar = false;
+                    let mut tokens: Vec<String> = Vec::new();
+                    for raw in command.split_whitespace() {
+                        let t = raw.trim_matches(|c| c == '[' || c == ']' || c == ',' || c == '。');
+                        if t == "|" {
+                            after_a_bar = true;
+                            continue;
+                        }
+                        if t.is_empty() || t == "…" || t == "..." {
+                            continue;
+                        }
+                        if !t.is_ascii() && !t.starts_with('-') {
+                            break;
+                        }
+                        let is_value = t.starts_with('<')
+                            || t.chars().all(|c| c.is_ascii_uppercase() || c == '_');
+                        if after_a_bar && !t.starts_with('-') {
+                            after_a_bar = false;
+                            continue;
+                        }
+                        after_a_bar = false;
+                        tokens.push(if is_value {
+                            "value".to_string()
+                        } else {
+                            t.to_string()
+                        });
+                    }
+                    match run_arguments_problem(&tokens) {
+                        None => accepted += 1,
+                        Some(problem) => refused.push(format!("{name}: {line:?}: {problem}")),
+                    }
+                }
+            }
+        }
+        eprintln!("{accepted} documented `cargo xtask run` command line(s) were accepted");
+        assert!(accepted > 50, "only {accepted} command line(s) were found");
+        assert!(
+            refused.is_empty(),
+            "{} refused:\n{}",
+            refused.len(),
+            refused.join("\n")
+        );
+        // 表の旗は、全部が `run` の処理に出てくる。
+        let source = include_str!("main.rs");
+        for (flag, _) in RUN_FLAGS {
+            let quoted = format!("\"{flag}\"");
+            assert!(
+                source.matches(&quoted).count() >= 2,
+                "{flag} is only in RUN_FLAGS"
+            );
+        }
     }
 
     /// `/proc/<pid>/status` の `SigIgn:`（実測の形）から SIGXFSZ を読む。
