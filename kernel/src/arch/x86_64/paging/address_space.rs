@@ -105,6 +105,21 @@ pub const fn kernel_top_write_is_refused(index: usize, frozen: bool) -> bool {
     frozen && is_shared_kernel_index(index)
 }
 
+/// 起動の後に、カーネル側の写像を足す・変える書き込みを断るか（純粋な論理。2026-10-03。`ADR-0071` の手順 4 の
+/// 3 つ目の決まり「起動の後は、カーネル側の写像を一切足さない・変えない」）。
+///
+/// **起動の後（`finished`）に、番地の PML4 の添字がカーネル側（256〜511）なら断る。** **ユーザー側の番地は、
+/// 起動の後も各空間が自分で足し引きする**（`brk`・`mmap`）。**`allowed_probe` は、試しの feature
+/// （`smp-tlb-shootdown-probe`）が起動の後に外す探りの 1 ページだけを許す印である**——その feature のビルドで、
+/// 番地が探りのページに一致するときだけ真になる（`ActivePageTable` が決める）。
+pub const fn kernel_mapping_write_is_refused(
+    pml4_index: usize,
+    finished: bool,
+    allowed_probe: bool,
+) -> bool {
+    finished && is_shared_kernel_index(pml4_index) && !allowed_probe
+}
+
 /// カーネル側の PML4 の項目の指紋（純粋な論理）。**FNV-1a（64 ビット）で、添字と値を順に混ぜる。**
 /// **CPU が立てるアクセス済み（A、5 番）とダーティ（D、6 番）のビットは除く**——**表を辿るだけで立つので、
 /// 項目の変更ではない。** **最下位のビットを立てて返すので 0 にならない**（0 は「まだ採っていない」）。
@@ -640,6 +655,32 @@ mod tests {
             assert!(
                 !kernel_top_write_is_refused(index, true),
                 "user index {index}"
+            );
+        }
+    }
+
+    /// **起動の後は、カーネル側の写像を足す・変える書き込みを断る。起動の間と、ユーザー側の番地は断らない。
+    /// 探りの 1 ページの印が立っているときだけ通す**（2026-10-03。3 つ目の決まり）。
+    #[test]
+    fn a_kernel_mapping_write_is_refused_only_after_boot_unless_it_is_the_probe() {
+        for index in [KERNEL_PML4_FIRST_INDEX, 259, 260, PML4_ENTRY_COUNT - 1] {
+            assert!(
+                !kernel_mapping_write_is_refused(index, false, false),
+                "{index} during boot"
+            );
+            assert!(
+                kernel_mapping_write_is_refused(index, true, false),
+                "{index} after boot"
+            );
+            assert!(
+                !kernel_mapping_write_is_refused(index, true, true),
+                "{index} probe"
+            );
+        }
+        for index in [0, 1, KERNEL_PML4_FIRST_INDEX - 1] {
+            assert!(
+                !kernel_mapping_write_is_refused(index, true, false),
+                "user {index}"
             );
         }
     }

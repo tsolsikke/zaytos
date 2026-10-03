@@ -108,6 +108,37 @@ impl ActivePageTable {
         }
     }
 
+    /// **起動の後に、カーネル側の写像を足す・変えようとしていれば断る**（2026-10-03。`ADR-0071` の手順 4 の
+    /// 3 つ目の決まり。書く入口 5 つ〔[`Self::map_4kib`]・[`Self::unmap_4kib`]・[`Self::split_huge_page`]・
+    /// `set_huge_page_uncached`・`mark_leaf_execute_disable`〕の先頭で呼ぶ。項目を読む前である）。
+    ///
+    /// **起動の後かは共通の側の 1 つの目印（`crate::boot::finished`）で見る**（ほかの 2 つの「起動の後はしない」
+    /// 決まりと同じ）。**ユーザー側の番地は断らない**（`brk`・`mmap` は起動の後に各空間が足し引きする）。
+    /// **試しの feature `smp-tlb-shootdown-probe` のビルドでは、その探りのページ（`crate::smp::shootdown_probe::virt`。
+    /// 起動の後に AP の TLB を落とすために外す 1 ページ）だけを通す。** **破壊テスト `kernel-top-write-unguarded-test`
+    /// は、この守りも外す**（守りを全部外して、突き合わせが実際に書かれた項目を見つけることを見る形）。
+    ///
+    /// **決まりは「一切足さない・変えない」である。** スレッドに対応する段階で、スレッドごとのカーネルのスタックを
+    /// 起動の後に用意する必要が出たら当たる（推測）。そのときは、決まりを外すのではなく、決めた窓の中に決めた権限で
+    /// 新しく足すことだけを許す入口を 1 つ作る（`ADR-0071` の 2026-10-03 の追記）。
+    fn refuse_kernel_mapping_change_after_boot(virt: VirtAddr) -> Result<(), MapUpdateError> {
+        if cfg!(feature = "kernel-top-write-unguarded-test") {
+            return Ok(());
+        }
+        #[cfg(feature = "smp-tlb-shootdown-probe")]
+        let allowed_probe = virt.as_u64() == crate::smp::shootdown_probe::virt();
+        #[cfg(not(feature = "smp-tlb-shootdown-probe"))]
+        let allowed_probe = false;
+        if crate::arch::x86_64::paging::address_space::kernel_mapping_write_is_refused(
+            entry::pml4_index(virt),
+            crate::boot::finished(),
+            allowed_probe,
+        ) {
+            return Err(MapUpdateError::KernelMappingFrozen);
+        }
+        Ok(())
+    }
+
     pub const fn root(&self) -> PhysAddr {
         self.pml4_phys
     }
@@ -221,6 +252,10 @@ pub enum MapUpdateError {
     /// ユーザーから届いて、書けて、実行もできる権限でマップしようとした（2026-10-03）。
     /// **書けるページは実行できない、という決まりで写すので、断る。** 項目は 1 つも書かない。
     WritableAndExecutable,
+    /// 起動の後に、カーネル側の写像を足す・変えようとした（2026-10-03。`ADR-0071` の手順 4 の 3 つ目の決まり）。
+    /// **起動の後は、カーネル側の写像を一切足さない・変えない。** 項目は 1 つも書かない（表も取らない）。
+    /// **試しの feature `smp-tlb-shootdown-probe` が外す探りの 1 ページだけは、その feature のビルドで通す。**
+    KernelMappingFrozen,
 }
 
 /// [`ActivePageTable::unmap_4kib`] が外した葉（2026-10-02）。
@@ -331,6 +366,7 @@ impl ActivePageTable {
         virt: VirtAddr,
         frames: &mut FrameAllocator<CAP>,
     ) -> Result<SplitOutcome, MapUpdateError> {
+        Self::refuse_kernel_mapping_change_after_boot(virt)?;
         // 操作全体を割り込み禁止で囲む。M5-d でタイマ割り込みからページ
         // テーブルを触る経路が生まれるため、必要になってから足すのではなく
         // 最初から入れておく。
@@ -432,6 +468,7 @@ impl ActivePageTable {
     /// 生のビットを渡していた（`add_huge_page_flags`）。
     #[cfg(feature = "paging-test")]
     pub unsafe fn set_huge_page_uncached(&mut self, virt: VirtAddr) -> Result<u64, MapUpdateError> {
+        Self::refuse_kernel_mapping_change_after_boot(virt)?;
         let _guard = InterruptGuard::enter();
 
         let (pd, pd_index) = self.locate_pd(virt)?;
@@ -464,6 +501,7 @@ impl ActivePageTable {
         &mut self,
         virt: VirtAddr,
     ) -> Result<(), MapUpdateError> {
+        Self::refuse_kernel_mapping_change_after_boot(virt)?;
         let _guard = InterruptGuard::enter();
 
         let (pd, pd_index) = self.locate_pd(virt)?;
@@ -510,6 +548,7 @@ impl ActivePageTable {
     /// [`Self::split_huge_page`] と同じ。加えて、**アンマップした領域へ
     /// 以後アクセスしないことは呼び出し側の責任**である。触れば #PF になる。
     pub unsafe fn unmap_4kib(&mut self, virt: VirtAddr) -> Result<UnmappedPage, MapUpdateError> {
+        Self::refuse_kernel_mapping_change_after_boot(virt)?;
         let _guard = InterruptGuard::enter();
 
         let (pd, pd_index) = self.locate_pd(virt)?;
@@ -616,6 +655,10 @@ impl ActivePageTable {
         permissions: PagePermissions,
         frames: &mut FrameAllocator<CAP>,
     ) -> Result<(), MapUpdateError> {
+        // **起動の後は、カーネル側の写像を足さない**（2026-10-03。3 つ目の決まり）。途中の項目の表を取る前である。
+        // **カーネル側の PML4 の項目を作る形は、`ensure_child` の守りも持っている**（起動の後はここが先に断るので、
+        // あちらは 2 枚目の守りになる）。
+        Self::refuse_kernel_mapping_change_after_boot(virt)?;
         // **ユーザーから届いて、書けて、実行もできる権限は断る**（2026-10-03）。途中の項目の表を取る前である。
         // 破壊テスト (user-map-allows-writable-executable): 断らない。
         if permissions.user()

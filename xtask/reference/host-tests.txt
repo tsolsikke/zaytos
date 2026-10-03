@@ -331,6 +331,7 @@ kernel::arch::x86_64::idt::tests::the_limit_is_the_size_minus_one
 kernel::arch::x86_64::idt::tests::the_stub_stride_matches_the_alignment_used_in_assembly
 kernel::arch::x86_64::idt::tests::the_tick_displays_print_the_words_the_timer_lines_used
 kernel::arch::x86_64::paging::address_space::tests::a_kernel_half_entry_is_refused_only_after_boot
+kernel::arch::x86_64::paging::address_space::tests::a_kernel_mapping_write_is_refused_only_after_boot_unless_it_is_the_probe
 kernel::arch::x86_64::paging::address_space::tests::indices_past_the_table_are_not_shared
 kernel::arch::x86_64::paging::address_space::tests::the_kernel_top_digest_changes_with_any_entry_and_is_never_zero
 kernel::arch::x86_64::paging::address_space::tests::the_lower_half_is_not_shared

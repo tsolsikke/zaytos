@@ -24892,7 +24892,12 @@ const COMMON_ITEMS_FOR_HOMES: &[CommonItemsForHomes] = &[
     CommonItemsForHomes {
         module: "kernel::boot",
         items: &["finished"],
-        reason: "起動の終わりの目印。「起動の後はしない」決まり（ページテーブルの `ensure_child` の守り）が読む",
+        reason: "起動の終わりの目印。「起動の後はしない」決まり（ページテーブルの書く入口の守り）が読む",
+    },
+    CommonItemsForHomes {
+        module: "kernel::smp::shootdown_probe",
+        items: &["virt"],
+        reason: "試しの feature のビルドで、起動の後に外してよい探りの 1 ページの番地（3 つ目の決まりの唯一の例外）",
     },
     CommonItemsForHomes {
         module: "kernel::task",

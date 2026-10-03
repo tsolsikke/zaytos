@@ -2160,6 +2160,18 @@ fn write_a_kernel_half_entry_after_boot(logger: &mut Logger<Serial>) {
         ActivePageTable::current(common::addr::direct_map())
             .map_4kib(virt, frame, attributes, allocator)
     };
+    // **3 つ目の決まり（起動の後はカーネル側の写像を足さない。2026-10-03）が、`ensure_child` の守りより先に、
+    // 項目を 1 つも書かずに断る。** **守りを外した形（`kernel-top-write-unguarded-test`）では両方が外れ、書き込みが
+    // 通って戻る**（次の `AddressSpace::new` の突き合わせが見つける）。
+    if result == Err(kernel::arch::x86_64::paging::active::MapUpdateError::KernelMappingFrozen) {
+        let _ = allocator.deallocate_frame(frame);
+        frame_allocator::give_back(allocator);
+        logger.info(format_args!(
+            "sabotage: the kernel-half write was refused before any entry was written \
+             (KernelMappingFrozen); halting"
+        ));
+        cpu::halt_forever();
+    }
     logger.error(format_args!(
         "sabotage: the write went through ({result:?}); the write guard did not stop it"
     ));
